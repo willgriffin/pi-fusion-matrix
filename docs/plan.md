@@ -123,6 +123,17 @@ export type DecideSpec =
   | { state: string; options: { id: string; description: string }[]; question: string; backend?: string }
   | { state: string; questions: Record<string, TsQuestion>; backend?: string };
 
+/** A routing option: a description the model reads, and the fusion to run when this option wins. */
+export type RouteCriterion = string | { description?: string; then?: string };
+
+export type RouteSpec = {
+  instructions: string;
+  criteria: Record<string, RouteCriterion>;   // 2..16 option ids; at least one carries `then`
+  state?: string;                             // default "{{prompt}}"
+  backend?: string;
+  minConfidence?: number;                     // default 0.5; below this the run does not route
+};
+
 /** A slot entry is an alias id, an object pinning/reordering that alias's providers, or a decision. */
 export type SlotCandidate =
   | string
@@ -140,10 +151,12 @@ export type FusionSpec = {
   /** Post-synthesis checks. Report-only: a negative or low-confidence answer warns, never rewrites. */
   verify?: DecideSpec[];
   /**
-   * Pre-run routing. Cheap direction only: when the answer matches, run `then` instead of this fusion.
-   * A `then` fusion must not declare `route` itself (one hop), and the choice is reported either way.
+   * Pre-run routing. The action to take lives with the option it applies to: a `criteria` entry may
+   * carry `then`, naming the fusion to run instead of this one. Options without `then` do not route,
+   * and several options may route to different fusions. A target must not declare `route` itself
+   * (one hop). Routing never happens silently: the answer and its confidence are reported.
    */
-  route?: { when: DecideSpec; then: string; choiceIs?: string; noulBelow?: number };
+  route?: RouteSpec;
 };
 
 export type BackendSpec =
@@ -201,8 +214,12 @@ Validation runs on every load and throws `pi-fusion-matrix: <problem>`; never fa
 - a decision naming a `backend` absent from `backends` → error; `decide.defaultBackend` absent → error.
 - `questions` on a `kind: "semif"` backend → error, naming the option-form alternative, because the
   SemIf row schema carries one question and typed batching does not exist there.
-- `route.then` naming an unknown fusion, or a fusion that itself declares `route` → error.
-- `route` with neither `choiceIs` nor `noulBelow` → error, since no answer could match.
+- `route.criteria` with fewer than two options, or with no entry carrying `then` → error, because
+  such a route can never fire.
+- a `then` naming an unknown fusion, this fusion, or a fusion that itself declares `route` → error.
+- `route.minConfidence` outside 0..1 → error.
+- a `route` resolving to a `kind: "semif"` backend → error: `routing requires a backend that reports
+  confidence; "semif" does not`, because an uncalibrated probability must not steer cost.
 
 Provider names are resolved lazily, not validated at load: `resolve` reports
 `native provider "go" is not registered (edit ~/.pi/agent/models.json)` when a run reaches that
@@ -320,20 +337,13 @@ piece of configuration registers, and a stale name must fail at use, not at star
     "review-routed": {
       "mode": "5x",
       "route": {
-        "when": { "state": "{{prompt}}",
-                  "questions": {
-                    "complexity": {
-                      "type": "choice",
-                      "instructions": "How much deliberation does this request need?",
-                      "criteria": {
-                        "trivial": "A direct factual or mechanical question",
-                        "single_concern": "One design decision with limited blast radius",
-                        "multi_concern": "Several interacting decisions or cross-cutting change",
-                        "architectural": "System-level tradeoffs with long-lived consequences"
-                      }
-                    } } },
-        "choiceIs": "trivial",
-        "then": "flash"
+        "instructions": "How much deliberation does this request need?",
+        "criteria": {
+          "trivial": { "description": "A direct factual or mechanical question", "then": "flash" },
+          "single_concern": { "description": "One design decision with limited blast radius", "then": "flash" },
+          "multi_concern": "Several interacting decisions or cross-cutting change",
+          "architectural": "System-level tradeoffs with long-lived consequences"
+        }
       },
       "slots": {
         "technical_expert": ["kimi", "qwen-max"],
@@ -606,15 +616,17 @@ pi.registerCommand("fusion-matrix", { description: "List profiles, accounts, ali
 Tool `details.substitutions` and `details.slotErrors` are always present (empty arrays included): a
 silently degraded run is a wrong answer and must be visible.
 
-**`route` runs before the first slot** (Step 3 step 1): `decide(fusion.route.when, {prompt})`; if the
-answer's `choice === route.choiceIs` or `noul < route.noulBelow`, run `config.fusions[route.then]`
-instead of this fusion. Both the decision and the substitution are reported
-(` ├─ ↪ routed to flash (complexity=trivial, confidence 0.91)\n`) and recorded in
-`details.routing`. Routing requires a confidence-bearing backend: a `route.when` resolving to a
-`kind: "semif"` backend is a load error, because an uncalibrated probability must not steer cost.
-`route` is cheap-direction by construction: the loader also rejects a `then` fusion whose slot
-expansion contains any alias not present in this fusion's, which keeps a route from silently
-upgrading a `flash` run into a `deep` one.
+**`route` runs before the first slot** (Step 3 step 1). The clause is one choice question built from
+`route.instructions` and the option ids of `route.criteria` (descriptions only — `then` is this
+extension's vocabulary and is never sent). `state` defaults to `{{prompt}}`. A `then` on the winning
+option names the fusion to run instead of this one; an option without `then`, an option id the map
+does not contain, or a `confidence` below `route.minConfidence` (default 0.5) all mean the run proceeds
+as this fusion. The decision and the routing are reported
+(` ├─ ↪ routed to flash (complexity=trivial, confidence 0.91)\n`) and recorded in `details.routing`,
+including when the confidence gate declines to route.
+Routing may target a more expensive fusion — escalation on `"architectural"` is a normal use — so
+there is no cost-direction rule. The guardrails are structural: one hop (a target may not declare
+`route`), no self-route, and full reporting of the answer, its probabilities, and its confidence.
 
 **`verify` runs after synthesis** (Step 3 step 6) and is report-only: each `DecideSpec` is evaluated
 with `vars = { prompt, panel, judge, synthesis, cwd }`, and results are recorded in
@@ -688,7 +700,7 @@ and `Authorization: Bearer <process.env[apiKeyEnv]>` when `apiKeyEnv` is set. An
 `type: "probabilities"` — SemIf has **no confidence**, and its own output says
 `"probability_status": "uncalibrated as decision confidence"`, which is exactly why no gate may
 threshold a SemIf answer (Step 3 routing requires a backend that returns `confidence`; the loader
-rejects a `route.when` on a SemIf backend with
+rejects a `route` resolving to a SemIf backend with
 `routing requires a backend that reports confidence; "semif" does not`).
 
 `tools/semif-server/` is the operator-run scoring service, unchanged in role: `POST /score`,
@@ -887,11 +899,13 @@ pi config repo symlink from Step 1 in place.
 9. **Conservative invariants** — (a) temporarily set `verify[0]` to a question the synthesis cannot
    satisfy (for example `noul` "the answer contains the exact phrase BANANA") and confirm the run
    still completes with one `⚠️ verify:` delta and an unchanged synthesis — verification must never
-   rewrite or block; (b) point `route.when` at a `semif` backend and confirm the load error
+   rewrite or block; (b) point `route` at a `semif` backend and confirm the load error
    `routing requires a backend that reports confidence; "semif" does not`; (c) run
-   `fusion-review-routed` with `choiceIs: "trivial"` on a genuinely complex prompt and confirm it does
-   *not* route away (the decision reports a non-trivial choice), then on `"Reply with exactly: ZQX1"`
-   and confirm it does, with the `↪ routed` line and `details.routing` both present.
+   `fusion-review-routed` on a genuinely complex prompt and confirm it does *not* route away (the
+   decision reports a non-trivial option), then on `"Reply with exactly: ZQX1"` and confirm it does,
+   with the ` routed` line and `details.routing` both present; (d) set `route.minConfidence` to 1.0
+   and confirm the run proceeds as `fusion-review-routed` with `details.routing` recording the
+   declined route — the gate must be able to decline, and must say so.
 10. **Oversized state** — put a ~150 KB `{{panel}}` through `fusion-review-check` against the live
     backend: the run must emit one `⚠️ decision state truncated` delta, still complete, and report the
     decision. A `4xx` from the backend instead means truncation did not engage.
@@ -941,9 +955,9 @@ pi config repo symlink from Step 1 in place.
   the header is required. If a rotating id is needed instead, that is the one place a small change is
   warranted — set it per session from `session_start`.
 - **Decisions never replace a pipeline call.** The conservative contract: `verify` is report-only and
-  `route` may only downgrade. Do not add a fusion that delegates the judge or synthesis to a decision
-  backend without a separate, measured decision — that is the aggressive shape and it trades answer
-  quality for quota.
+  `route` only selects a whole fusion (never a judge or synthesis model). Do not add a fusion that
+  delegates the judge or synthesis to a decision backend without a separate, measured decision — that
+  is the aggressive shape and it trades answer quality for quota.
 - **TypeSafe key and model pinning.** `TYPESAFE_API_KEY` is not present in this environment as of
   2026-09-18; the operator exports it (or adds an `authJson`-style reference later). `backends.typesafe.model`
   pins `jev-1.13.0` rather than `jev-latest`, because a `confidence` threshold tuned against one

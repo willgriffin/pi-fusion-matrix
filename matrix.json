@@ -125,23 +125,13 @@
     "review-routed": {
       "mode": "5x",
       "route": {
-        "when": {
-          "state": "{{prompt}}",
-          "questions": {
-            "complexity": {
-              "type": "choice",
-              "instructions": "How much deliberation does this request need?",
-              "criteria": {
-                "trivial": "A direct factual or mechanical question",
-                "single_concern": "One design decision with limited blast radius",
-                "multi_concern": "Several interacting decisions or cross-cutting change",
-                "architectural": "System-level tradeoffs with long-lived consequences"
-              }
-            }
-          }
-        },
-        "choiceIs": "trivial",
-        "then": "flash"
+        "instructions": "How much deliberation does this request need?",
+        "criteria": {
+          "trivial": { "description": "A direct factual or mechanical question", "then": "flash" },
+          "single_concern": { "description": "One design decision with limited blast radius", "then": "flash" },
+          "multi_concern": "Several interacting decisions or cross-cutting change",
+          "architectural": "System-level tradeoffs with long-lived consequences"
+        }
       },
       "slots": {
         "technical_expert": ["kimi", "qwen-max"],

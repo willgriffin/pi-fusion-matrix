@@ -29,8 +29,9 @@ is a bug in one of them.
 - **No silent degradation.** Every substitution, skipped slot, truncated decision state, or failed
   verification is reported in the stream and in tool `details`. A run that degraded quietly is a
   wrong answer.
-- **Decisions stay conservative.** `verify` is report-only; `route` may only select a cheaper fusion;
-  a backend that reports no `confidence` (SemIf) may not gate anything.
+- **Decisions stay conservative.** `verify` is report-only; `route` selects a whole fusion and never a
+  judge or synthesis model, and one that is unsure must decline rather than guess; a backend that
+  reports no `confidence` (SemIf) may not gate anything.
 - **Aliases are version-free.** Vendor model ids appear only in fixtures and docs, never in `fusions`
   or `slots`.
 
