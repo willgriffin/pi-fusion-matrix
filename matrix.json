@@ -74,17 +74,196 @@
       "reasoning": true
     }
   },
+  "personas": {
+    "technical": {
+      "prompt": "prompts/technical.md",
+      "temperature": 0.5,
+      "thinking": "medium"
+    },
+    "skeptic": {
+      "prompt": "prompts/skeptic.md",
+      "temperature": 0.8
+    },
+    "systems": {
+      "prompt": "prompts/systems.md",
+      "temperature": 0.6
+    },
+    "judge": {
+      "prompt": "prompts/judge.md",
+      "temperature": 0.2,
+      "output": "json"
+    },
+    "synth": {
+      "prompt": "prompts/synth.md",
+      "temperature": 0.5
+    },
+    "synth-lean": {
+      "prompt": "prompts/synth-lean.md",
+      "temperature": 0.5,
+      "thinking": "medium"
+    },
+    "merge": {
+      "prompt": "prompts/merge.md",
+      "temperature": 0.4
+    }
+  },
+  "modes": {
+    "single": {
+      "stages": [
+        {
+          "single": "technical",
+          "input": "prompt"
+        }
+      ]
+    },
+    "pair": {
+      "stages": [
+        {
+          "parallel": [
+            "technical",
+            "skeptic"
+          ],
+          "input": "prompt"
+        },
+        {
+          "single": "merge",
+          "input": "panel"
+        }
+      ]
+    },
+    "lean": {
+      "stages": [
+        {
+          "parallel": [
+            "technical",
+            "skeptic"
+          ],
+          "input": "prompt"
+        },
+        {
+          "single": "synth-lean",
+          "input": "panel"
+        }
+      ]
+    },
+    "committee": {
+      "stages": [
+        {
+          "parallel": [
+            "technical",
+            "skeptic",
+            "systems"
+          ],
+          "input": "prompt"
+        },
+        {
+          "single": "judge",
+          "input": "panel"
+        },
+        {
+          "single": "synth",
+          "input": "panel+judge"
+        }
+      ]
+    },
+    "committee-merged": {
+      "stages": [
+        {
+          "parallel": [
+            "technical",
+            "skeptic",
+            "systems"
+          ],
+          "input": "prompt"
+        },
+        {
+          "single": "judge",
+          "input": "panel",
+          "alsoSynthesize": true
+        }
+      ]
+    },
+    "opinion": {
+      "stages": [
+        {
+          "parallel": [
+            "technical",
+            "skeptic",
+            "systems"
+          ],
+          "input": "prompt"
+        },
+        {
+          "render": "panel"
+        }
+      ]
+    },
+    "debate": {
+      "stages": [
+        {
+          "parallel": [
+            "technical",
+            "skeptic",
+            "systems"
+          ],
+          "input": "prompt",
+          "rounds": 3,
+          "roundInput": "peers"
+        },
+        {
+          "render": "panel"
+        }
+      ]
+    },
+    "committee-cascaded": {
+      "stages": [
+        {
+          "parallel": [
+            "technical",
+            "skeptic",
+            "systems"
+          ],
+          "input": "prompt"
+        },
+        {
+          "decide": {
+            "instructions": "Do the experts agree on a single core recommendation?",
+            "criteria": {
+              "agrees": "They converge on the same recommendation.",
+              "partial": "They overlap but differ on a substantive point.",
+              "disagrees": "They recommend different things."
+            }
+          },
+          "input": "panel",
+          "sufficientWhen": {
+            "choiceIs": [
+              "agrees"
+            ],
+            "minConfidence": 0.85
+          }
+        },
+        {
+          "single": "judge",
+          "input": "panel"
+        },
+        {
+          "single": "synth",
+          "input": "panel+judge"
+        }
+      ]
+    }
+  },
   "fusions": {
     "standard": {
-      "mode": "3x",
-      "slots": {
-        "technical_expert": [
+      "mode": "lean",
+      "candidates": {
+        "technical": [
           "glm"
         ],
-        "devils_advocate": [
+        "skeptic": [
           "glm"
         ],
-        "synthesis": [
+        "synth-lean": [
           "glm"
         ]
       },
@@ -93,143 +272,182 @@
       }
     },
     "quick": {
-      "mode": "3x",
-      "slots": {
-        "technical_expert": [
+      "mode": "lean",
+      "candidates": {
+        "technical": [
           "glm-flash"
         ],
-        "devils_advocate": [
+        "skeptic": [
           "glm-flash"
         ],
-        "synthesis": [
+        "synth-lean": [
           "glm"
         ]
       },
       "fileAgent": {
         "alias": "deepseek-flash"
       }
+    },
+    "solo": {
+      "mode": "single",
+      "candidates": {
+        "technical": [
+          "glm"
+        ]
+      },
+      "fileAgent": false
+    },
+    "workhorse": {
+      "mode": "pair",
+      "candidates": {
+        "technical": [
+          "deepseek-flash"
+        ],
+        "skeptic": [
+          "glm-flash"
+        ],
+        "merge": [
+          "glm"
+        ]
+      },
+      "fileAgent": {
+        "alias": "deepseek-flash"
+      }
+    },
+    "sota": {
+      "mode": "pair",
+      "candidates": {
+        "technical": [
+          "kimi"
+        ],
+        "skeptic": [
+          "deepseek-pro"
+        ],
+        "merge": [
+          "gpt"
+        ]
+      },
+      "fileAgent": false
     },
     "deep": {
-      "mode": "5x",
-      "slots": {
-        "technical_expert": [
+      "mode": "committee",
+      "candidates": {
+        "technical": [
           "kimi",
           "qwen-max"
         ],
-        "devils_advocate": [
+        "skeptic": [
           "deepseek-pro"
         ],
-        "systems_thinker": [
+        "systems": [
           "glm"
         ],
         "judge": [
           "deepseek-pro"
         ],
-        "synthesis": [
+        "synth": [
           "kimi",
           "qwen-max"
         ]
+      },
+      "thinking": {
+        "judge": "high"
       },
       "fileAgent": {
         "alias": "deepseek-flash"
       }
     },
+    "brief": {
+      "mode": "committee-merged",
+      "candidates": {
+        "technical": [
+          "kimi"
+        ],
+        "skeptic": [
+          "deepseek-pro"
+        ],
+        "systems": [
+          "glm"
+        ],
+        "judge": [
+          "deepseek-pro"
+        ]
+      },
+      "fileAgent": false
+    },
+    "opinions": {
+      "mode": "opinion",
+      "candidates": {
+        "technical": [
+          "kimi"
+        ],
+        "skeptic": [
+          "deepseek-pro"
+        ],
+        "systems": [
+          "glm"
+        ]
+      },
+      "fileAgent": false
+    },
+    "debate": {
+      "mode": "debate",
+      "candidates": {
+        "technical": [
+          "kimi"
+        ],
+        "skeptic": [
+          "deepseek-pro"
+        ],
+        "systems": [
+          "glm"
+        ]
+      },
+      "fileAgent": false
+    },
     "review": {
-      "mode": "5x",
-      "slots": {
-        "technical_expert": [
+      "mode": "committee",
+      "prompts": {
+        "synth": "You are reviewing a proposed change. Report defects with severity, file:line anchors, and reproduction steps. Do not emit revised code. Under 1,500 tokens."
+      },
+      "candidates": {
+        "technical": [
           "kimi",
           "qwen-max"
         ],
-        "devils_advocate": [
+        "skeptic": [
           "deepseek-pro"
         ],
-        "systems_thinker": [
+        "systems": [
           "glm"
         ],
         "judge": [
           "deepseek-pro"
         ],
-        "synthesis": [
+        "synth": [
           "kimi",
           "qwen-max"
-        ]
-      },
-      "fileAgent": false,
-      "prompts": {
-        "synthesis": "You are reviewing a proposed change. Report defects with severity, file:line anchors, and reproduction steps. Do not emit revised code. Under 1,500 tokens."
-      }
-    },
-    "openai": {
-      "mode": "5x",
-      "slots": {
-        "technical_expert": [
-          "gpt"
-        ],
-        "devils_advocate": [
-          "gpt"
-        ],
-        "systems_thinker": [
-          "gpt"
-        ],
-        "judge": [
-          "gpt"
-        ],
-        "synthesis": [
-          "gpt",
-          {
-            "alias": "kimi",
-            "providers": [
-              "go"
-            ]
-          }
         ]
       },
       "fileAgent": false
     },
     "review-check": {
-      "mode": "5x",
-      "slots": {
-        "technical_expert": [
+      "mode": "committee-cascaded",
+      "candidates": {
+        "technical": [
           "kimi",
           "qwen-max"
         ],
-        "devils_advocate": [
+        "skeptic": [
           "deepseek-pro"
         ],
-        "systems_thinker": [
+        "systems": [
           "glm"
         ],
         "judge": [
-          {
-            "decide": {
-              "state": "{{panel}}",
-              "question": "Do the experts agree on a single core recommendation?",
-              "options": [
-                {
-                  "id": "agrees",
-                  "description": "They converge on the same recommendation."
-                },
-                {
-                  "id": "partial",
-                  "description": "They overlap but differ on a substantive point."
-                },
-                {
-                  "id": "disagrees",
-                  "description": "They recommend different things."
-                }
-              ]
-            },
-            "sufficientWhen": {
-              "choiceIs": [
-                "agrees"
-              ],
-              "minConfidence": 0.85
-            }
-          },
           "deepseek-pro"
         ],
-        "synthesis": [
+        "synth": [
           "kimi",
           "qwen-max"
         ]
@@ -269,7 +487,7 @@
       ]
     },
     "review-routed": {
-      "mode": "5x",
+      "mode": "committee",
       "route": {
         "instructions": "How much deliberation does this request need?",
         "criteria": {
@@ -285,21 +503,21 @@
           "architectural": "System-level tradeoffs with long-lived consequences"
         }
       },
-      "slots": {
-        "technical_expert": [
+      "candidates": {
+        "technical": [
           "kimi",
           "qwen-max"
         ],
-        "devils_advocate": [
+        "skeptic": [
           "deepseek-pro"
         ],
-        "systems_thinker": [
+        "systems": [
           "glm"
         ],
         "judge": [
           "deepseek-pro"
         ],
-        "synthesis": [
+        "synth": [
           "kimi",
           "qwen-max"
         ]

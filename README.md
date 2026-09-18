@@ -9,10 +9,14 @@ Status: planned. The implementation spec is [`docs/plan.md`](docs/plan.md); work
 
 ## What it does
 
-- **Fusions** — a named pipeline (`3x` = two experts + synthesizer, `5x` = panel + judge + synthesis)
-  registered as models under the `fusion-matrix` provider. The fusion key *is* the model id, so
-  `"deep": {…}` in `matrix.json` gives you `fusion-matrix/deep`; name them whatever you like and they
-  appear in `/model` and `--model` with no code change.
+- **Shapes are config.** A `mode` is a stage list — `pair` (two experts + a merge), `lean` (two + a
+  synthesizer that absorbs the judge), `committee` (three + judge + synthesis), `committee-merged`
+  (four calls instead of five), `opinion` (fan out, no merge), `debate` (three rounds against peers'
+  opinions), `single`, `committee-cascaded`. Adding one is a config edit.
+- **Seats are config too.** A `persona` is what a seat is told and how it samples — prompt, temperature,
+  thinking level. Persona prompts live in `prompts/*.md`, so changing what an expert is told is a text
+  edit. A fusion binds a mode to a roster: `"deep": { "mode": "committee", "candidates": {…} }` gives you
+  `fusion-matrix/deep` in `/model` and `--model`, with its own model chain per seat.
 - **Two fallback layers** — inside an alias, providers are tried in order (same model, different
   billing route: quality-preserving); across a slot, aliases are tried in order (different model:
   reported as a substitution).
@@ -33,6 +37,8 @@ Status: planned. The implementation spec is [`docs/plan.md`](docs/plan.md); work
   `/login`, `auth.json`). This extension never resolves a secret and never constructs a base URL.
 - It does not import or require `@quarkos/pi-fusion`. That project's pipeline behavior is a reference
   the spec re-derives; see "Reference-only" in `docs/plan.md`.
+- It does not run stages that write to disk, iterate until a gate turns green, or schedule a task DAG.
+  A seat is one model call; `verify` gates run once and report. See the boundary note in `docs/plan.md`.
 
 ## Install
 

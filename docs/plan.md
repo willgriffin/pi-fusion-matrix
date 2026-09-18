@@ -6,26 +6,31 @@
 as the reference implementation) hardcodes one
 provider per fusion: `applyProfile` sets `config.provider` and a single
 `providers[provider].defaultModels` map of five bare model ids, and `lib/api.js` builds one
-`ApiClient` with one baseUrl and one key. That cannot express what is needed: a fusion whose five
-slots each have ordered fallback candidates, aliases that survive vendor version bumps, and a local
-decision oracle (SemIf) as a slot.
+`ApiClient` with one baseUrl and one key. Its shape is also fixed in code — `mode` selects one of two
+hard-coded pipelines — so a different arrangement needs a different build. Neither can express what is
+needed: named pipeline shapes, seats with ordered fallback candidates, aliases that survive vendor
+version bumps, and decision backends inside the pipeline.
 
 Build a new extension `pi-fusion-matrix` in its own repo that owns fusion resolution only. Providers,
 endpoints, and credentials stay pi's job in `~/.pi/agent/models.json` (or an extension-registered
 provider): the extension never resolves a secret, never owns a baseUrl, and leans on pi for auth,
-caching, and telemetry. It resolves aliases to *native* provider/model pairs, executes each slot
+caching, and telemetry. It resolves aliases to *native* provider/model pairs, executes each seat
 through pi's own `streamSimple`, and falls back provider-by-provider inside an alias and
-model-by-model across a slot's entries, with every substitution reported. The existing `pi-fusion`
+model-by-model across a seat's candidate entries, with every substitution reported. Pipeline shapes
+(`modes`) and seats (`personas`) are configuration, so a cheap two-model pair and a five-call
+committee are two stage lists, not two code paths. The existing `pi-fusion`
 fork stays installed and untouched, and is read as a *reference* for behaviors re-derived here (Step 6);
 nothing imports it at runtime.
 
-Required outcomes: (1) fusions of five slots, each an ordered candidate list, degraded only as
-configured; (2) version-free aliases so a vendor model bump edits one line and no fusion; (3) a
-pluggable decision backend used as a slot element, a post-synthesis check, or a routing gate —
-TypeSafe (`https://api.typesafe.ai/v1/systemone`, calibrated `confidence`, no local service) as the
-default on this machine, SemIf as the local zero-marginal-cost alternative; (4) every substitution
-observable in the transcript and in tool details; (5) credentials and endpoints remain entirely
-pi-owned.
+Required outcomes: (1) pipeline shapes defined in config — a stage list per mode, seats defined once
+as personas and filled by ordered candidate chains — including the two-model pair heart of one
+reference harness and the committee shape of the other; (2) version-free aliases so a vendor model
+bump edits one field and no fusion; (3) a pluggable decision backend usable as a pipeline stage (a
+question, a scored fan-out, a cascade that escalates when its answer is not actionable), a
+post-synthesis check, or a routing gate — TypeSafe (`https://api.typesafe.ai/v1/systemone`, calibrated
+`confidence`, no local service) as the default here, SemIf as the local zero-marginal-cost
+alternative; (4) every substitution, decision, and cascade observable in the transcript and in tool
+details; (5) credentials and endpoints remain entirely pi-owned.
 
 Decisions run conservatively: they never replace a frontier pipeline call. They only (a) verify a
 degraded or substituted slot's output and report it, and (b) select a cheaper fusion when confident.
@@ -47,7 +52,15 @@ extensions/pi-fusion-matrix/
   resolve.ts            # alias → native provider/model pairs; slot expansion
   run.ts                # fusion pipeline, slot execution, fallback advance, reporting, verify, route
   decide.ts             # decision client: typesafe + semif kinds (stdlib HTTP only)
-  prompts.ts            # packaged panel/judge/synthesis prompts (Step 6)
+prompts/
+  technical.md          # persona prompts, referenced by path from matrix.json
+  skeptic.md
+  systems.md
+  judge.md
+  synth.md
+  synth-lean.md
+  merge.md
+  pipeline.ts           # stage interpreter: parallel/single/decide/score/render, rounds, render
 scripts/
   semif-probe.mjs       # SemIf contract probe over upstream's decisions.jsonl fixture
   typesafe-probe.mjs    # TypeSafe contract probe: option form + batched typed questions
@@ -163,20 +176,69 @@ export type SlotCandidate =
   | { alias: string; providers?: (string | ProviderRef)[] }
   | { decide: DecideSpec; sufficientWhen?: SufficientWhen };
 
-export type SlotKey = "technical_expert" | "devils_advocate" | "systems_thinker" | "judge" | "synthesis";
+/**
+ * A persona is a seat: what it is told, how it samples. Defined once and reused by any mode or fusion,
+ * so "the judge" is one definition rather than one property of one pipeline position.
+ * `prompt` is inline text or a path relative to the config file that declares the persona.
+ */
+export type Persona = {
+  prompt: string;
+  temperature?: number;               // default 0.7
+  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  output?: "text" | "json";           // `json` requests JSON and parses it with the two-stage recovery
+};
+
+/**
+ * What a stage receives. Every connector but `prompt` must name something an earlier stage produced,
+ * which the loader verifies by walking the stage list (a dataflow error, not a syntax error).
+ *   prompt       the user's request
+ *   panel        every seat of the most recent `parallel` stage, labelled by persona
+ *   panel+judge  that, plus the output of the single stage immediately before this one
+ *   panel+weights  that, plus per-seat weights from the most recent `score` stage
+ *   peers        inside a `rounds` stage: every other seat's previous-round output, labelled
+ *   previous     the immediately preceding stage's output
+ *   {{name}}     the output of the stage that declared `name`
+ */
+export type StageInput = "prompt" | "panel" | "panel+judge" | "panel+weights" | "peers" | "previous" | string;
+
+/**
+ * A stage. Exactly one of `parallel`, `single`, `decide`, `score`, `render` is set.
+ *   parallel  run every listed persona concurrently, one candidate chain each
+ *   single    run one persona once (`alsoSynthesize` folds the final answer into this call)
+ *   decide    one choice question over `criteria`; a `then`-bearing option may route to a fusion
+ *   score     one question per item of `over`, batched into a single backend request
+ *   render    assemble text from an input without calling a model — how a shape ends without generating
+ */
+export type Stage =
+  | { parallel: string[]; input: StageInput; name?: string; rounds?: number; roundInput?: StageInput }
+  | { single: string; input: StageInput; name?: string; alsoSynthesize?: boolean }
+  | { decide: DecideSpec; input: StageInput; name?: string; sufficientWhen?: SufficientWhen }
+  | { score: DecideSpec; over: "panel"; input?: StageInput; name?: string }
+  | { render: "panel"; input?: StageInput };
+
+/** A named pipeline shape. `3x`-style and `5x`-style delibitation are stage lists, not code branches. */
+export type Mode = { stages: Stage[] };
 
 export type FusionSpec = {
   /** Picker label for the registered model. Default `Fusion · <id>`. */
   name?: string;
   /** Metadata for the registered model; the pipeline itself is unaffected. */
   model?: { contextWindow?: number; maxTokens?: number };
-  mode: "3x" | "5x";
-  slots: Partial<Record<SlotKey, SlotCandidate[]>>;
+  /** Which named shape this fusion runs. */
+  mode: string;
+  /** Model chains per persona seat. Every persona the mode uses must appear here, and vice versa. */
+  candidates: Record<string, SlotCandidate[]>;
+  /** Per-fusion thinking-level override by persona. */
+  thinking?: Record<string, Persona["thinking"]>;
   fileAgent?: false | { alias: string };
-  prompts?: Partial<Record<SlotKey, string>>;
+  /** Per-fusion prompt override by persona. */
+  prompts?: Record<string, string>;
   maxAdvance?: number;                // default 3
-  /** Post-synthesis checks. Report-only: a negative or low-confidence answer warns, never rewrites. */
-  verify?: DecideSpec[];
+  /**
+   * Post-synthesis checks, run in order. A `decide` entry reports as before; a `gate` entry runs a
+   * command and reports its exit status. Both are report-only: neither rewrites nor blocks the answer.
+   */
+  verify?: (DecideSpec | { gate: { command: string[]; expectExit?: number; timeoutMs?: number } })[];
   /**
    * Pre-run routing. The action to take lives with the option it applies to: a `criteria` entry may
    * carry `then`, naming the fusion to run instead of this one. Options without `then` do not route,
@@ -209,7 +271,11 @@ export type MatrixConfig = {
   /** Fusion used by `/fusion` with no id and by the `deliberate` tool with no `fusion` argument. */
   defaultFusion?: string;
   aliases: Record<string, AliasSpec>;
-  /** Key is the registered model id; the value is the pipeline it runs. */
+  /** Seats, defined once and reused across modes. */
+  personas: Record<string, Persona>;
+  /** Named pipeline shapes. */
+  modes: Record<string, Mode>;
+  /** Key is the registered model id; the value is the shape plus the roster that fills it. */
   fusions: Record<string, FusionSpec>;
   decide: {
     defaultBackend: string;           // key into backends; used when a DecideSpec names none
@@ -242,10 +308,27 @@ Validation runs on every load and throws `pi-fusion-matrix: <problem>`; never fa
 - a fusion id containing `:` or `/` → error, because pi parses `provider/id:thinking` and the id would
   be unaddressable (`fusion id "deep:cheap" may not contain ":" or "/"`).
 - `defaultFusion` naming an unknown fusion → error.
-- fusion slot entry naming an unknown alias → name it and list `aliases` keys.
-- fusion slot list empty → name the slot.
-- `mode: "3x"` fusion declaring `systems_thinker` or `judge` → error, because 3x never calls them.
-- `mode: "5x"` fusion missing any of the five slots → name the missing slots.
+- `fusions.<id>.mode` naming an unknown mode → error, listing the known modes.
+- a fusion's `candidates` keys not matching the personas its mode uses → error naming both sides
+  (`fusion "deep" is missing candidates for: synth; unknown: synthesis`). The roster and the shape must
+  agree, which is what keeps a mode rename from silently orphaning a model.
+- a candidate entry naming an unknown alias → error, listing `aliases` keys; an empty candidate list →
+  error naming the persona.
+- a stage naming an unknown persona → error.
+- a mode whose last stage is not `single` or `render` → error, because it would produce no assistant
+  message.
+- a stage `input` that resolves to nothing produced by an earlier stage → error. The validator walks
+  the stage list as dataflow: `panel` needs a preceding `parallel`, `panel+judge` a preceding `single`
+  or `decide` after a `parallel`, `panel+weights` a preceding `score`, `{{name}}` an earlier stage that
+  declared that name.
+- `peers` outside a `rounds` stage, `rounds` of 1, or `rounds` above 10 → error (`rounds` is a cost
+  ceiling, not just a shape).
+- `alsoSynthesize` on anything but the final stage → error.
+- `score` without `over`, or `over` other than `panel` → error.
+- `thinking` overrides naming a persona the mode does not use → error.
+- a persona `prompt` path that does not exist → error naming the persona and the resolved path.
+- `temperature` outside 0..2, or `output` other than `text`/`json` → error.
+- a `verify` gate with an empty `command` → error; `timeoutMs` above 600000 → error.
 - `DecideSpec` declaring both `options` and `questions`, or neither → error.
 - `options` (SemIf-shaped choice) with a length outside 2..16 → error.
 - `questions` with zero entries, or a `score` question with fewer than two `criteria` levels → error.
@@ -269,364 +352,59 @@ Provider names are resolved lazily, not validated at load: `resolve` reports
 provider inside an alias. This is deliberate — the extension cannot know which providers another
 piece of configuration registers, and a stale name must fail at use, not at startup.
 
-### Step 2 — Packaged `matrix.json` and the matching `models.json`
+### Step 2 — The packaged config and the matching `models.json`
 
-`matrix.json` holds aliases and fusions only — no providers, no credentials, no baseUrls:
+`matrix.json` in this repository is the single copy of the packaged config — the plan does not
+duplicate it. Only the vocabulary is illustrated here; read the file for the twelve fusions it ships.
 
-```json
-  {
-    "providerId": "fusion-matrix",
-    "providerName": "Fusion Matrix",
-    "defaultFusion": "standard",
-    "aliases": {
-      "deepseek-flash": {
-        "model": "deepseek-v4.1-flash",
-        "providers": [
-          "go",
-          "tp",
-          "corp"
-        ]
-      },
-      "deepseek-pro": {
-        "model": "deepseek-v4-pro",
-        "providers": [
-          "go",
-          "tp"
-        ]
-      },
-      "glm": {
-        "model": "glm-5.3",
-        "providers": [
-          "go",
-          "tp"
-        ]
-      },
-      "glm-flash": {
-        "model": "glm-5.3-flash",
-        "providers": [
-          "go"
-        ]
-      },
-      "qwen-max": {
-        "model": "qwen3.8-max",
-        "providers": [
-          "go",
-          "tp"
-        ]
-      },
-      "qwen-flash": {
-        "model": "qwen3.8-flash",
-        "providers": [
-          "go",
-          "tp"
-        ]
-      },
-      "kimi": {
-        "model": "kimi-k3",
-        "providers": [
-          "go"
-        ]
-      },
-      "gpt": {
-        "model": "gpt-5.6-sol",
-        "providers": [
-          "oai"
-        ]
-      },
-      "grok": {
-        "model": "grok-4.6",
-        "providers": [
-          "zen",
-          "go"
-        ],
-        "reasoning": true
-      },
-      "luna": {
-        "model": "gpt-5.6-luna",
-        "providers": [
-          "zen",
-          "go"
-        ],
-        "reasoning": true
-      }
-    },
-    "fusions": {
-      "standard": {
-        "mode": "3x",
-        "slots": {
-          "technical_expert": [
-            "glm"
-          ],
-          "devils_advocate": [
-            "glm"
-          ],
-          "synthesis": [
-            "glm"
-          ]
-        },
-        "fileAgent": {
-          "alias": "deepseek-flash"
-        }
-      },
-      "quick": {
-        "mode": "3x",
-        "slots": {
-          "technical_expert": [
-            "glm-flash"
-          ],
-          "devils_advocate": [
-            "glm-flash"
-          ],
-          "synthesis": [
-            "glm"
-          ]
-        },
-        "fileAgent": {
-          "alias": "deepseek-flash"
-        }
-      },
-      "deep": {
-        "mode": "5x",
-        "slots": {
-          "technical_expert": [
-            "kimi",
-            "qwen-max"
-          ],
-          "devils_advocate": [
-            "deepseek-pro"
-          ],
-          "systems_thinker": [
-            "glm"
-          ],
-          "judge": [
-            "deepseek-pro"
-          ],
-          "synthesis": [
-            "kimi",
-            "qwen-max"
-          ]
-        },
-        "fileAgent": {
-          "alias": "deepseek-flash"
-        }
-      },
-      "review": {
-        "mode": "5x",
-        "slots": {
-          "technical_expert": [
-            "kimi",
-            "qwen-max"
-          ],
-          "devils_advocate": [
-            "deepseek-pro"
-          ],
-          "systems_thinker": [
-            "glm"
-          ],
-          "judge": [
-            "deepseek-pro"
-          ],
-          "synthesis": [
-            "kimi",
-            "qwen-max"
-          ]
-        },
-        "fileAgent": false,
-        "prompts": {
-          "synthesis": "You are reviewing a proposed change. Report defects with severity, file:line anchors, and reproduction steps. Do not emit revised code. Under 1,500 tokens."
-        }
-      },
-      "openai": {
-        "mode": "5x",
-        "slots": {
-          "technical_expert": [
-            "gpt"
-          ],
-          "devils_advocate": [
-            "gpt"
-          ],
-          "systems_thinker": [
-            "gpt"
-          ],
-          "judge": [
-            "gpt"
-          ],
-          "synthesis": [
-            "gpt",
-            {
-              "alias": "kimi",
-              "providers": [
-                "go"
-              ]
-            }
-          ]
-        },
-        "fileAgent": false
-      },
-      "review-check": {
-        "mode": "5x",
-        "slots": {
-          "technical_expert": [
-            "kimi",
-            "qwen-max"
-          ],
-          "devils_advocate": [
-            "deepseek-pro"
-          ],
-          "systems_thinker": [
-            "glm"
-          ],
-          "judge": [
-            {
-              "decide": {
-                "state": "{{panel}}",
-                "question": "Do the experts agree on a single core recommendation?",
-                "options": [
-                  {
-                    "id": "agrees",
-                    "description": "They converge on the same recommendation."
-                  },
-                  {
-                    "id": "partial",
-                    "description": "They overlap but differ on a substantive point."
-                  },
-                  {
-                    "id": "disagrees",
-                    "description": "They recommend different things."
-                  }
-                ]
-              },
-              "sufficientWhen": {
-                "choiceIs": [
-                  "agrees"
-                ],
-                "minConfidence": 0.85
-              }
-            },
-            "deepseek-pro"
-          ],
-          "synthesis": [
-            "kimi",
-            "qwen-max"
-          ]
-        },
-        "fileAgent": false,
-        "verify": [
-          {
-            "state": "{{synthesis}}",
-            "questions": {
-              "addresses_question": {
-                "type": "noul",
-                "instructions": "The answer directly addresses the question that was asked.",
-                "criteria": {
-                  "true": "Answers the actual question",
-                  "false": "Answers a different or narrower question"
-                }
-              },
-              "grounded_in_panel": {
-                "type": "noul",
-                "instructions": "Every substantive claim traces to the expert responses or the judge analysis.",
-                "criteria": {
-                  "true": "All claims traceable",
-                  "false": "Contains claims with no support in the deliberation"
-                }
-              },
-              "contradiction_handling": {
-                "type": "choice",
-                "instructions": "How the answer handles the judge's contradictions.",
-                "criteria": {
-                  "resolves": "Picks a side and says why",
-                  "acknowledges": "Notes the disagreement without choosing",
-                  "ignores": "Does not mention it"
-                }
-              }
-            }
-          }
-        ]
-      },
-      "review-routed": {
-        "mode": "5x",
-        "route": {
-          "instructions": "How much deliberation does this request need?",
-          "criteria": {
-            "trivial": {
-              "description": "A direct factual or mechanical question",
-              "then": "quick"
-            },
-            "single_concern": {
-              "description": "One design decision with limited blast radius",
-              "then": "quick"
-            },
-            "multi_concern": "Several interacting decisions or cross-cutting change",
-            "architectural": "System-level tradeoffs with long-lived consequences"
-          }
-        },
-        "slots": {
-          "technical_expert": [
-            "kimi",
-            "qwen-max"
-          ],
-          "devils_advocate": [
-            "deepseek-pro"
-          ],
-          "systems_thinker": [
-            "glm"
-          ],
-          "judge": [
-            "deepseek-pro"
-          ],
-          "synthesis": [
-            "kimi",
-            "qwen-max"
-          ]
-        },
-        "fileAgent": false
-      }
-    },
-    "decide": {
-      "defaultBackend": "typesafe",
-      "models": {
-        "qwen3.5-4b": {
-          "source": "Qwen/Qwen3.5-4B",
-          "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
-        },
-        "minicpm5-2b": {
-          "source": "openbmb/MiniCPM5-2B",
-          "revision": "12a3808a956f869c767195e9266b59c4d21d92e2"
-        },
-        "qwen3-0.6b": {
-          "source": "Qwen/Qwen3-0.6B",
-          "revision": "c1899de289a04d12100db370d81485cdf75e47ca"
-        }
-      }
-    },
-    "backends": {
-      "typesafe": {
-        "kind": "typesafe",
-        "url": "https://api.typesafe.ai/v1/systemone",
-        "apiKeyEnv": "TYPESAFE_API_KEY",
-        "model": "jev-1.13.0",
-        "timeoutMs": 60000
-      },
-      "semif": {
-        "kind": "semif",
-        "url": "http://127.0.0.1:8791/score",
-        "timeoutMs": 30000
-      },
-      "semif-hosted": {
-        "kind": "semif",
-        "url": "https://SET-THE-HOSTED-SEMIF-URL/score",
-        "apiKeyEnv": "SEMIF_API_KEY",
-        "timeoutMs": 30000
-      },
-      "semif-stub": {
-        "kind": "semif",
-        "url": "http://127.0.0.1:8792/score",
-        "timeoutMs": 5000
-      }
-    }
+```jsonc
+{
+  "providerId": "fusion-matrix",
+  "defaultFusion": "standard",
+
+  "personas": {                                   // seats: told once, reused everywhere
+    "technical": { "prompt": "prompts/technical.md", "temperature": 0.5, "thinking": "medium" },
+    "judge":     { "prompt": "prompts/judge.md", "temperature": 0.2, "output": "json" },
+    "synth":     { "prompt": "prompts/synth.md", "temperature": 0.5 },
+    "merge":     { "prompt": "prompts/merge.md", "temperature": 0.4 }
+  },
+
+  "modes": {                                      // shapes: stage lists, no code
+    "pair": { "stages": [
+      { "parallel": ["technical", "skeptic"], "input": "prompt" },
+      { "single": "merge", "input": "panel" }
+    ] },
+    "committee": { "stages": [
+      { "parallel": ["technical", "skeptic", "systems"], "input": "prompt" },
+      { "single": "judge", "input": "panel" },
+      { "single": "synth", "input": "panel+judge" }
+    ] },
+    "debate": { "stages": [
+      { "parallel": ["technical", "skeptic", "systems"], "input": "prompt",
+        "rounds": 3, "roundInput": "peers" },
+      { "render": "panel" }
+    ] }
+  },
+
+  "fusions": {                                    // a mode plus the roster that fills its seats
+    "workhorse": { "mode": "pair", "fileAgent": { "alias": "deepseek-flash" },
+      "candidates": { "technical": ["deepseek-flash"], "skeptic": ["glm-flash"], "merge": ["glm"] } },
+    "deep": { "mode": "committee", "thinking": { "judge": "high" },
+      "candidates": { "technical": ["kimi", "qwen-max"], "skeptic": ["deepseek-pro"],
+                      "systems": ["glm"], "judge": ["deepseek-pro"], "synth": ["kimi", "qwen-max"] } }
   }
+}
 ```
+
+Twelve fusions ship: `standard`, `quick` and `solo` (lean and single-seat shapes), `workhorse` and
+`sota` (a cheap pair and a frontier pair on one shape), `deep`, `brief` and `opinions` (the committee,
+its merged-judge variant, and the panel-only grid), `debate` (three rounds against peers' opinions),
+`review` (the committee with a critique synthesis prompt), `review-check` (the cascaded committee plus
+a three-question verification), and `review-routed` (the committee behind a complexity route).
+
+Persona prompts live in `prompts/*.md` and are referenced by path, so editing what a seat is told is
+an edit to a text file, not to code. A `prompt` may also be inline, and `fusions.<id>.prompts` overrides
+one persona for one fusion only.
 
 The provider names in `aliases.*.providers` are satisfied by pi's `models.json`. The implementer
 writes this block into `~/.pi/agent/models.json` (merge into the existing `providers` object; never
@@ -767,24 +545,45 @@ asks pi's runtime for the resolved model list and, when the provider id is absen
 substitution with `reason: "missing provider"` and moves on. This keeps the validation out of
 startup and makes a stale provider name a per-slot degradation instead of a hard failure.
 
+**The stage interpreter.** `runFusion` reads `config.modes[fusion.mode].stages` and walks them in
+order, building a `vars` map as it goes:
+
+| Stage | Execution |
+|---|---|
+| `parallel` | one `runSeat` per listed persona, concurrently; results become `panel`, labelled by persona. With `rounds: n`, the first round uses `input` and every later round re-runs the same seats with `roundInput` (`peers`), each seat receiving every *other* seat's previous-round output as `## <persona> — previous opinion`. A seat that failed is labelled and dropped from later rounds, and rounds stop early if fewer than two seats survive. |
+| `single` | one `runSeat` for the named persona. `alsoSynthesize: true` may appear only on the last stage: that stage is told to produce the final answer after its own analysis, so a merged-judge shape costs one call fewer than a separate synthesis. |
+| `decide` | one backend request for the stage's `criteria`; contributes `option: probability` lines to later stages, and can end the cascade when `sufficientWhen` holds. |
+| `score` | one question per item of `over` (`panel`), batched into a single backend request; contributes per-seat weights to `panel+weights`. |
+| `render` | no model call: assembles already-produced text (`panel`) into the assistant message. This is how a shape ends without generating — an opinion grid is assembled, not authored. |
+
+**A mode must end in `single` or `render`.** A stage list ending on `parallel`, `decide`, or `score`
+produces no assistant message and is a load error, not a run that returns nothing.
+
+Connectors resolve per stage: `prompt`, `panel`, `panel+judge`, `panel+weights`, `peers`, `previous`,
+and `{{name}}` for any earlier stage that declared `name`. An unresolved connector fails at load — the
+validator walks the stage list as dataflow — so a shape that reads something nobody produced never
+reaches a run.
+
 `run.ts` exports `runFusion(model, context, options)` and:
 
 ```ts
-type Substitution = { slot: SlotKey; from: string; to: string; reason: string };
-type SlotResult = {
+type Substitution = { seat: string; from: string; to: string; reason: string };
+type SeatResult = {
   text: string; label: string; usage: Usage; substitutions: Substitution[];
-  semif?: { probabilities: Record<string, number>; model: string }; error?: string; degraded: boolean;
+  decisions?: DecideAnswer[]; error?: string; degraded: boolean;
 };
-async function runSlot(slot: SlotKey, candidates: SlotCandidate[], ctx: RunContext): Promise<SlotResult>;
+async function runSeat(
+  persona: string, candidates: SlotCandidate[], ctx: SeatContext,
+): Promise<SeatResult>;
 ```
 
-`runSlot` algorithm — two fallback layers, each independently configured and reported:
+`runSeat` algorithm — two fallback layers, each independently configured and reported:
 1. `prompt` = first message of the trailing run of `role === "user"` messages — the injected-prelude
    fix, copied from `<vendored-fork>/index.js:485-506` (`extractPrompt`).
-2. Expand the slot list with `resolveCandidates` per entry, keeping entry order. Each entry contributes
-   its own ordered provider list. The expansion is the execution plan; log it once per run in the
-   banner as `<slot>: <alias>@<provider>` sequences.
-3. Walk the expansion in order, capped at `fusion.maxAdvance ?? 3` advances total:
+2. Expand the candidate list with `resolveCandidates` per entry, keeping entry order. Each entry
+   contributes its own ordered provider list. The expansion is the execution plan; log it once per run
+   in the banner as `<persona>: <alias>@<provider>` sequences.
+3. Walk the expansion in order, capped at `fusion.maxAdvance ?? 3` advances per seat:
    - decide entry → `decide(...)` per Step 4; failure records a substitution `reason: "decision"` and
      moves to the next entry. A decision's text contribution to the judge/synthesis context is
      `option: probability` lines (`<id>: <p>` sorted descending), and the winner is marked.
@@ -803,7 +602,7 @@ async function runSlot(slot: SlotKey, candidates: SlotCandidate[], ctx: RunConte
      `message.content`; usage = `message.usage`; failure = `message.stopReason === "error"` with
      `message.errorMessage`; `model === undefined` means the provider or model id is not registered.
 4. Failure classification (the contract; `same name` = advancing inside one alias's provider list,
-   `new name` = moving to the next slot entry):
+   `new name` = moving to the next candidate entry):
    | Signal | Action | reason string | layer |
    |---|---|---|---|
    | `model` unresolved (`find` returned undefined) | advance | `"missing provider"` | both |
@@ -811,7 +610,7 @@ async function runSlot(slot: SlotKey, candidates: SlotCandidate[], ctx: RunConte
    | text matches `/\b40[13]\b|unauthorized|invalid api key/i` | advance | `"credential"` | both |
    | text matches `/not found|unknown model|\b404\b/i` | advance | `"missing model"` | both |
    | transport failure, 5xx, or a 429 without quota semantics | retry same candidate once after 2000 ms, then advance | `"transient"` | both |
-   | a decision candidate answered, but `sufficientWhen` did not hold | advance at once, keeping the answer | `"insufficient"` | slot cascade |
+   | a decision candidate answered, but `sufficientWhen` did not hold | advance at once, keeping the answer | `"insufficient"` | seat cascade |
    | any delta already streamed to the caller | do not advance; end with emitted text, `degraded: true` | — | — |
 
    `"insufficient"` is not a failure and must not be reported as one. Its line names the answer and
@@ -831,26 +630,21 @@ async function runSlot(slot: SlotKey, candidates: SlotCandidate[], ctx: RunConte
    both accounts); a cross-entry line means a different alias answered and must be visible in both
    the transcript and `details.substitutions`.
 6. Everything exhausted → `error = "all candidates failed: deepseek-pro@go (quota), deepseek-pro@tp (credential)"`,
-   `degraded: true`; the pipeline continues with the slot marked unavailable (3x no longer aborts a
-   run when one panel slot dies — a deliberate change from the reference implementation's 3x
-   `Promise.all`).
+   `degraded: true`; the pipeline continues with that seat marked unavailable. A seat dying never aborts
+   the run, even in the two-seat shapes where the reference implementation's 3x would have thrown —
+   that asymmetry is a deliberate change.
 
-Temperature per slot: `0.5` for `technical_expert` and `synthesis`, `0.8` for `devils_advocate`,
-`0.6` for `systems_thinker`, `0.2` for `judge` — the reference implementation's values. Keep the
-`kimi` special case (`temperature: 1.0`
-when the model id contains `kimi`), and the models-reject-temperature memory from
-`<vendored-fork>/lib/api.js` (patch 6): a module-level `Set` of provider/model keys; on an error
-whose text matches `/temperature/i`, add the key, omit `temperature` on the retry (same candidate,
-not an advance), emit one `⚠️ <provider>/<model> rejects a temperature override; retrying without it.`
-delta. The corresponding prevention lives in `models.json`: for a model that always rejects it, set
-`"samplingParams": { "temperature": 1 }` on that entry, which pi merges into the request body, and
-the memory above covers the case where it was not set.
-
-Pipeline shape in `runFusion`: 3x = two panel slots concurrently, then synthesis (both streams
-forwarded); 5x = three panel slots concurrently, then judge (JSON, parsed with the bracket-recovery
-fallback from `<vendored-fork>/lib/deliberation.js`), then synthesis. Prompts come from
-`fusion.prompts[slot]` when set, else `prompts.ts` literals. A SemIf element inside a slot's list is
-executed in place, and its result enters the judge/synthesis context in that slot's position.
+Sampling belongs to the persona: `temperature` (default 0.7) and `thinking` (passed to pi as the
+request's `reasoning` level). `fusions.<id>.thinking` overrides one persona for one fusion, which is
+how `deep` runs its judge at `high` while its panel stays at the persona default. The reference
+implementation's temperatures survive as persona defaults (`technical` 0.5, `skeptic` 0.8, `systems`
+0.6, `judge` 0.2, `synth` 0.5). The `kimi` special case stays: `temperature: 1.0` when the vendor id
+contains `kimi`, because that family rejects other values. Keep the models-reject-temperature memory
+from `<vendored-fork>/lib/api.js` (patch 6): a module-level `Set` of provider/model keys; on an error
+whose text matches `/temperature/i`, add the key, omit `temperature` on the retry (same candidate, not
+an advance), and emit one `⚠️ <provider>/<model> rejects a temperature override; retrying without it.`
+delta. Prevention belongs in `models.json`: a model that always rejects it gets
+`"samplingParams": { "temperature": 1 }`, which pi merges into the request body.
 
 File agent: when `fusion.fileAgent` is `{ alias }`, resolve that alias through the same
 `resolveCandidates` path (so it also inherits the provider chain, e.g. `deepseek-flash` on Go then
@@ -876,27 +670,35 @@ pi.registerCommand("fusion", { description: "Run a named fusion: /fusion <id> <p
 pi.registerCommand("fusion-matrix", { description: "List profiles, accounts, aliases, and fusions", handler: async (_args, ctx) => {} });
 ```
 
-Every run records its cascades so the hit rate of the cheap path is measurable:
+Every run records the shape it actually ran, not the one it was configured for:
 
 ```ts
-type Cascade = {
-  slot: SlotKey;
-  kind: "model" | "decision";
-  answer?: { choice?: string; noul?: number; score?: number; confidence?: number };
-  sufficient?: boolean;   // decision candidates only
-  prior?: string;         // exact text handed to the next candidate when insufficient
-  advancedTo?: string;    // label of the next candidate
+type RunDetails = {
+  fusion: string; mode: string;
+  stages: { index: number; kind: "parallel" | "single" | "decide" | "score" | "render";
+            seats?: string[]; calls: number }[];
+  seats: { persona: string; alias: string; provider: string; model: string;
+           thinking?: string; usage: Usage; degraded?: boolean; error?: string }[];
+  rounds?: { round: number; seats: string[]; inputs: Record<string, string> }[];
+  substitutions: Substitution[];
+  cascades: Cascade[];               // answer, sufficiency, prior, next candidate
+  routing?: { answer: DecideAnswer; routedTo?: string; declined?: string };
+  verification?: { check: string; result: unknown; gate?: { exit: number; output: string } }[];
+  usage: Usage;
 };
-// in tool details: details.cascades: Cascade[]
 ```
+
+`details.substitutions` and `details.seatErrors` are always present, empty arrays included: a silently
+degraded run is a wrong answer and must be visible. `seats[].model` is the vendor id that actually
+answered, so a provider-level substitution stays auditable after the fact, and `stages[].calls` is what
+makes a shape's cost contract checkable.
 
 `/fusion` parses the first whitespace-delimited token as a fusion id when it matches a key in
 `fusions`; otherwise the whole argument string is the prompt and `defaultFusion` is used. Unknown id →
 `ctx.ui.notify('unknown fusion "x"; known: default, deep, ...', "error")` and no run.
-Tool `details.substitutions` and `details.slotErrors` are always present (empty arrays included): a
-silently degraded run is a wrong answer and must be visible.
+A decision entry reports as before; a `gate` entry runs a command and records its exit status.
 
-**`route` runs before the first slot** (Step 3 step 1). The clause is one choice question built from
+**`route` runs before the first stage** (Step 3 step 1). The clause is one choice question built from
 `route.instructions` and the option ids of `route.criteria` (descriptions only — `then` is this
 extension's vocabulary and is never sent). `state` defaults to `{{prompt}}`. A `then` on the winning
 option names the fusion to run instead of this one; an option without `then`, an option id the map
@@ -909,11 +711,20 @@ Routing may target a more expensive fusion — escalation on `"architectural"` i
 there is no cost-direction rule. The guardrails are structural: one hop (a target may not declare
 `route`), no self-route, and full reporting of the answer, its probabilities, and its confidence.
 
-**`verify` runs after synthesis** (Step 3 step 6) and is report-only: each `DecideSpec` is evaluated
-with `vars = { prompt, panel, judge, synthesis, cwd }`, and results are recorded in
-`details.decisions[].verify`. Any `noul < 0.5`, any `choice` whose winner is the pessimistic option,
-or any `confidence < 0.5` emits one delta:
-` ⚠️ verify: grounded_in_panel=0.31 (low) — synthesis may contain unsupported claims\n`.
+**`verify` runs after synthesis** and is report-only. Two kinds, evaluated in order, with
+`vars = { prompt, panel, judge, synthesis, cwd }`:
+
+- a `DecideSpec` entry, as a decision; and
+- a `gate` entry — `{ "gate": { "command": ["just", "test"], "expectExit": 0, "timeoutMs": 120000 } }` —
+  which runs the command in the session cwd and records exit status, duration, and a bounded tail of
+  output. A gate never loops, never feeds back into a stage, and never blocks: iteration-until-green
+  is a different feature this plan does not include.
+
+Results are recorded in `details.verification`. Any `noul < 0.5`, any `choice` whose winner is the
+pessimistic option, any `confidence < 0.5`, or a gate whose exit does not match `expectExit` emits one
+delta, for example
+` ⚠️ verify: grounded_in_panel=0.31 (low) — synthesis may contain unsupported claims` or
+` ⚠️ verify: gate "just test" exited 1 (expected 0) — 24 lines of output in details`.
 A verification never edits or blocks the answer, and a verification backend failure is reported as
 skipped, not as a run failure.
 
@@ -1062,41 +873,48 @@ anywhere: it is a *reference implementation* for behaviors this repo re-derives,
 Absolute and sibling-checkout path imports are forbidden in this package — it must run from a container
 with no developer checkout present.
 
-The pipeline, in order, mirroring the shape verified working in
-`<vendored-fork>/lib/deliberation.js` (read as reference, not copied):
+The interpreter (Step 3) executes whatever a mode declares; this section fixes the behavior *inside* a
+seat and the assembly rules, all re-derived from `<vendored-fork>/lib/deliberation.js`:
 
-1. **3x** — `technical_expert` and `devils_advocate` concurrently via `runSlot`, then `synthesis`.
-2. **5x** — `technical_expert`, `devils_advocate`, `systems_thinker` concurrently via `runSlot`, then
-   `judge`, then `synthesis`.
-3. **Judge output** — request JSON (`jsonMode: true` equivalent: append "Output only a valid JSON
-   object with keys consensus, contradictions, partial_coverage, unique_insights, blind_spots" to the
-   judge prompt), then parse with the two-stage recovery: strip a leading ```` ```json ```` fence, else
-   extract from the first `{` to the last `}`. On total parse failure, keep the raw text under
-   `unique_insights` so synthesis still receives something (the fallback object in
-   `lib/deliberation.js` is the reference).
-4. **Context assembly** — the judge prompt carries the original prompt plus all three panel responses
-   under the exact headers `TECHNICAL EXPERT RESPONSE:` / `DEVIL'S ADVOCATE RESPONSE:` /
-   `SYSTEMS THINKER RESPONSE:`; the synthesis prompt carries the prompt, the three responses, and
-   `JSON.stringify(judgeAnalysis, null, 2)`. A SemIf element inside a slot's list occupies that slot's
-   position and contributes its options-with-probabilities text in place of a model response.
-5. **Streaming** — `createAssistantMessageEventStream` is imported from `@earendil-works/pi-ai` (pi
-   bundles it; no hand-rolled stream, no `lib/event-stream.js` equivalent). The stream emits `start`
-   with the empty partial, then `text_start`, then `text_delta` per progress/substitution/synthesis
-   chunk, then `text_end`, then `toolcall_start`/`toolcall_end` pairs for each file-agent write (if
-   any), then `done` or `error`. Contract verified against pi's consumer at
+1. **A seat is one model call.** Persona prompt as the system message, the stage's resolved input as the
+   user message, `temperature` and `thinking` from the persona (or the fusion's override). No tools, no
+   session, no subprocess.
+2. **Panel labelling.** Seats are concatenated in stage order, each under a heading that names both the
+   persona and the model that answered: `## technical — openai/gpt-5.6-sol`. The heading is what later
+   stages cite, and what substitutes make visible: a seat answered by its second provider keeps the
+   same heading, because the *persona* is unchanged and only the route moved.
+3. **JSON personas** (`output: "json"`) append "Output only a valid JSON object with keys …" to the
+   persona prompt and parse with the two-stage recovery: strip a leading ```` ```json ```` fence, else
+   extract from the first `{` to the last `}`. On total parse failure keep the raw text under
+   `unique_insights` so the next stage still receives something (the reference implementation's
+   fallback object is the model).
+4. **`alsoSynthesize`** appends one instruction to the final stage: produce the answer to the original
+   request after the analysis, in the same message. The stage's output is then both analysis and answer,
+   and `details` records it as such rather than pretending a separate synthesis ran.
+5. **`score` and weights.** One `score` question per panel seat, batched into a single backend request,
+   producing a number and a confidence per seat. `panel+weights` renders them as a sorted
+   `persona: score (confidence)` list above the panel, so a judge can weigh rather than guess.
+6. **Streaming** — `createAssistantMessageEventStream` from `@earendil-works/pi-ai` (pi bundles it; no
+   hand-rolled stream). Emit `start` with the empty partial, `text_start`, `text_delta` per progress/
+   substitution/verification/synthesis chunk, `text_end`, then `toolcall_start`/`toolcall_end` pairs per
+   file-agent write, then `done` or `error`. Contract verified against pi's consumer at
    `node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js:201-243`: it replaces
    `context.messages[last]` with each `partial`, so every partial must be a complete
    `AssistantMessage`, and it reads tool calls from the final message's `content`, so `done.message`
-   must carry the `toolCall` blocks.
-6. **Usage** — sum `message.usage` over every delegated call and shape it as
-   `{ input, output, cacheRead, cacheWrite, totalTokens, reasoning?, cost: { input, output, cacheRead,
-   cacheWrite, total } }` (`Usage` in `pi-ai/dist/types.d.ts:255-278`). Zero-fill cost; do not call
-   `calculateCost` (the fork's only pi-ai use, `index.js:704-712`) — this extension has no price table.
+   must carry the `toolCall` blocks. Only the seat that produces the answer streams token-by-token;
+   every other seat reports its status line, because a five-call pipeline streaming five interleaved
+   answers is unreadable.
+7. **Usage** — sum `message.usage` over every delegated call and shape it as `{ input, output,
+   cacheRead, cacheWrite, totalTokens, reasoning?, cost: { input, output, cacheRead, cacheWrite,
+   total } }` (`Usage` in `pi-ai/dist/types.d.ts:255-278`). Zero-fill cost; no `calculateCost` call and
+   no price table. Decision stages add their backend's reported `usage` separately, since those tokens
+   are billed by a different account.
 
-Prompts live in `prompts.ts` as literals, transcribed from
-`<vendored-fork>/pi-harness.config.json` (`panel.*.systemPrompt`, `judge.systemPrompt`,
-`synthesis.systemPrompt`) before that directory is removed. They are upstream's 1,500-token-concise
-prompts and are the one thing worth copying verbatim.
+Persona prompts are files: `prompts/*.md`, referenced by path from `matrix.json` and read at load.
+Editing what a seat is told is a text edit, not a code edit, and an operator can point a persona at
+their own file without touching this repository. The packaged prompts were transcribed verbatim from
+`<vendored-fork>/pi-harness.config.json` before that checkout is removed; `merge.md` and
+`synth-lean.md` are the two written here.
 
 ## Critical files & anchors
 
@@ -1110,8 +928,8 @@ It is never imported, and that copy may be deleted once this plan's verification
   `toolcall_start`/`toolcall_end` emission that makes pi execute file-agent writes.
 - `<vendored-fork>/lib/api.js` — the quota/credential/missing-model/transient taxonomy and the
   temperature-rejection memory that Step 3's table encodes.
-- `<vendored-fork>/pi-harness.config.json` — source of the three prompt literals for `prompts.ts`
-  (transcribe before deleting anything).
+- `<vendored-fork>/pi-harness.config.json` — source of the persona prompts now in `prompts/*.md`
+  (transcribed already; keep the checkout until verification passes).
 - `<vendored-fork>/index.js:485-506` — `extractPrompt`: the trailing-user-run prompt selection to
   reuse verbatim.
 
@@ -1135,25 +953,29 @@ it references available (`OC_GO_CC_API_KEY`, `ALIBABA_TOKEN_PLAN_API_KEY`, `OPEN
 provider additionally needs whatever its `!command` reads); `/tmp/fusion-matrix-check/` as `cwd` for scratch runs (create, and remove at the end); the
 pi config repo symlink from Step 1 in place.
 
-1. **Model registration** — `cd /tmp/fusion-matrix-check && pi --list-models fusion` prints
-   `fusion-matrix/standard`, `fusion-matrix/quick`, `fusion-matrix/deep`, `fusion-matrix/review`,
-   `fusion-matrix/openai`, `fusion-matrix/review-check`, `fusion-matrix/review-routed`.
-   Failure here means the api id, manifest, or symlink is wrong.
-2. **Config validation** — write `/tmp/fusion-matrix-check/.pi-fusion-matrix.json` containing
-   `{"fusions": {"deep": {"slots": {"judge": ["no-such-alias"]}}}}`; a `--model fusion-matrix/deep` run must
-   fail with `pi-fusion-matrix: unknown alias "no-such-alias"; known: deepseek-flash, ...`. Remove the
-   file afterwards.
+1. **Model registration** — `cd /tmp/fusion-matrix-check && pi --list-models fusion` prints all
+   twelve: `standard`, `quick`, `solo`, `workhorse`, `sota`, `deep`, `brief`, `opinions`, `debate`,
+   `review`, `review-check`, `review-routed`, each under the `fusion-matrix` provider. Failure here
+   means the api id, manifest, or symlink is wrong.
+2. **Config validation** — three separate project files, each run expected to fail at load with the
+   named message: an unknown alias in a candidate list
+   (`{"fusions": {"deep": {"candidates": {"judge": ["no-such-alias"]}}}}` →
+   `unknown alias "no-such-alias"; known: …`); a mode whose roster does not match its shape
+   (`{"modes": {"committee": {"stages": [{"parallel": ["technical"], "input": "prompt"},
+   {"render": "panel"}]}}}` → names the missing candidate key); and a stage reading something nobody
+   produced (`{"modes": {"lean": {"stages": [{"single": "synth-lean", "input": "panel+judge"}]}}}` →
+   `stage 0 input "panel+judge" has no preceding single stage`). Remove each file afterwards.
 3. **Provider-layer fallback (same alias, new billing route)** — in
    `/tmp/fusion-matrix-check/.pi-fusion-matrix.json` set
    `{"aliases": {"deepseek-pro": {"providers": ["nope", "tp"]}}}`. A `fusion-matrix/deep` run must print
-   ` ├─ ↩ devils_advocate deepseek-pro@nope → deepseek-pro@tp (missing provider)`, complete, and —
+   ` ├─ ↩ skeptic deepseek-pro@nope → deepseek-pro@tp (missing provider)`, complete, and —
    driven through the `deliberate` tool — report exactly one substitution whose `from` and `to` share
    the same alias name. Remove the override afterwards. This verifies both the native-provider lookup
-   and that a stale provider name degrades per slot instead of aborting.
+   and that a stale provider name degrades per seat instead of aborting.
 4. **Slot-layer fallback (new alias)** — in the same project file set
-   `{"fusions": {"deep": {"slots": {"systems_thinker": ["kimi", "glm"]}}},
+   `{"fusions": {"deep": {"candidates": {"systems": ["kimi", "glm"]}}},
    "aliases": {"kimi": {"providers": ["nope"]}}}`. The run must print
-   ` ├─ ↩ systems_thinker kimi@nope → glm@go (missing provider)` and
+   ` ├─ ↩ systems kimi@nope → glm@go (missing provider)` and
    `details.substitutions[0].from`/`.to` must carry the two different alias names. This is the check
    that distinguishes the two layers; identical `from`/`to` text means the reporting is wrong.
 5. **Empirical quota advance** — with the Go 5-hour window exhausted (observed 2026-09-18:
@@ -1214,10 +1036,32 @@ pi config repo symlink from Step 1 in place.
     afterwards.
 14. **Alias is version-free** — `grep -rn "glm-5\|qwen3\.8\|deepseek-v4\|kimi-k3"` across
     `extensions/pi-fusion-matrix/` and `matrix.json` must match only `aliases.*.model`, fixtures, and
-    comments — never `fusions`, `slots`, or code. A `models.json` version bump (for example `deepseek-v4.1-flash` →
+    comments — never `fusions`, `candidates`, or code. A `models.json` version bump (for example `deepseek-v4.1-flash` →
     `deepseek-v4-flash` on `go`) must change behavior with no edit to this repo; confirm by bumping it
     and running `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/standard`: the run succeeds and
     `details.models` shows the new vendor id behind the unchanged alias.
+
+15. **Mode shapes are cost contracts** — run each and count the calls. `fusion-matrix/solo` is one
+    seat and no judge; `fusion-matrix/workhorse` is two seats plus a merge, and the merged text must
+    differ from both seat texts (a merge that echoes a panel response is not a merge);
+    `fusion-matrix/sota` is the same shape with its frontier roster named in the banner;
+    `fusion-matrix/brief` is four calls instead of five, with the judge's single message carrying both
+    its analysis and the answer; `fusion-matrix/opinions` makes three calls, ends with labelled sections
+    and no generation, and records `render` in `details.stages`; `fusion-matrix/debate` makes nine
+    (3 seats x 3 rounds). A shape that quietly adds or drops a call is a bug: the call count is the
+    feature.
+16. **Debate envelopes** — in `fusion-matrix/debate`, every round after the first carries each *other*
+    seat's previous-round output and never its own; `details.rounds[].inputs` records the envelope per
+    seat per round. Then point one seat's only provider at `nope`: that seat is labelled and dropped,
+    the remaining two continue, and if only one survives the rounds stop early rather than running alone.
+17. **Decision stages** — with a temporary mode in the project file,
+    `{ "score": { "instructions": "How well does this response address the question?",
+                  "criteria": ["off-topic", "partial", "solid", "thorough"] }, "over": "panel" }` must
+    issue **one** backend request for the three seats (the stub records request count), and the stage
+    that follows must render sorted `persona: score (confidence)` lines from `panel+weights`. Separately,
+    a persona with `thinking: "off"` must show as omitted or off in `details.seats[].thinking`, while
+    `deep`'s judge (persona default `medium`, fusion override `high`) shows `high` — sampling is
+    configuration, and the run record must show what was actually requested.
 
 ## Assumptions & contingencies
 
@@ -1284,6 +1128,17 @@ pi config repo symlink from Step 1 in place.
 - **Same alias across providers means the same slot, not necessarily the same vendor id.** Where two
   providers name one model differently, use the object form:
   `{"id": "tp", "modelOverride": "qwen3.8-max-preview"}`.
+- **Shapes and seats are configuration; the executor is code.** `modes` are stage lists and `personas`
+  are seats, so adding a shape or re-pointing a seat is an edit to `matrix.json`. What stays code is the
+  stage *kinds* (`parallel`, `single`, `decide`, `score`, `render`), the connector set, and the assembly
+  rules. That line is deliberate: a config language expressive enough to need interpreter branches of its
+  own is a language whose validity nobody can check.
+- **Three shapes from the reference harness are out of scope, and that absence is a boundary rather than
+  a gap.** A stage that writes to disk needs a subprocess with tools, which is a different execution
+  model from a seat that is one model call; a gate *loop* that iterates until green needs loop constructs
+  and a feedback channel; and their plan-then-DAG-then-execute collaboration is a task scheduler, not a
+  deliberation pipeline. The `gate` entry under `verify` is deliberately report-only — it runs a command
+  once and records the result, and never feeds back into a stage.
 - **Thresholds live in `sufficientWhen`, in one place.** A decision is actionable when its answer
   matches and its confidence clears the bar; nothing else in the config carries a probability
   threshold. A cascade is only worth its extra call when the cheap path usually decides, which is why

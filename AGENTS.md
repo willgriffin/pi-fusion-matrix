@@ -18,6 +18,17 @@ from it rather than re-deriving design. Where this file and the plan disagree ab
 conventions, this file wins; where they disagree about behavior, the plan wins and the disagreement
 is a bug in one of them.
 
+## Where the boundary is
+
+Pipeline shapes (`modes`), seats (`personas`), and rosters (`fusions`) are configuration. The stage
+*kinds* (`parallel`, `single`, `decide`, `score`, `render`), the connector set, and the assembly rules
+are code. Adding a shape or re-pointing a seat is a config edit; adding a new kind of stage is a code
+change, and a config language needing its own interpreter branches is one whose validity nobody can
+check.
+
+Out of scope by decision: stages that write to disk (that needs a subprocess with tools), gate loops
+that iterate until green, and plan-then-DAG execution. `verify` gates run once and report.
+
 ## Hard constraints
 
 - **No credential handling.** Never read, resolve, cache, or log an API key. Providers arrive from
