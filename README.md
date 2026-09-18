@@ -10,7 +10,9 @@ Status: planned. The implementation spec is [`docs/plan.md`](docs/plan.md); work
 ## What it does
 
 - **Fusions** — a named pipeline (`3x` = two experts + synthesizer, `5x` = panel + judge + synthesis)
-  registered as models `fusion`, `fusion-deep`, and so on, selectable with `/model` or `--model`.
+  registered as models under the `fusion-matrix` provider. The fusion key *is* the model id, so
+  `"deep": {…}` in `matrix.json` gives you `fusion-matrix/deep`; name them whatever you like and they
+  appear in `/model` and `--model` with no code change.
 - **Two fallback layers** — inside an alias, providers are tried in order (same model, different
   billing route: quality-preserving); across a slot, aliases are tried in order (different model:
   reported as a substitution).
@@ -43,18 +45,20 @@ registers is usable.
 
 ## Configuration
 
-`matrix.json` (aliases, fusions, decide) merges across layers, lowest priority first:
+`matrix.json` merges across layers, lowest priority first:
 
 1. this repo's `matrix.json`
 2. `~/.config/pi-fusion-matrix/matrix.json`
 3. `<session cwd>/.pi-fusion-matrix.json`
 
-A project that must bill to another account adds that account as its own provider in
-`~/.pi/agent/models.json` and lists it in the repo-local `matrix.json`; no profile system is involved.
+Top-level knobs: `providerId` (default `fusion-matrix`), `providerName`, and `defaultFusion` for the
+tool and command when no id is given. A project that must bill to another account adds that account as
+its own provider in `~/.pi/agent/models.json` and lists it in the repo-local `matrix.json`; no profile
+system is involved.
 
 ## Commands
 
-- `/fusion <id> <prompt>` — run a named fusion.
+- `/fusion <id> <prompt>` — run a named fusion; with no id, `defaultFusion` is used.
 - `/fusion-matrix` — list resolvable aliases, fusions, backends, and the config layers loaded.
 
 ## License

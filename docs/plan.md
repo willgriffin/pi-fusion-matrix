@@ -143,6 +143,10 @@ export type SlotCandidate =
 export type SlotKey = "technical_expert" | "devils_advocate" | "systems_thinker" | "judge" | "synthesis";
 
 export type FusionSpec = {
+  /** Picker label for the registered model. Default `Fusion · <id>`. */
+  name?: string;
+  /** Metadata for the registered model; the pipeline itself is unaffected. */
+  model?: { contextWindow?: number; maxTokens?: number };
   mode: "3x" | "5x";
   slots: Partial<Record<SlotKey, SlotCandidate[]>>;
   fileAgent?: false | { alias: string };
@@ -175,7 +179,14 @@ export type BackendSpec =
     };
 
 export type MatrixConfig = {
+  /** Provider the fusions register under. Default "fusion-matrix". */
+  providerId?: string;
+  /** Display name for that provider. Default "Fusion Matrix". */
+  providerName?: string;
+  /** Fusion used by `/fusion` with no id and by the `deliberate` tool with no `fusion` argument. */
+  defaultFusion?: string;
   aliases: Record<string, AliasSpec>;
+  /** Key is the registered model id; the value is the pipeline it runs. */
   fusions: Record<string, FusionSpec>;
   decide: {
     defaultBackend: string;           // key into backends; used when a DecideSpec names none
@@ -204,6 +215,9 @@ Interpolation applies to every string value: `{{prompt}}`, `{{panel}}`, `{{judge
 
 Validation runs on every load and throws `pi-fusion-matrix: <problem>`; never fall back silently:
 - alias with an empty `providers` list → `alias "glm" has no providers`.
+- a fusion id containing `:` or `/` → error, because pi parses `provider/id:thinking` and the id would
+  be unaddressable (`fusion id "deep:cheap" may not contain ":" or "/"`).
+- `defaultFusion` naming an unknown fusion → error.
 - fusion slot entry naming an unknown alias → name it and list `aliases` keys.
 - fusion slot list empty → name the slot.
 - `mode: "3x"` fusion declaring `systems_thinker` or `judge` → error, because 3x never calls them.
@@ -232,6 +246,9 @@ piece of configuration registers, and a stale name must fail at use, not at star
 
 ```json
 {
+  "providerId": "fusion-matrix",
+  "providerName": "Fusion Matrix",
+  "defaultFusion": "standard",
   "aliases": {
     "deepseek-flash": { "providers": ["go", "tp", "corp"] },
     "deepseek-pro": { "providers": ["go", "tp"] },
@@ -245,13 +262,13 @@ piece of configuration registers, and a stale name must fail at use, not at star
     "luna": { "providers": ["zen", "go"], "reasoning": true }
   },
   "fusions": {
-    "default": {
+    "standard": {
       "mode": "3x",
       "slots": { "technical_expert": ["glm"], "devils_advocate": ["glm"],
                  "synthesis": ["glm"] },
       "fileAgent": { "alias": "deepseek-flash" }
     },
-    "flash": {
+    "quick": {
       "mode": "3x",
       "slots": { "technical_expert": ["glm-flash"], "devils_advocate": ["glm-flash"],
                  "synthesis": ["glm"] },
@@ -339,8 +356,8 @@ piece of configuration registers, and a stale name must fail at use, not at star
       "route": {
         "instructions": "How much deliberation does this request need?",
         "criteria": {
-          "trivial": { "description": "A direct factual or mechanical question", "then": "flash" },
-          "single_concern": { "description": "One design decision with limited blast radius", "then": "flash" },
+          "trivial": { "description": "A direct factual or mechanical question", "then": "quick" },
+          "single_concern": { "description": "One design decision with limited blast radius", "then": "quick" },
           "multi_concern": "Several interacting decisions or cross-cutting change",
           "architectural": "System-level tradeoffs with long-lived consequences"
         }
@@ -452,20 +469,23 @@ startup continues (pi awaits an async factory: `docs/extensions.md`, "Async fact
 Provider registration:
 
 ```ts
-pi.registerProvider("fusion", {
-  name: "Fusion Matrix",
+const providerId = config.providerId ?? "fusion-matrix";
+
+pi.registerProvider(providerId, {
+  name: config.providerName ?? "Fusion Matrix",
   baseUrl: "http://127.0.0.1:1/unused",   // never used: our api id only matches our own models
   apiKey: "unused",                        // provider-composer requires apiKey or oauth
   api: "fusion-matrix",
-  models: Object.keys(config.fusions).map((id) => ({
-    id: id === "default" ? "fusion" : `fusion-${id}`,
-    name: `Fusion · ${id}`,
+  // The fusion key is the model id, verbatim: no prefixing, no reserved "default" id.
+  models: Object.entries(config.fusions).map(([id, fusion]) => ({
+    id,
+    name: fusion.name ?? `Fusion · ${id}`,
     api: "fusion-matrix",
-    provider: "fusion",
+    provider: providerId,
     reasoning: false,
     input: ["text"],
-    contextWindow: 128000,
-    maxTokens: 4096,
+    contextWindow: fusion.model?.contextWindow ?? 128000,
+    maxTokens: fusion.model?.maxTokens ?? 4096,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   })),
   streamSimple: (model, context, options) => runFusion(model, context, options),
@@ -611,7 +631,7 @@ pi.registerCommand("fusion-matrix", { description: "List profiles, accounts, ali
 ```
 
 `/fusion` parses the first whitespace-delimited token as a fusion id when it matches a key in
-`fusions`; otherwise the whole argument string is the prompt and `default` is used. Unknown id →
+`fusions`; otherwise the whole argument string is the prompt and `defaultFusion` is used. Unknown id →
 `ctx.ui.notify('unknown fusion "x"; known: default, deep, ...', "error")` and no run.
 Tool `details.substitutions` and `details.slotErrors` are always present (empty arrays included): a
 silently degraded run is a wrong answer and must be visible.
@@ -855,16 +875,16 @@ provider additionally needs whatever its `!command` reads); `/tmp/fusion-matrix-
 pi config repo symlink from Step 1 in place.
 
 1. **Model registration** — `cd /tmp/fusion-matrix-check && pi --list-models fusion` prints
-   `fusion`, `fusion-flash`, `fusion-deep`, `fusion-review`, `fusion-openai`, `fusion-review-check`,
-   `fusion-review-routed`.
+   `fusion-matrix/standard`, `fusion-matrix/quick`, `fusion-matrix/deep`, `fusion-matrix/review`,
+   `fusion-matrix/openai`, `fusion-matrix/review-check`, `fusion-matrix/review-routed`.
    Failure here means the api id, manifest, or symlink is wrong.
 2. **Config validation** — write `/tmp/fusion-matrix-check/.pi-fusion-matrix.json` containing
-   `{"fusions": {"deep": {"slots": {"judge": ["no-such-alias"]}}}}`; a `--model fusion-deep` run must
+   `{"fusions": {"deep": {"slots": {"judge": ["no-such-alias"]}}}}`; a `--model fusion-matrix/deep` run must
    fail with `pi-fusion-matrix: unknown alias "no-such-alias"; known: deepseek-flash, ...`. Remove the
    file afterwards.
 3. **Provider-layer fallback (same alias, new billing route)** — in
    `/tmp/fusion-matrix-check/.pi-fusion-matrix.json` set
-   `{"aliases": {"deepseek-pro": {"providers": ["nope", "tp"]}}}`. A `fusion-deep` run must print
+   `{"aliases": {"deepseek-pro": {"providers": ["nope", "tp"]}}}`. A `fusion-matrix/deep` run must print
    ` ├─ ↩ devils_advocate deepseek-pro@nope → deepseek-pro@tp (missing provider)`, complete, and —
    driven through the `deliberate` tool — report exactly one substitution whose `from` and `to` share
    the same alias name. Remove the override afterwards. This verifies both the native-provider lookup
@@ -876,23 +896,23 @@ pi config repo symlink from Step 1 in place.
    `details.substitutions[0].from`/`.to` must carry the two different alias names. This is the check
    that distinguishes the two layers; identical `from`/`to` text means the reporting is wrong.
 5. **Empirical quota advance** — with the Go 5-hour window exhausted (observed 2026-09-18:
-   HTTP 429 `5-hour usage limit reached`), `pi -p "Reply with exactly: ZQX1" --model fusion-deep
+   HTTP 429 `5-hour usage limit reached`), `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/deep
    --no-session` must fall through to each alias's next provider and still answer, instead of the
    121 s retry loop the reference implementation exhibits.
 6. **Prompt correctness under injected preludes** — with the full extension set loaded (context-mode
-   active), `pi -p "Reply with exactly: ZQX1" --model fusion --no-session` must return `ZQX1`, not a
+   active), `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/standard --no-session` must return `ZQX1`, not a
    deliberation about context-mode's tool hierarchy.
 7. **Decision contract offline** — `node scripts/typesafe-stub.mjs &` and
    `node scripts/semif-stub.mjs &`, then
    `node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone` and
    `node scripts/semif-probe.mjs --backend http://127.0.0.1:8792/score` must both exit 0. Point
    `decide.defaultBackend` at `typesafe-stub` and run
-   `pi -p "Summarize the tradeoffs of optimistic locking" --model fusion-review-check --no-session`:
+   `pi -p "Summarize the tradeoffs of optimistic locking" --model fusion-matrix/review-check --no-session`:
    the judge element must resolve in place and `details.decisions` must carry the winner and the full
    probability map. Kill the stubs afterwards.
 8. **TypeSafe live** — export `TYPESAFE_API_KEY`, set `decide.defaultBackend` to `typesafe`, and run
    `node scripts/typesafe-probe.mjs --backend https://api.typesafe.ai/v1/systemone`; it must exit 0 and
-   print the answering `model` (`jev-1.13.0`). Then run `fusion-review-check` live and confirm
+   print the answering `model` (`jev-1.13.0`). Then run `fusion-matrix/review-check` live and confirm
    `details.decisions[].verify` carries three typed answers (`noul`, `noul`, `choice`) and that each
    `choice`/`score` answer has `confidence`. A `401` here means the key is absent or wrong, not that
    the wiring is broken.
@@ -901,32 +921,32 @@ pi config repo symlink from Step 1 in place.
    still completes with one `⚠️ verify:` delta and an unchanged synthesis — verification must never
    rewrite or block; (b) point `route` at a `semif` backend and confirm the load error
    `routing requires a backend that reports confidence; "semif" does not`; (c) run
-   `fusion-review-routed` on a genuinely complex prompt and confirm it does *not* route away (the
+   `fusion-matrix/review-routed` on a genuinely complex prompt and confirm it does *not* route away (the
    decision reports a non-trivial option), then on `"Reply with exactly: ZQX1"` and confirm it does,
    with the ` routed` line and `details.routing` both present; (d) set `route.minConfidence` to 1.0
-   and confirm the run proceeds as `fusion-review-routed` with `details.routing` recording the
+   and confirm the run proceeds as `fusion-matrix/review-routed` with `details.routing` recording the
    declined route — the gate must be able to decline, and must say so.
-10. **Oversized state** — put a ~150 KB `{{panel}}` through `fusion-review-check` against the live
+10. **Oversized state** — put a ~150 KB `{{panel}}` through `fusion-matrix/review-check` against the live
     backend: the run must emit one `⚠️ decision state truncated` delta, still complete, and report the
     decision. A `4xx` from the backend instead means truncation did not engage.
 11. **Per-project billing selection** — add a second provider block to `~/.pi/agent/models.json` (copy
     `go` as `go-alt`, same key) and set
     `/tmp/fusion-matrix-check/.pi-fusion-matrix.json` to
-    `{"aliases": {"glm": {"providers": ["go-alt", "go"]}}}`. A `--model fusion` run must execute on
+    `{"aliases": {"glm": {"providers": ["go-alt", "go"]}}}`. A `--model fusion-matrix/standard` run must execute on
     `go-alt` (banner and `details.models` show it) with no edit to any fusion and no credential in the
     project file. Remove the override afterwards. This is the check that per-repo billing needs no
     profile system.
 12. **Independence from the fork** — `grep -rn "pi-fusion\|/Users/\|~/" extensions/ matrix.json
     package.json` must return no import or path reference (only doc/comment mentions of the reference
     directory are allowed). Then move the vendored reference fork out of the pi extensions directory, run
-    `pi -p "Reply with exactly: ZQX1" --model fusion-deep --no-session`, and confirm it still works —
+    `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/deep --no-session`, and confirm it still works —
     this is the check that the package runs with no developer checkout present. Restore the directory
     afterwards.
 13. **Alias is version-free** — `grep -rn "glm-5\|qwen3\.8\|deepseek-v4\|kimi-k3"` across
     `extensions/pi-fusion-matrix/` and `matrix.json` must match only test fixtures or comments, never
     `fusions` or `slots`. A `models.json` version bump (for example `deepseek-v4.1-flash` →
     `deepseek-v4-flash` on `go`) must change behavior with no edit to this repo; confirm by bumping it
-    and running `pi -p "Reply with exactly: ZQX1" --model fusion`: the run succeeds and
+    and running `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/standard`: the run succeeds and
     `details.models` shows the new vendor id behind the unchanged alias.
 
 ## Assumptions & contingencies

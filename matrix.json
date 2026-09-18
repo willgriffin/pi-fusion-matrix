@@ -1,4 +1,7 @@
 {
+  "providerId": "fusion-matrix",
+  "providerName": "Fusion Matrix",
+  "defaultFusion": "standard",
   "aliases": {
     "deepseek-flash": { "providers": ["go", "tp", "corp"] },
     "deepseek-pro": { "providers": ["go", "tp"] },
@@ -12,7 +15,7 @@
     "luna": { "providers": ["zen", "go"], "reasoning": true }
   },
   "fusions": {
-    "default": {
+    "standard": {
       "mode": "3x",
       "slots": {
         "technical_expert": ["glm"],
@@ -21,7 +24,7 @@
       },
       "fileAgent": { "alias": "deepseek-flash" }
     },
-    "flash": {
+    "quick": {
       "mode": "3x",
       "slots": {
         "technical_expert": ["glm-flash"],
@@ -127,8 +130,8 @@
       "route": {
         "instructions": "How much deliberation does this request need?",
         "criteria": {
-          "trivial": { "description": "A direct factual or mechanical question", "then": "flash" },
-          "single_concern": { "description": "One design decision with limited blast radius", "then": "flash" },
+          "trivial": { "description": "A direct factual or mechanical question", "then": "quick" },
+          "single_concern": { "description": "One design decision with limited blast radius", "then": "quick" },
           "multi_concern": "Several interacting decisions or cross-cutting change",
           "architectural": "System-level tradeoffs with long-lived consequences"
         }
