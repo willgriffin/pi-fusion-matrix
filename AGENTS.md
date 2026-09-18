@@ -30,8 +30,12 @@ is a bug in one of them.
   verification is reported in the stream and in tool `details`. A run that degraded quietly is a
   wrong answer.
 - **Decisions stay conservative.** `verify` is report-only; `route` selects a whole fusion and never a
-  judge or synthesis model, and one that is unsure must decline rather than guess; a backend that
-  reports no `confidence` (SemIf) may not gate anything.
+  judge or synthesis model; a backend that reports no `confidence` (SemIf) may not gate anything.
+- **Uncertainty escalates, never guesses.** The rule is uniform: at fusion level an unsure decision
+  declines to route, and at slot level a decision whose answer is not actionable (`sufficientWhen`
+  unmet) advances to the next candidate with reason `"insufficient"` — reported distinctly from a
+  failure, with its answer and confidence, and handed forward as a prior. Every run records
+  `details.cascades`, because a cascade whose cheap path rarely wins is configuration to delete.
 - **Aliases are version-free.** Vendor model ids appear only in fixtures and docs, never in `fusions`
   or `slots`.
 

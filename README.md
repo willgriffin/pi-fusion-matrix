@@ -20,9 +20,11 @@ Status: planned. The implementation spec is [`docs/plan.md`](docs/plan.md); work
   endpoints live in pi's own `~/.pi/agent/models.json`, so a version bump edits one line there.
 - **Decisions** — a `decide` element for closed questions over an option set, backed by TypeSafe
   (default; calibrated `confidence`, no local service) or SemIf (local, zero marginal cost).
-  Conservative by construction: `verify` reports and never rewrites, `route` selects a whole fusion (never
-  a judge or synthesis model) and declines to act below its confidence threshold, and a backend without
-  confidence cannot steer cost at all.
+  Conservative by construction: `verify` reports and never rewrites; `route` selects a whole fusion
+  (never a judge or synthesis model); and uncertainty escalates rather than guesses — at fusion level a
+  decision that is unsure declines to route, and inside a slot a decision whose answer is not actionable
+  escalates to the next candidate (the judge can be a cheap consensus read that falls through to a real
+  judge when the panel is ambiguous). A backend without confidence cannot gate anything at all.
 
 ## What it does not do
 

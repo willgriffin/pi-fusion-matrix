@@ -79,13 +79,14 @@
           {
             "decide": {
               "state": "{{panel}}",
-              "question": "Which expert supports its claim with the strongest concrete evidence?",
+              "question": "Do the experts agree on a single core recommendation?",
               "options": [
-                { "id": "technical_expert", "description": "The technical expert does." },
-                { "id": "devils_advocate", "description": "The devil's advocate does." },
-                { "id": "systems_thinker", "description": "The systems thinker does." }
+                { "id": "agrees", "description": "They converge on the same recommendation." },
+                { "id": "partial", "description": "They overlap but differ on a substantive point." },
+                { "id": "disagrees", "description": "They recommend different things." }
               ]
-            }
+            },
+            "sufficientWhen": { "choiceIs": ["agrees"], "minConfidence": 0.85 }
           },
           "deepseek-pro"
         ],

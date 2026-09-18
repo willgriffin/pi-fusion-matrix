@@ -131,14 +131,32 @@ export type RouteSpec = {
   criteria: Record<string, RouteCriterion>;   // 2..16 option ids; at least one carries `then`
   state?: string;                             // default "{{prompt}}"
   backend?: string;
-  minConfidence?: number;                     // default 0.5; below this the run does not route
+  /**
+   * Same predicate as a slot cascade, at fusion level: the winning option must carry `then`, and
+   * `sufficientWhen` (default `{ minConfidence: 0.5 }`) must hold. Otherwise the run proceeds as this
+   * fusion — unsure means spend, not gamble.
+   */
+  sufficientWhen?: SufficientWhen;
+};
+
+/**
+ * When a decision's answer is actionable enough to stop the cascade. Omitted conditions are not
+ * tested; all supplied conditions must hold. A candidate whose answer is not sufficient advances to
+ * the next candidate with reason `"insufficient"` — a success that escalates, not a failure.
+ */
+export type SufficientWhen = {
+  choiceIs?: string | string[];   // the winning option id, or any of several
+  noulAbove?: number;             // noul at or above this counts
+  scoreAbove?: number;            // score at or above this counts
+  scoreBelow?: number;            // score at or below this counts
+  minConfidence?: number;         // choice/score confidence at or above this counts
 };
 
 /** A slot entry is an alias id, an object pinning/reordering that alias's providers, or a decision. */
 export type SlotCandidate =
   | string
   | { alias: string; providers?: (string | ProviderRef)[] }
-  | { decide: DecideSpec };
+  | { decide: DecideSpec; sufficientWhen?: SufficientWhen };
 
 export type SlotKey = "technical_expert" | "devils_advocate" | "systems_thinker" | "judge" | "synthesis";
 
@@ -231,7 +249,12 @@ Validation runs on every load and throws `pi-fusion-matrix: <problem>`; never fa
 - `route.criteria` with fewer than two options, or with no entry carrying `then` → error, because
   such a route can never fire.
 - a `then` naming an unknown fusion, this fusion, or a fusion that itself declares `route` → error.
-- `route.minConfidence` outside 0..1 → error.
+- `sufficientWhen` on a model candidate → error (`models produce no answer to test`); it applies to
+  decision candidates only.
+- `sufficientWhen` with none of `choiceIs`/`noulAbove`/`scoreAbove`/`scoreBelow`/`minConfidence` →
+  error, because it would always pass and make the rest of the chain dead config.
+- `sufficientWhen.choiceIs` naming an option absent from that decision's `criteria` → error.
+- a `sufficientWhen` threshold outside 0..1 → error.
 - a `route` resolving to a `kind: "semif"` backend → error: `routing requires a backend that reports
   confidence; "semif" does not`, because an uncalibrated probability must not steer cost.
 
@@ -315,12 +338,13 @@ piece of configuration registers, and a stale name must fail at use, not at star
         "judge": [
           { "decide": {
               "state": "{{panel}}",
-              "question": "Which expert supports its claim with the strongest concrete evidence?",
+              "question": "Do the experts agree on a single core recommendation?",
               "options": [
-                { "id": "technical_expert", "description": "The technical expert does." },
-                { "id": "devils_advocate", "description": "The devil's advocate does." },
-                { "id": "systems_thinker", "description": "The systems thinker does." }
-              ] } },
+                { "id": "agrees", "description": "They converge on the same recommendation." },
+                { "id": "partial", "description": "They overlap but differ on a substantive point." },
+                { "id": "disagrees", "description": "They recommend different things." }
+              ] },
+            "sufficientWhen": { "choiceIs": ["agrees"], "minConfidence": 0.85 } },
           "deepseek-pro"
         ],
         "synthesis": ["kimi", "qwen-max"]
@@ -577,7 +601,19 @@ async function runSlot(slot: SlotKey, candidates: SlotCandidate[], ctx: RunConte
    | text matches `/\b40[13]\b|unauthorized|invalid api key/i` | advance | `"credential"` | both |
    | text matches `/not found|unknown model|\b404\b/i` | advance | `"missing model"` | both |
    | transport failure, 5xx, or a 429 without quota semantics | retry same candidate once after 2000 ms, then advance | `"transient"` | both |
+   | a decision candidate answered, but `sufficientWhen` did not hold | advance at once, keeping the answer | `"insufficient"` | slot cascade |
    | any delta already streamed to the caller | do not advance; end with emitted text, `degraded: true` | — | — |
+
+   `"insufficient"` is not a failure and must not be reported as one. Its line names the answer and
+   the condition it missed:
+   ` ├─ ↳ judge decision insufficient (agrees, conf 0.62 < 0.80) → deepseek-pro\n`
+   A sufficient decision candidate skips the rest of the chain and reports what it skipped:
+   ` ├─ ️ judge via decision (agrees, conf 0.91) — skipping deepseek-pro\n`
+   When a decision is insufficient, its answers are handed to the next candidate as a prior, inserted
+   as one line before the prompt:
+   `A fast classifier read this as choice=agrees (confidence 0.62); treat the ambiguity explicitly.`
+   The exact prior string is recorded in `details.cascades[].prior` so prompt assembly is inspectable
+   without network capture.
 5. Substitution lines differ per layer so the reader can tell a billing swap from a model change:
    - inside an alias: ` ├─ ↩ judge deepseek-pro@go → deepseek-pro@tp (quota)\n`
    - across entries:   ` ├─ ↩ judge qwen-max@go → glm@go (quota)\n`
@@ -630,6 +666,20 @@ pi.registerCommand("fusion", { description: "Run a named fusion: /fusion <id> <p
 pi.registerCommand("fusion-matrix", { description: "List profiles, accounts, aliases, and fusions", handler: async (_args, ctx) => {} });
 ```
 
+Every run records its cascades so the hit rate of the cheap path is measurable:
+
+```ts
+type Cascade = {
+  slot: SlotKey;
+  kind: "model" | "decision";
+  answer?: { choice?: string; noul?: number; score?: number; confidence?: number };
+  sufficient?: boolean;   // decision candidates only
+  prior?: string;         // exact text handed to the next candidate when insufficient
+  advancedTo?: string;    // label of the next candidate
+};
+// in tool details: details.cascades: Cascade[]
+```
+
 `/fusion` parses the first whitespace-delimited token as a fusion id when it matches a key in
 `fusions`; otherwise the whole argument string is the prompt and `defaultFusion` is used. Unknown id →
 `ctx.ui.notify('unknown fusion "x"; known: default, deep, ...', "error")` and no run.
@@ -640,8 +690,9 @@ silently degraded run is a wrong answer and must be visible.
 `route.instructions` and the option ids of `route.criteria` (descriptions only — `then` is this
 extension's vocabulary and is never sent). `state` defaults to `{{prompt}}`. A `then` on the winning
 option names the fusion to run instead of this one; an option without `then`, an option id the map
-does not contain, or a `confidence` below `route.minConfidence` (default 0.5) all mean the run proceeds
-as this fusion. The decision and the routing are reported
+does not contain, or a `sufficientWhen` that does not hold (`{ minConfidence: 0.5 }` by default) all
+mean the run proceeds as this fusion — the same "unsure means spend" rule as a slot cascade, one level
+up. The decision and the routing are reported
 (` ├─ ↪ routed to flash (complexity=trivial, confidence 0.91)\n`) and recorded in `details.routing`,
 including when the confidence gate declines to route.
 Routing may target a more expensive fusion — escalation on `"architectural"` is a normal use — so
@@ -923,26 +974,35 @@ pi config repo symlink from Step 1 in place.
    `routing requires a backend that reports confidence; "semif" does not`; (c) run
    `fusion-matrix/review-routed` on a genuinely complex prompt and confirm it does *not* route away (the
    decision reports a non-trivial option), then on `"Reply with exactly: ZQX1"` and confirm it does,
-   with the ` routed` line and `details.routing` both present; (d) set `route.minConfidence` to 1.0
-   and confirm the run proceeds as `fusion-matrix/review-routed` with `details.routing` recording the
-   declined route — the gate must be able to decline, and must say so.
-10. **Oversized state** — put a ~150 KB `{{panel}}` through `fusion-matrix/review-check` against the live
+   with the ` routed` line and `details.routing` both present; (d) set `route.sufficientWhen.minConfidence`
+   to 1.0 and confirm the run proceeds as `fusion-matrix/review-routed` with `details.routing` recording
+   the declined route — the gate must be able to decline, and must say so.
+10. **Judge cascade** — with the decision stub returning a decisive high-confidence answer,
+    `fusion-matrix/review-check` must report ` ├─ ️ judge via decision (agrees, conf 0.9x) — skipping
+    deepseek-pro`, must *not* call the generative judge, and must record
+    `details.cascades[0].sufficient === true`. With the stub returning `unclear` at 0.51, the same run
+    must emit ` ├─ ↳ judge decision insufficient (…) → deepseek-pro`, call the generative judge, and
+    record `details.cascades[0].sufficient === false` plus a `prior` string containing the decision's
+    answer. Then set `sufficientWhen.choiceIs` to an option the stub never returns and confirm every
+    run escalates — a cascade whose cheap path can never win is measurable dead weight, which is what
+    `details.cascades` exists to reveal.
+11. **Oversized state** — put a ~150 KB `{{panel}}` through `fusion-matrix/review-check` against the live
     backend: the run must emit one `⚠️ decision state truncated` delta, still complete, and report the
     decision. A `4xx` from the backend instead means truncation did not engage.
-11. **Per-project billing selection** — add a second provider block to `~/.pi/agent/models.json` (copy
+12. **Per-project billing selection** — add a second provider block to `~/.pi/agent/models.json` (copy
     `go` as `go-alt`, same key) and set
     `/tmp/fusion-matrix-check/.pi-fusion-matrix.json` to
     `{"aliases": {"glm": {"providers": ["go-alt", "go"]}}}`. A `--model fusion-matrix/standard` run must execute on
     `go-alt` (banner and `details.models` show it) with no edit to any fusion and no credential in the
     project file. Remove the override afterwards. This is the check that per-repo billing needs no
     profile system.
-12. **Independence from the fork** — `grep -rn "pi-fusion\|/Users/\|~/" extensions/ matrix.json
+13. **Independence from the fork** — `grep -rn "pi-fusion\|/Users/\|~/" extensions/ matrix.json
     package.json` must return no import or path reference (only doc/comment mentions of the reference
     directory are allowed). Then move the vendored reference fork out of the pi extensions directory, run
     `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/deep --no-session`, and confirm it still works —
     this is the check that the package runs with no developer checkout present. Restore the directory
     afterwards.
-13. **Alias is version-free** — `grep -rn "glm-5\|qwen3\.8\|deepseek-v4\|kimi-k3"` across
+14. **Alias is version-free** — `grep -rn "glm-5\|qwen3\.8\|deepseek-v4\|kimi-k3"` across
     `extensions/pi-fusion-matrix/` and `matrix.json` must match only test fixtures or comments, never
     `fusions` or `slots`. A `models.json` version bump (for example `deepseek-v4.1-flash` →
     `deepseek-v4-flash` on `go`) must change behavior with no edit to this repo; confirm by bumping it
@@ -1013,6 +1073,8 @@ pi config repo symlink from Step 1 in place.
 - **Same alias across providers means the same slot, not necessarily the same vendor id.** Where two
   providers name one model differently, use the object form:
   `{"id": "tp", "modelOverride": "qwen3.8-max-preview"}`.
-- **Threshold fields are not part of this plan.** Gating is expressed as a decision element inside a slot's
-  ordered list (`review-check` in Step 2); a probability-threshold field is dropped. If thresholds are
-  wanted later they get their own spec.
+- **Thresholds live in `sufficientWhen`, in one place.** A decision is actionable when its answer
+  matches and its confidence clears the bar; nothing else in the config carries a probability
+  threshold. A cascade is only worth its extra call when the cheap path usually decides, which is why
+  every run records `details.cascades` — tune thresholds and delete useless cascades from that data
+  rather than from intuition.
