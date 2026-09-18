@@ -32,6 +32,12 @@ const SLOT_KINDS = ["alias", "decide"];
 
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 
+/**
+ * A backend URL on this machine. Loopback needs no credential, and that rule is the same for the
+ * loader and the client, so both read it from here rather than each carrying their own copy.
+ */
+export const LOOPBACK_URL = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])([:/]|$)/;
+
 /** Objects merge field by field; arrays and scalars replace. */
 export function mergeConfig(base, override) {
   if (override === undefined) return base;
@@ -76,10 +82,21 @@ export function configLayers({ cwd = process.cwd() } = {}) {
 /**
  * Load the effective config. `sources.personas[name]` records the directory the winning persona
  * declaration came from, so its prompt path resolves against the file that owns it.
+ *
+ * `layers` optionally names the layer kinds to load (`["packaged"]` is the ship-shape config alone).
+ * An offline contract harness must be able to say that: the machine and session layers are the
+ * operator's, and inheriting them makes the thing under test depend on whose laptop it runs on. The
+ * default stays every layer that exists.
  */
-export function loadMatrixConfig({ cwd = process.cwd() } = {}) {
-  const layers = configLayers({ cwd });
-  if (layers.length === 0) throw new Error("no matrix.json found; the packaged config is missing");
+export function loadMatrixConfig({ cwd = process.cwd(), layers: wanted } = {}) {
+  const layers = wanted === undefined
+    ? configLayers({ cwd })
+    : configLayers({ cwd }).filter((layer) => wanted.includes(layer.kind));
+  if (layers.length === 0) {
+    throw new Error(wanted === undefined
+      ? "no matrix.json found; the packaged config is missing"
+      : `no matrix.json found in layer(s) ${JSON.stringify(wanted)}`);
+  }
   let config = {};
   const sources = { personas: {}, aliases: {}, modes: {}, fusions: {}, backends: {} };
   for (const layer of layers) {
@@ -231,8 +248,15 @@ export function validateConfig(config, { sources } = {}) {
       if (stage.alsoSynthesize && i !== stages.length - 1) err(`${where}: alsoSynthesize is only legal on the final stage`);
       if (stage.score !== undefined && stage.over !== "panel") err(`${where}: score requires over: "panel"`);
       if (stage.decide !== undefined) validateDecision(stage.decide, where, config, err);
-      if (stage.score !== undefined) validateDecision(stage.score, where, config, err);
-      if (stage.sufficientWhen !== undefined) validateSufficientWhen(stage.sufficientWhen, where, stage.decide, err);
+      if (stage.score !== undefined) validateDecision(stage.score, where, config, err, { scoreLevels: true });
+      if (stage.sufficientWhen !== undefined) {
+        // The gate skips the stage after this one (`pipeline.js` skips `index + 1`). If that stage is
+        // the mode's last, a sufficient answer leaves the run with no assistant message at all.
+        if (i + 1 === stages.length - 1) {
+          err(`${where}: a sufficient decision would skip the final stage, leaving no answer`);
+        }
+        validateSufficientWhen(stage.sufficientWhen, where, stage.decide, err, effectiveBackend(stage.decide, config));
+      }
 
       // dataflow
       const connectorOk = (input) => {
@@ -299,7 +323,7 @@ export function validateConfig(config, { sources } = {}) {
           if (candidate.sufficientWhen !== undefined) err(`${where}: models produce no answer to test; sufficientWhen applies to decisions`);
         } else {
           validateDecision(candidate.decide, where, config, err);
-          validateSufficientWhen(candidate.sufficientWhen, where, candidate.decide, err);
+          validateSufficientWhen(candidate.sufficientWhen, where, candidate.decide, err, effectiveBackend(candidate.decide, config));
         }
       });
     }
@@ -365,7 +389,7 @@ export function validateConfig(config, { sources } = {}) {
     // The canonical env var per kind, so config can never name an arbitrary variable to read, and a
     // non-loopback backend must name one at all.
     const env = backend.kind === "typesafe" ? "TYPESAFE_API_KEY" : backend.kind === "semif" ? "SEMIF_API_KEY" : null;
-    const loopbackUrl = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])([:/]|$)/.test(backend.url ?? "");
+    const loopbackUrl = LOOPBACK_URL.test(backend.url ?? "");
     if (env && backend.apiKeyEnv !== undefined && backend.apiKeyEnv !== env) {
       err(`backend "${name}": apiKeyEnv must be ${env} for a ${backend.kind} backend, not "${backend.apiKeyEnv}"`);
     }
@@ -373,8 +397,7 @@ export function validateConfig(config, { sources } = {}) {
       err(`backend "${name}": a non-loopback backend must name its apiKeyEnv (${env})`);
     }
     if (backend.url) {
-      const loopback = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])([:/]|$)/.test(backend.url);
-      if (!/^https:\/\//.test(backend.url) && !loopback) {
+      if (!/^https:\/\//.test(backend.url) && !loopbackUrl) {
         err(`backend "${name}": url must be https, or http on loopback, not "${backend.url}"`);
       }
     }
@@ -401,16 +424,37 @@ export function validateConfig(config, { sources } = {}) {
 }
 
 /**
+ * The backend a decision resolves to: its own `backend`, else the configured default. Every rule that
+ * depends on what a backend can report (SemIf reports probabilities and nothing else) reads the
+ * answer from here, so a caller cannot pass `undefined` and silently exempt a decision.
+ */
+function effectiveBackend(spec, config) {
+  const name = spec?.backend ?? config.decide?.defaultBackend;
+  return name ? { name, kind: config.backends?.[name]?.kind } : undefined;
+}
+
+/**
  * One choice vocabulary across every surface (slot candidate, pipeline stage, verify, route): an
  * `instructions` string and a `criteria` map. A route may attach an action to a criterion with
  * `then`; nothing else may, because nothing else has an action to take. The batched `questions` form
  * (noul/choice/score) stays for typed questions a backend can answer several of at once.
  */
-function validateDecision(spec, where, config, err, { allowActions = false } = {}) {
+function validateDecision(spec, where, config, err, { allowActions = false, scoreLevels = false } = {}) {
   if (!isObject(spec)) { err(`${where}: decision is not an object`); return; }
+  // A `score` stage rates each item of `over` against a list of levels rather than choosing between
+  // named options, so it is the one surface where `criteria` is an array. Nothing else may use that
+  // form: an array elsewhere is a config mistake, not a second spelling of an option map.
+  const levels = Array.isArray(spec.criteria) ? spec.criteria : undefined;
   const hasCriteria = isObject(spec.criteria);
   const hasQuestions = isObject(spec.questions);
-  if (hasCriteria === hasQuestions) {
+  if (levels) {
+    if (!scoreLevels) { err(`${where}: criteria must be an option map; rating levels belong to a score stage`); return; }
+    if (spec.questions !== undefined) err(`${where}: a score stage declares criteria or questions, not both`);
+    if (!spec.instructions) err(`${where}: a score stage needs instructions`);
+    if (levels.length < 2) err(`${where}: score criteria needs at least two levels`);
+    if (levels.length > 16) err(`${where}: score criteria has ${levels.length} levels, above the 16 backends accept`);
+    if (levels.some((level) => typeof level !== "string")) err(`${where}: score criteria levels must be strings`);
+  } else if (hasCriteria === hasQuestions) {
     err(`${where}: decision must declare exactly one of criteria/questions`);
     return;
   }
@@ -430,7 +474,7 @@ function validateDecision(spec, where, config, err, { allowActions = false } = {
         err(`${where}: criteria "${id}" attaches an action, which only a route may do`);
       }
     }
-  } else {
+  } else if (hasQuestions) {
     const entries = Object.entries(spec.questions);
     if (entries.length === 0) err(`${where}: questions is empty`);
     for (const [id, question] of entries) {
@@ -448,13 +492,30 @@ function validateDecision(spec, where, config, err, { allowActions = false } = {
 
   if (spec.state !== undefined && typeof spec.state !== "string") err(`${where}: state must be a string`);
   if (spec.backend !== undefined && !config.backends?.[spec.backend]) err(`${where}: unknown backend "${spec.backend}"`);
+  // SemIf's row schema is one question per request, so the batched `questions` form cannot be sent to
+  // it at all. The client keeps its runtime guard (defence in depth); the loader is what makes this a
+  // config error instead of a mid-run substitution.
+  const backend = effectiveBackend(spec, config);
+  if (hasQuestions && backend?.kind === "semif") {
+    err(`${where}: backend "${backend.name}" is SemIf and takes one question per request; use a criteria decision or the questions form on a typesafe backend`);
+  }
 }
 
-export function validateSufficientWhen(sufficientWhen, where, decision, err) {
+/**
+ * `backend` is the resolved `{ name, kind }` of the decision this gate belongs to, or omitted when a
+ * caller has only the rule set (the doctor reports through `validateConfig`, which passes it).
+ */
+export function validateSufficientWhen(sufficientWhen, where, decision, err, backend) {
   if (sufficientWhen === undefined) return;
   if (!isObject(sufficientWhen)) { err(`${where}: sufficientWhen is not an object`); return; }
   const conditions = ["choiceIs", "noulAbove", "scoreAbove", "scoreBelow", "minConfidence"].filter((k) => sufficientWhen[k] !== undefined);
   if (conditions.length === 0) err(`${where}: sufficientWhen has no condition, so it would always pass`);
+  // SemIf reports probabilities and nothing else: no confidence, no score. A gate over either would
+  // threshold a value the backend never sends — the runtime reads it as 0 and the gate can never
+  // pass — so it is a load error on every surface, not just a route.
+  if (backend?.kind === "semif" && ["minConfidence", "scoreAbove", "scoreBelow"].some((k) => sufficientWhen[k] !== undefined)) {
+    err(`${where}: routing requires a backend that reports confidence; "${backend.name}" does not`);
+  }
   for (const key of ["noulAbove", "scoreAbove", "scoreBelow", "minConfidence"]) {
     const v = sufficientWhen[key];
     if (v !== undefined && (typeof v !== "number" || v < 0 || v > 1)) err(`${where}: sufficientWhen.${key} must be a number in 0..1`);
@@ -487,9 +548,11 @@ export function validateRoute(route, fusionId, config, err) {
     }
   }
   if (targets === 0) err(`${where}: no option carries then, so the route can never fire`);
-  const backendName = route.backend ?? config.decide?.defaultBackend;
-  if (backendName && config.backends?.[backendName]?.kind === "semif") {
-    err(`${where}: routing requires a backend that reports confidence; "${backendName}" does not`);
+  const backend = effectiveBackend(route, config);
+  // A route always needs a confidence to decide with (its default gate is `{ minConfidence: 0.5 }`),
+  // so a SemIf backend is a load error here even when no `sufficientWhen` is written.
+  if (backend?.kind === "semif") {
+    err(`${where}: routing requires a backend that reports confidence; "${backend.name}" does not`);
   }
   if (route.sufficientWhen !== undefined) {
     validateSufficientWhen(route.sufficientWhen, where, undefined, err);

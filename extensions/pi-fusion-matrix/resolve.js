@@ -62,10 +62,12 @@ export function resolveCandidates(config, candidate) {
       alias: normalized.alias,
       provider,
       model,
-      maxTokens: alias.maxTokens ?? 4096,
+      maxTokens: alias.maxTokens,
       // `reasoning` marks a thinking-capable model for pi's Model object; the level is the
-      // persona's, and the fusion's `thinking` map may override it.
-      reasoning: alias.reasoning ?? false,
+      // persona's, and the fusion's `thinking` map may override it. Both stay `undefined` when the
+      // alias declares neither, so the seat keeps the catalogued template's own values: pi's adapters
+      // gate thinking on `model.reasoning`, so a synthesized `false` would silently disable it.
+      reasoning: alias.reasoning,
       thinking: normalized.thinking,
     };
   });
@@ -110,7 +112,13 @@ export async function seatRequest(registry, resolved) {
     };
   }
 
+  // Our id, and only the knobs the alias declares: the template supplies api/baseUrl/compat/cost *and*
+  // maxTokens/reasoning for the catalogued sibling of this model, which is the right default. An alias
+  // that names one of them overrides it; one that names neither leaves pi's value standing (pi's
+  // adapters gate thinking on `model.reasoning`, so a synthesized `false` would disable it silently).
   const model = { ...template, id: resolved.model };
+  if (resolved.maxTokens !== undefined) model.maxTokens = resolved.maxTokens;
+  if (resolved.reasoning !== undefined) model.reasoning = resolved.reasoning;
   let auth;
   try {
     auth = await registry.getApiKeyAndHeaders(model);

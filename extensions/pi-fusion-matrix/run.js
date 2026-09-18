@@ -16,9 +16,8 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
-import { AGENT_DIR } from "./config.js";
-import { resolveCandidates, seatRequest, label, isObject, normalizeCandidate } from "./resolve.js";
-import { runPipeline, freshUsage, accumulateUsage } from "./pipeline.js";
+import { resolveCandidates, seatRequest, label, isObject } from "./resolve.js";
+import { runPipeline, freshUsage, accumulateUsage, isSufficient } from "./pipeline.js";
 
 /** pi-ai's `Tool` shape, with a Typebox schema because that is what its adapters expect. */
 export function writeTool(Type) {
@@ -169,43 +168,43 @@ export async function routeFusion({ config, fusion, prompt, decide, emit, signal
   const route = fusion.route;
   if (!route) return { fusion, routing: undefined };
 
-  const answer = await decideOverRoute({ config, route, prompt, decide, signal });
+  const { answer, error } = await decideOverRoute({ route, prompt, decide, signal });
   const option = answer?.choice;
   const entry = route.criteria?.[option];
-  const threshold = route.sufficientWhen?.minConfidence ?? 0.5;
+  // The default gate is `{ minConfidence: 0.5 }` — unsure means spend, not gamble — and it is recorded
+  // in `details.routing` so the effective threshold is visible rather than implied.
+  const sufficientWhen = route.sufficientWhen ?? { minConfidence: 0.5 };
+  const threshold = sufficientWhen.minConfidence ?? 0.5;
   const target = isObject(entry) ? entry.then : undefined;
 
+  if (error) {
+    const routing = { answer, threshold, declined: `decision unavailable: ${error}` };
+    emit.delta(` ├─ ↪ route declined (${error.slice(0, 120)}); running ${fusion.id}\n`);
+    return { fusion, routing };
+  }
   if (!target) {
-    const routing = { answer, declined: "no option matched" };
+    const routing = { answer, threshold, declined: "no option matched" };
     emit.delta(` ├─ ↪ route declined (${option ?? "no answer"}); running ${fusion.id}\n`);
     return { fusion, routing };
   }
-  if (route.sufficientWhen && !answerSufficient(answer, route.sufficientWhen)) {
-    const routing = { answer, declined: `confidence ${(answer?.confidence ?? 0).toFixed(2)} below ${threshold}` };
+  if (!isSufficient(answer, sufficientWhen)) {
+    const routing = { answer, threshold, declined: `confidence ${(answer?.confidence ?? 0).toFixed(2)} below ${threshold}` };
     emit.delta(` ├─ ↪ route declined (${option}, conf ${(answer?.confidence ?? 0).toFixed(2)} < ${threshold}); running ${fusion.id}\n`);
     return { fusion, routing };
   }
 
   const target_ = config.fusions[target];
   emit.delta(` ├─ ↪ routed to ${target} (${option}, conf ${(answer?.confidence ?? 0).toFixed(2)})\n`);
-  return { fusion: { ...target_, id: target }, routing: { answer, routedTo: target } };
-}
-
-function answerSufficient(answer, sufficientWhen) {
-  if (sufficientWhen.choiceIs !== undefined && ![].concat(sufficientWhen.choiceIs).includes(answer?.choice)) return false;
-  if (sufficientWhen.noulAbove !== undefined && !(answer?.noul >= sufficientWhen.noulAbove)) return false;
-  if (sufficientWhen.scoreAbove !== undefined && !(answer?.score >= sufficientWhen.scoreAbove)) return false;
-  if (sufficientWhen.scoreBelow !== undefined && !(answer?.score <= sufficientWhen.scoreBelow)) return false;
-  if (sufficientWhen.minConfidence !== undefined && !((answer?.confidence ?? 0) >= sufficientWhen.minConfidence)) return false;
-  return true;
+  return { fusion: { ...target_, id: target }, routing: { answer, threshold, routedTo: target } };
 }
 
 async function decideOverRoute({ route, prompt, decide, signal }) {
   try {
     const result = await decide({ ...route, state: route.state ?? "{{prompt}}" }, { prompt }, signal);
-    return Object.values(result.answers ?? {})[0] ?? null;
+    return { answer: Object.values(result.answers ?? {})[0] ?? null };
   } catch (error) {
-    return null;
+    // An outage is not "no option matched": the routing record must say what happened.
+    return { answer: null, error: error?.message ?? String(error) };
   }
 }
 
@@ -258,13 +257,19 @@ export async function verifyRun({ config, fusion, vars, decide, emit, signal, ru
  * executes the writes. It is not a stage — it sits outside the pipeline, as the reference
  * implementation had it — and `fileAgent: false` skips it entirely.
  */
-export async function fileAgentStep({ config, fusion, prompt, synthesis, registry, callModel, signal, emit, isBroken }) {
+export async function fileAgentStep({ config, fusion, prompt, synthesis, registry, callModel, signal, emit }) {
   if (!fusion.fileAgent) return { toolCalls: [], usage: freshUsage() };
   const candidates = [fusion.fileAgent.alias];
+  // The alias's provider chain is walked in order, exactly as a seat's is: a route that cannot resolve
+  // (or cannot answer) advances instead of ending the file agent on its first provider.
+  const failures = [];
   for (const candidate of candidates) {
     for (const resolved of resolveCandidates(config, candidate)) {
       const seat = await seatRequest(registry, resolved);
-      if (!seat.ok) { emit.delta(` ├─ ️ file agent skipped: ${seat.reason} — ${seat.detail}\n`); return { toolCalls: [], usage: freshUsage() }; }
+      if (!seat.ok) {
+        failures.push(`${label(resolved)} (${seat.reason}: ${seat.detail})`);
+        continue;
+      }
       let message;
       try {
         message = await callModel({
@@ -281,17 +286,20 @@ export async function fileAgentStep({ config, fusion, prompt, synthesis, registr
           tools: writeTool((await loadTypebox()).Type),
         });
       } catch (error) {
-        emit.delta(` ├─ ️ file agent skipped: ${(error?.message ?? String(error)).slice(0, 160)}\n`);
-        return { toolCalls: [], usage: freshUsage() };
+        const detail = error?.message ?? String(error);
+        failures.push(`${label(resolved)} (${classifyFailure(detail)}: ${detail.slice(0, 120)})`);
+        continue;
       }
       if (message.stopReason === "error") {
         const text = message.errorMessage ?? "unknown error";
-        emit.delta(` ├─ ️ file agent skipped (${classifyFailure(text)}): ${text.slice(0, 140)}\n`);
-        return { toolCalls: [], usage: freshUsage() };
+        failures.push(`${label(resolved)} (${classifyFailure(text)}: ${text.slice(0, 120)})`);
+        continue;
       }
       return { toolCalls: message.toolCalls ?? [], usage: message.usage ?? freshUsage() };
     }
   }
+  // Every route tried, named once: a file agent that could not start says where it looked.
+  emit.delta(` ├─ ️ file agent skipped: ${failures.join("; ") || "no routes configured"}\n`);
   return { toolCalls: [], usage: freshUsage() };
 }
 
@@ -357,10 +365,26 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
         const fusionId = model.id;
         let fusion = { ...config.fusions[fusionId], id: fusionId };
         if (!fusion.mode) throw new Error(`unknown fusion "${fusionId}"`);
-        const prompt = extractPrompt(context.messages);
+        const messages = context.messages ?? [];
+        const prompt = extractPrompt(messages);
 
         push({ type: "start", partial: { ...base, content: [] } });
         push({ type: "text_start", contentIndex: 0, partial: message("") });
+
+        // A write result is the end of the run, not the start of a new one.
+        const writeResults = trailingWriteResults(messages);
+        if (writeResults.length > 0) {
+          const saved = savedPathsFor(messages, writeResults);
+          const confirmation = saved.length > 0
+            ? `✅ Saved ${saved.length} file${saved.length > 1 ? "s" : ""}:\n${saved.map((file) => `  • \`${file}\``).join("\n")}`
+            : `✅ Saved ${writeResults.length} file${writeResults.length > 1 ? "s" : ""}.`;
+          emit.delta(confirmation);
+          const final = message(confirmation);
+          push({ type: "text_end", contentIndex: 0, content: confirmation, partial: final });
+          push({ type: "done", reason: "stop", message: final });
+          outer.end(final);
+          return;
+        }
 
         let routing;
         const routed = await routeFusion({ config, fusion, prompt, decide, emit, signal: options?.signal });
@@ -378,6 +402,11 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
           const reasons = [...new Set(failed.map((s) => s.reason).filter(Boolean))].join(", ") || "unknown";
           emit.delta(`\n⚠️ No deliberation happened: ${failed.length} of ${seats.length} seats were unavailable (${reasons}). Nothing was synthesized — this is not an answer.\n`);
         }
+
+        // A mode that ends in `render`, in `decide`, or in a stage a sufficient decision skipped produces
+        // its answer without a model call, so nothing carried it into the stream: send it here rather
+        // than leaving the status lines as the whole message.
+        if (!run.streamedAnswer && run.text.trim()) emit.delta(`\n${run.text}\n`);
 
         const vars = run.vars ?? { prompt, panel: "", judge: run.text, synthesis: run.text, cwd: process.cwd() };
         const usage = run.usage;
@@ -448,15 +477,39 @@ export function makeRunGate(parentSignal) {
     const onAbort = () => escalate();
     (signal ?? parentSignal)?.addEventListener?.("abort", onAbort, { once: true });
 
+    const started = Date.now();
     const exit = await new Promise((resolve) => {
       child.on("close", (code) => resolve(code ?? 0));
       child.on("error", () => resolve(-1));
     });
     clearTimeout(timer);
-    if (killTimer) clearTimeout(killTimer);
+    clearTimeout(killTimer);
     (signal ?? parentSignal)?.removeEventListener?.("abort", onAbort);
-    return { exit: timedOut ? -1 : exit, timedOut, output: output.split("\n").slice(-40).join("\n") };
+    return { exit: timedOut ? -1 : exit, timedOut, durationMs: Date.now() - started, output: output.split("\n").slice(-40).join("\n") };
   };
+}
+
+/**
+ * pi executes the file agent's `write` calls and calls the provider back with the tool results.
+ * Deliberating again on that follow-up would start a second full pipeline — and a second file agent, and
+ * another write, until the turn cap: measured 2026-09-18, one run produced 24 turns and 24 writes. So a
+ * trailing run of write results is answered with a confirmation and nothing else.
+ */
+export function trailingWriteResults(messages) {
+  const results = [];
+  for (let i = (messages ?? []).length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message?.role === "toolResult" && message.toolName === "write") results.unshift(message);
+    else break;
+  }
+  return results;
+}
+
+export function savedPathsFor(messages, writeResults) {
+  const assistant = messages[messages.length - writeResults.length - 1];
+  return writeResults
+    .map((result) => (assistant?.content ?? []).find((block) => block.type === "toolCall" && block.id === result.toolCallId)?.arguments?.path)
+    .filter(Boolean);
 }
 
 /** The typed prompt is the first message of the trailing run of user messages (see the fork's fix). */
