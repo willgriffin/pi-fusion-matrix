@@ -16,8 +16,9 @@ Status: planned. The implementation spec is [`docs/plan.md`](docs/plan.md); work
 - **Two fallback layers** — inside an alias, providers are tried in order (same model, different
   billing route: quality-preserving); across a slot, aliases are tried in order (different model:
   reported as a substitution).
-- **Version-free aliases** — a slot names `deepseek-flash`, not `deepseek-v4.1-flash`. Vendor ids and
-  endpoints live in pi's own `~/.pi/agent/models.json`, so a version bump edits one line there.
+- **Version-free aliases** — a slot names `deepseek-flash`, never a vendor version. The id actually
+  sent upstream lives in `aliases.<name>.model`, so a vendor release edits one field and no alias name,
+  fusion, or slot. Endpoints and credentials stay in pi's own `~/.pi/agent/models.json`.
 - **Decisions** — a `decide` element for closed questions over an option set, backed by TypeSafe
   (default; calibrated `confidence`, no local service) or SemIf (local, zero marginal cost).
   Conservative by construction: `verify` reports and never rewrites; `route` selects a whole fusion

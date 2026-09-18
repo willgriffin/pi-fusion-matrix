@@ -102,11 +102,16 @@ ln -s "$PWD/extensions/pi-fusion-matrix" ~/.pi/agent/extensions/pi-fusion-matrix
 export type ProviderRef = { id: string; modelOverride?: string };
 
 /**
- * An alias is a stable, version-free name for a model slot ("deepseek-flash"). `providers` is the
- * ordered native-provider list to try, which is the same-model fallback layer; `modelOverride` on a
- * provider is how the same slot is named differently on one provider's catalogue.
+ * An alias is a stable, version-free name for a model slot ("deepseek-flash"). `model` is the vendor
+ * id actually sent upstream — the only place a version appears — so a vendor release edits that one
+ * field and no alias name, fusion, or slot changes. `providers` is the ordered native-provider list to
+ * try (the same-model fallback layer), and `modelOverride` on a provider covers a catalogue that names
+ * the same model differently.
+ *
+ * The vendor id must live here: pi's `models.json` passes a model's `id` to the provider verbatim, and
+ * the registry is keyed by `provider` + `id`, so an alias name cannot stand in for vendor id upstream.
  */
-export type AliasSpec = { providers: (string | ProviderRef)[]; maxTokens?: number; reasoning?: boolean };
+export type AliasSpec = { model: string; providers: (string | ProviderRef)[]; maxTokens?: number; reasoning?: boolean };
 
 /**
  * A decision: a closed question over an option set, answered by whichever backend the config selects.
@@ -233,6 +238,7 @@ Interpolation applies to every string value: `{{prompt}}`, `{{panel}}`, `{{judge
 
 Validation runs on every load and throws `pi-fusion-matrix: <problem>`; never fall back silently:
 - alias with an empty `providers` list → `alias "glm" has no providers`.
+- alias with no `model` → `alias "glm" has no model; set the vendor id sent upstream`.
 - a fusion id containing `:` or `/` → error, because pi parses `provider/id:thinking` and the id would
   be unaddressable (`fusion id "deep:cheap" may not contain ":" or "/"`).
 - `defaultFusion` naming an unknown fusion → error.
@@ -268,154 +274,358 @@ piece of configuration registers, and a stale name must fail at use, not at star
 `matrix.json` holds aliases and fusions only — no providers, no credentials, no baseUrls:
 
 ```json
-{
-  "providerId": "fusion-matrix",
-  "providerName": "Fusion Matrix",
-  "defaultFusion": "standard",
-  "aliases": {
-    "deepseek-flash": { "providers": ["go", "tp", "corp"] },
-    "deepseek-pro": { "providers": ["go", "tp"] },
-    "glm": { "providers": ["go", "tp"] },
-    "glm-flash": { "providers": ["go", "tp"] },
-    "qwen-max": { "providers": ["go", "tp"] },
-    "qwen-flash": { "providers": ["go", "tp"] },
-    "kimi": { "providers": ["go"] },
-    "gpt": { "providers": ["oai"] },
-    "grok": { "providers": ["zen", "go"], "reasoning": true },
-    "luna": { "providers": ["zen", "go"], "reasoning": true }
-  },
-  "fusions": {
-    "standard": {
-      "mode": "3x",
-      "slots": { "technical_expert": ["glm"], "devils_advocate": ["glm"],
-                 "synthesis": ["glm"] },
-      "fileAgent": { "alias": "deepseek-flash" }
-    },
-    "quick": {
-      "mode": "3x",
-      "slots": { "technical_expert": ["glm-flash"], "devils_advocate": ["glm-flash"],
-                 "synthesis": ["glm"] },
-      "fileAgent": { "alias": "deepseek-flash" }
-    },
-    "deep": {
-      "mode": "5x",
-      "slots": {
-        "technical_expert": ["kimi", "qwen-max"],
-        "devils_advocate": ["deepseek-pro"],
-        "systems_thinker": ["glm"],
-        "judge": ["deepseek-pro"],
-        "synthesis": ["kimi", "qwen-max"]
+  {
+    "providerId": "fusion-matrix",
+    "providerName": "Fusion Matrix",
+    "defaultFusion": "standard",
+    "aliases": {
+      "deepseek-flash": {
+        "model": "deepseek-v4.1-flash",
+        "providers": [
+          "go",
+          "tp",
+          "corp"
+        ]
       },
-      "fileAgent": { "alias": "deepseek-flash" }
-    },
-    "review": {
-      "mode": "5x",
-      "slots": {
-        "technical_expert": ["kimi", "qwen-max"],
-        "devils_advocate": ["deepseek-pro"],
-        "systems_thinker": ["glm"],
-        "judge": ["deepseek-pro"],
-        "synthesis": ["kimi", "qwen-max"]
+      "deepseek-pro": {
+        "model": "deepseek-v4-pro",
+        "providers": [
+          "go",
+          "tp"
+        ]
       },
-      "fileAgent": false,
-      "prompts": { "synthesis": "You are reviewing a proposed change. Report defects with severity, file:line anchors, and reproduction steps. Do not emit revised code. Under 1,500 tokens." }
-    },
-    "openai": {
-      "mode": "5x",
-      "slots": {
-        "technical_expert": ["gpt"], "devils_advocate": ["gpt"],
-        "systems_thinker": ["gpt"], "judge": ["gpt"],
-        "synthesis": ["gpt", { "alias": "kimi", "providers": ["go"] }]
+      "glm": {
+        "model": "glm-5.3",
+        "providers": [
+          "go",
+          "tp"
+        ]
       },
-      "fileAgent": false
-    },
-    "review-check": {
-      "mode": "5x",
-      "slots": {
-        "technical_expert": ["kimi", "qwen-max"],
-        "devils_advocate": ["deepseek-pro"],
-        "systems_thinker": ["glm"],
-        "judge": [
-          { "decide": {
-              "state": "{{panel}}",
-              "question": "Do the experts agree on a single core recommendation?",
-              "options": [
-                { "id": "agrees", "description": "They converge on the same recommendation." },
-                { "id": "partial", "description": "They overlap but differ on a substantive point." },
-                { "id": "disagrees", "description": "They recommend different things." }
-              ] },
-            "sufficientWhen": { "choiceIs": ["agrees"], "minConfidence": 0.85 } },
-          "deepseek-pro"
+      "glm-flash": {
+        "model": "glm-5.3-flash",
+        "providers": [
+          "go"
+        ]
+      },
+      "qwen-max": {
+        "model": "qwen3.8-max",
+        "providers": [
+          "go",
+          "tp"
+        ]
+      },
+      "qwen-flash": {
+        "model": "qwen3.8-flash",
+        "providers": [
+          "go",
+          "tp"
+        ]
+      },
+      "kimi": {
+        "model": "kimi-k3",
+        "providers": [
+          "go"
+        ]
+      },
+      "gpt": {
+        "model": "gpt-5.6-sol",
+        "providers": [
+          "oai"
+        ]
+      },
+      "grok": {
+        "model": "grok-4.6",
+        "providers": [
+          "zen",
+          "go"
         ],
-        "synthesis": ["kimi", "qwen-max"]
+        "reasoning": true
       },
-      "fileAgent": false,
-      "verify": [
-        { "state": "{{synthesis}}",
-          "questions": {
-            "addresses_question": {
-              "type": "noul",
-              "instructions": "The answer directly addresses the question that was asked.",
-              "criteria": { "true": "Answers the actual question", "false": "Answers a different or narrower question" }
-            },
-            "grounded_in_panel": {
-              "type": "noul",
-              "instructions": "Every substantive claim traces to the expert responses or the judge analysis.",
-              "criteria": { "true": "All claims traceable", "false": "Contains claims with no support in the deliberation" }
-            },
-            "contradiction_handling": {
-              "type": "choice",
-              "instructions": "How the answer handles the judge's contradictions.",
-              "criteria": {
-                "resolves": "Picks a side and says why",
-                "acknowledges": "Notes the disagreement without choosing",
-                "ignores": "Does not mention it"
-              }
-            }
-          } }
-      ]
+      "luna": {
+        "model": "gpt-5.6-luna",
+        "providers": [
+          "zen",
+          "go"
+        ],
+        "reasoning": true
+      }
     },
-    "review-routed": {
-      "mode": "5x",
-      "route": {
-        "instructions": "How much deliberation does this request need?",
-        "criteria": {
-          "trivial": { "description": "A direct factual or mechanical question", "then": "quick" },
-          "single_concern": { "description": "One design decision with limited blast radius", "then": "quick" },
-          "multi_concern": "Several interacting decisions or cross-cutting change",
-          "architectural": "System-level tradeoffs with long-lived consequences"
+    "fusions": {
+      "standard": {
+        "mode": "3x",
+        "slots": {
+          "technical_expert": [
+            "glm"
+          ],
+          "devils_advocate": [
+            "glm"
+          ],
+          "synthesis": [
+            "glm"
+          ]
+        },
+        "fileAgent": {
+          "alias": "deepseek-flash"
         }
       },
-      "slots": {
-        "technical_expert": ["kimi", "qwen-max"],
-        "devils_advocate": ["deepseek-pro"],
-        "systems_thinker": ["glm"],
-        "judge": ["deepseek-pro"],
-        "synthesis": ["kimi", "qwen-max"]
+      "quick": {
+        "mode": "3x",
+        "slots": {
+          "technical_expert": [
+            "glm-flash"
+          ],
+          "devils_advocate": [
+            "glm-flash"
+          ],
+          "synthesis": [
+            "glm"
+          ]
+        },
+        "fileAgent": {
+          "alias": "deepseek-flash"
+        }
       },
-      "fileAgent": false
+      "deep": {
+        "mode": "5x",
+        "slots": {
+          "technical_expert": [
+            "kimi",
+            "qwen-max"
+          ],
+          "devils_advocate": [
+            "deepseek-pro"
+          ],
+          "systems_thinker": [
+            "glm"
+          ],
+          "judge": [
+            "deepseek-pro"
+          ],
+          "synthesis": [
+            "kimi",
+            "qwen-max"
+          ]
+        },
+        "fileAgent": {
+          "alias": "deepseek-flash"
+        }
+      },
+      "review": {
+        "mode": "5x",
+        "slots": {
+          "technical_expert": [
+            "kimi",
+            "qwen-max"
+          ],
+          "devils_advocate": [
+            "deepseek-pro"
+          ],
+          "systems_thinker": [
+            "glm"
+          ],
+          "judge": [
+            "deepseek-pro"
+          ],
+          "synthesis": [
+            "kimi",
+            "qwen-max"
+          ]
+        },
+        "fileAgent": false,
+        "prompts": {
+          "synthesis": "You are reviewing a proposed change. Report defects with severity, file:line anchors, and reproduction steps. Do not emit revised code. Under 1,500 tokens."
+        }
+      },
+      "openai": {
+        "mode": "5x",
+        "slots": {
+          "technical_expert": [
+            "gpt"
+          ],
+          "devils_advocate": [
+            "gpt"
+          ],
+          "systems_thinker": [
+            "gpt"
+          ],
+          "judge": [
+            "gpt"
+          ],
+          "synthesis": [
+            "gpt",
+            {
+              "alias": "kimi",
+              "providers": [
+                "go"
+              ]
+            }
+          ]
+        },
+        "fileAgent": false
+      },
+      "review-check": {
+        "mode": "5x",
+        "slots": {
+          "technical_expert": [
+            "kimi",
+            "qwen-max"
+          ],
+          "devils_advocate": [
+            "deepseek-pro"
+          ],
+          "systems_thinker": [
+            "glm"
+          ],
+          "judge": [
+            {
+              "decide": {
+                "state": "{{panel}}",
+                "question": "Do the experts agree on a single core recommendation?",
+                "options": [
+                  {
+                    "id": "agrees",
+                    "description": "They converge on the same recommendation."
+                  },
+                  {
+                    "id": "partial",
+                    "description": "They overlap but differ on a substantive point."
+                  },
+                  {
+                    "id": "disagrees",
+                    "description": "They recommend different things."
+                  }
+                ]
+              },
+              "sufficientWhen": {
+                "choiceIs": [
+                  "agrees"
+                ],
+                "minConfidence": 0.85
+              }
+            },
+            "deepseek-pro"
+          ],
+          "synthesis": [
+            "kimi",
+            "qwen-max"
+          ]
+        },
+        "fileAgent": false,
+        "verify": [
+          {
+            "state": "{{synthesis}}",
+            "questions": {
+              "addresses_question": {
+                "type": "noul",
+                "instructions": "The answer directly addresses the question that was asked.",
+                "criteria": {
+                  "true": "Answers the actual question",
+                  "false": "Answers a different or narrower question"
+                }
+              },
+              "grounded_in_panel": {
+                "type": "noul",
+                "instructions": "Every substantive claim traces to the expert responses or the judge analysis.",
+                "criteria": {
+                  "true": "All claims traceable",
+                  "false": "Contains claims with no support in the deliberation"
+                }
+              },
+              "contradiction_handling": {
+                "type": "choice",
+                "instructions": "How the answer handles the judge's contradictions.",
+                "criteria": {
+                  "resolves": "Picks a side and says why",
+                  "acknowledges": "Notes the disagreement without choosing",
+                  "ignores": "Does not mention it"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "review-routed": {
+        "mode": "5x",
+        "route": {
+          "instructions": "How much deliberation does this request need?",
+          "criteria": {
+            "trivial": {
+              "description": "A direct factual or mechanical question",
+              "then": "quick"
+            },
+            "single_concern": {
+              "description": "One design decision with limited blast radius",
+              "then": "quick"
+            },
+            "multi_concern": "Several interacting decisions or cross-cutting change",
+            "architectural": "System-level tradeoffs with long-lived consequences"
+          }
+        },
+        "slots": {
+          "technical_expert": [
+            "kimi",
+            "qwen-max"
+          ],
+          "devils_advocate": [
+            "deepseek-pro"
+          ],
+          "systems_thinker": [
+            "glm"
+          ],
+          "judge": [
+            "deepseek-pro"
+          ],
+          "synthesis": [
+            "kimi",
+            "qwen-max"
+          ]
+        },
+        "fileAgent": false
+      }
+    },
+    "decide": {
+      "defaultBackend": "typesafe",
+      "models": {
+        "qwen3.5-4b": {
+          "source": "Qwen/Qwen3.5-4B",
+          "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+        },
+        "minicpm5-2b": {
+          "source": "openbmb/MiniCPM5-2B",
+          "revision": "12a3808a956f869c767195e9266b59c4d21d92e2"
+        },
+        "qwen3-0.6b": {
+          "source": "Qwen/Qwen3-0.6B",
+          "revision": "c1899de289a04d12100db370d81485cdf75e47ca"
+        }
+      }
+    },
+    "backends": {
+      "typesafe": {
+        "kind": "typesafe",
+        "url": "https://api.typesafe.ai/v1/systemone",
+        "apiKeyEnv": "TYPESAFE_API_KEY",
+        "model": "jev-1.13.0",
+        "timeoutMs": 60000
+      },
+      "semif": {
+        "kind": "semif",
+        "url": "http://127.0.0.1:8791/score",
+        "timeoutMs": 30000
+      },
+      "semif-hosted": {
+        "kind": "semif",
+        "url": "https://SET-THE-HOSTED-SEMIF-URL/score",
+        "apiKeyEnv": "SEMIF_API_KEY",
+        "timeoutMs": 30000
+      },
+      "semif-stub": {
+        "kind": "semif",
+        "url": "http://127.0.0.1:8792/score",
+        "timeoutMs": 5000
+      }
     }
-  },
-  "decide": {
-    "defaultBackend": "typesafe",
-    "models": {
-      "qwen3.5-4b": { "source": "Qwen/Qwen3.5-4B",
-                      "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a" },
-      "minicpm5-2b": { "source": "openbmb/MiniCPM5-2B",
-                       "revision": "12a3808a956f869c767195e9266b59c4d21d92e2" },
-      "qwen3-0.6b": { "source": "Qwen/Qwen3-0.6B",
-                      "revision": "c1899de289a04d12100db370d81485cdf75e47ca" }
-    }
-  },
-  "backends": {
-    "typesafe": { "kind": "typesafe", "url": "https://api.typesafe.ai/v1/systemone",
-                  "apiKeyEnv": "TYPESAFE_API_KEY", "model": "jev-1.13.0", "timeoutMs": 60000 },
-    "semif": { "kind": "semif", "url": "http://127.0.0.1:8791/score", "timeoutMs": 30000 },
-    "semif-hosted": { "kind": "semif", "url": "https://SET-THE-HOSTED-SEMIF-URL/score",
-                      "apiKeyEnv": "SEMIF_API_KEY", "timeoutMs": 30000 },
-    "semif-stub": { "kind": "semif", "url": "http://127.0.0.1:8792/score", "timeoutMs": 5000 }
   }
-}
 ```
 
 The provider names in `aliases.*.providers` are satisfied by pi's `models.json`. The implementer
@@ -547,10 +757,10 @@ URL):
 3. `alias = config.aliases[aliasId]`; missing → throw `unknown alias "x"; known: ...`.
 4. `refs = providers ?? alias.providers`; empty after the override → throw `alias "x" has no providers`.
 5. For each ref in order, push `{ alias: aliasId, provider: ref.id ?? ref, model:
-   ref.modelOverride ?? aliasId, maxTokens: alias.maxTokens ?? 4096, reasoning: alias.reasoning ?? false }`.
-   The model id is the **alias name**, not a vendor version: `deepseek-flash` stays `deepseek-flash`
-   on every provider and in every fusion, and the concrete vendor id is supplied by `models.json` (or
-   by the provider's own catalogue), so a version bump edits that file alone.
+   ref.modelOverride ?? alias.model, maxTokens: alias.maxTokens ?? 4096, reasoning: alias.reasoning ?? false }`.
+   The alias name stays version-free in every fusion and slot; the vendor id sent upstream comes from
+   `alias.model` (optionally overridden per provider), so a vendor release edits one field in
+   `matrix.json` and touches nothing else.
 
 Provider existence is verified in `run.ts` right before the call, not at load: the fallback executor
 asks pi's runtime for the resolved model list and, when the provider id is absent, records a
@@ -1003,8 +1213,8 @@ pi config repo symlink from Step 1 in place.
     this is the check that the package runs with no developer checkout present. Restore the directory
     afterwards.
 14. **Alias is version-free** — `grep -rn "glm-5\|qwen3\.8\|deepseek-v4\|kimi-k3"` across
-    `extensions/pi-fusion-matrix/` and `matrix.json` must match only test fixtures or comments, never
-    `fusions` or `slots`. A `models.json` version bump (for example `deepseek-v4.1-flash` →
+    `extensions/pi-fusion-matrix/` and `matrix.json` must match only `aliases.*.model`, fixtures, and
+    comments — never `fusions`, `slots`, or code. A `models.json` version bump (for example `deepseek-v4.1-flash` →
     `deepseek-v4-flash` on `go`) must change behavior with no edit to this repo; confirm by bumping it
     and running `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/standard`: the run succeeds and
     `details.models` shows the new vendor id behind the unchanged alias.
@@ -1063,10 +1273,11 @@ pi config repo symlink from Step 1 in place.
   reintroduce a cross-repo import. The reference directory can be archived at that point.
 - **Repos and remotes.** The new repo is created locally without a remote. Do not push anywhere; if a
   remote is later wanted, the operator names it.
-- **Alias names are version-free by design** (`deepseek-flash`, `glm`, `qwen-max`). Vendor ids live in
-  `models.json`; this repo's aliases, fusions, and slots never mention one. Naming an alias after a
-  version (`glm-5.3`) is the anti-pattern this avoids: it forces a config sweep on every vendor release
-  and leaves stale names pointing at new ids.
+- **Alias names are version-free by design** (`deepseek-flash`, `glm`, `qwen-max`); the vendor id lives
+  in `aliases.<name>.model`. Naming an alias after a version (`glm-5.3`) is the anti-pattern this
+  avoids: it forces a config sweep on every vendor release and leaves stale names pointing at new ids.
+  The vendor id cannot live in `models.json` instead — pi sends a model's `id` upstream verbatim and
+  keys the registry by `provider` + `id`, so a name that is not the vendor id cannot resolve.
 - **Alias ids are never registered as pi models**, so a version-free alias cannot collide with a
   vendor id in `/model`/`--list-models`; only `fusion*` ids are registered by this extension. The
   drill-down also lets a model id exist in `matrix.json` that pi's own catalogue never lists.

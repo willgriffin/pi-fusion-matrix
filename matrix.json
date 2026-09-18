@@ -3,55 +3,157 @@
   "providerName": "Fusion Matrix",
   "defaultFusion": "standard",
   "aliases": {
-    "deepseek-flash": { "providers": ["go", "tp", "corp"] },
-    "deepseek-pro": { "providers": ["go", "tp"] },
-    "glm": { "providers": ["go", "tp"] },
-    "glm-flash": { "providers": ["go", "tp"] },
-    "qwen-max": { "providers": ["go", "tp"] },
-    "qwen-flash": { "providers": ["go", "tp"] },
-    "kimi": { "providers": ["go"] },
-    "gpt": { "providers": ["oai"] },
-    "grok": { "providers": ["zen", "go"], "reasoning": true },
-    "luna": { "providers": ["zen", "go"], "reasoning": true }
+    "deepseek-flash": {
+      "model": "deepseek-v4.1-flash",
+      "providers": [
+        "go",
+        "tp",
+        "corp"
+      ]
+    },
+    "deepseek-pro": {
+      "model": "deepseek-v4-pro",
+      "providers": [
+        "go",
+        "tp"
+      ]
+    },
+    "glm": {
+      "model": "glm-5.3",
+      "providers": [
+        "go",
+        "tp"
+      ]
+    },
+    "glm-flash": {
+      "model": "glm-5.3-flash",
+      "providers": [
+        "go"
+      ]
+    },
+    "qwen-max": {
+      "model": "qwen3.8-max",
+      "providers": [
+        "go",
+        "tp"
+      ]
+    },
+    "qwen-flash": {
+      "model": "qwen3.8-flash",
+      "providers": [
+        "go",
+        "tp"
+      ]
+    },
+    "kimi": {
+      "model": "kimi-k3",
+      "providers": [
+        "go"
+      ]
+    },
+    "gpt": {
+      "model": "gpt-5.6-sol",
+      "providers": [
+        "oai"
+      ]
+    },
+    "grok": {
+      "model": "grok-4.6",
+      "providers": [
+        "zen",
+        "go"
+      ],
+      "reasoning": true
+    },
+    "luna": {
+      "model": "gpt-5.6-luna",
+      "providers": [
+        "zen",
+        "go"
+      ],
+      "reasoning": true
+    }
   },
   "fusions": {
     "standard": {
       "mode": "3x",
       "slots": {
-        "technical_expert": ["glm"],
-        "devils_advocate": ["glm"],
-        "synthesis": ["glm"]
+        "technical_expert": [
+          "glm"
+        ],
+        "devils_advocate": [
+          "glm"
+        ],
+        "synthesis": [
+          "glm"
+        ]
       },
-      "fileAgent": { "alias": "deepseek-flash" }
+      "fileAgent": {
+        "alias": "deepseek-flash"
+      }
     },
     "quick": {
       "mode": "3x",
       "slots": {
-        "technical_expert": ["glm-flash"],
-        "devils_advocate": ["glm-flash"],
-        "synthesis": ["glm"]
+        "technical_expert": [
+          "glm-flash"
+        ],
+        "devils_advocate": [
+          "glm-flash"
+        ],
+        "synthesis": [
+          "glm"
+        ]
       },
-      "fileAgent": { "alias": "deepseek-flash" }
+      "fileAgent": {
+        "alias": "deepseek-flash"
+      }
     },
     "deep": {
       "mode": "5x",
       "slots": {
-        "technical_expert": ["kimi", "qwen-max"],
-        "devils_advocate": ["deepseek-pro"],
-        "systems_thinker": ["glm"],
-        "judge": ["deepseek-pro"],
-        "synthesis": ["kimi", "qwen-max"]
+        "technical_expert": [
+          "kimi",
+          "qwen-max"
+        ],
+        "devils_advocate": [
+          "deepseek-pro"
+        ],
+        "systems_thinker": [
+          "glm"
+        ],
+        "judge": [
+          "deepseek-pro"
+        ],
+        "synthesis": [
+          "kimi",
+          "qwen-max"
+        ]
       },
-      "fileAgent": { "alias": "deepseek-flash" }
+      "fileAgent": {
+        "alias": "deepseek-flash"
+      }
     },
     "review": {
       "mode": "5x",
       "slots": {
-        "technical_expert": ["kimi", "qwen-max"],
-        "devils_advocate": ["deepseek-pro"],
-        "systems_thinker": ["glm"],
-        "judge": ["deepseek-pro"],
-        "synthesis": ["kimi", "qwen-max"]
+        "technical_expert": [
+          "kimi",
+          "qwen-max"
+        ],
+        "devils_advocate": [
+          "deepseek-pro"
+        ],
+        "systems_thinker": [
+          "glm"
+        ],
+        "judge": [
+          "deepseek-pro"
+        ],
+        "synthesis": [
+          "kimi",
+          "qwen-max"
+        ]
       },
       "fileAgent": false,
       "prompts": {
@@ -61,36 +163,76 @@
     "openai": {
       "mode": "5x",
       "slots": {
-        "technical_expert": ["gpt"],
-        "devils_advocate": ["gpt"],
-        "systems_thinker": ["gpt"],
-        "judge": ["gpt"],
-        "synthesis": ["gpt", { "alias": "kimi", "providers": ["go"] }]
+        "technical_expert": [
+          "gpt"
+        ],
+        "devils_advocate": [
+          "gpt"
+        ],
+        "systems_thinker": [
+          "gpt"
+        ],
+        "judge": [
+          "gpt"
+        ],
+        "synthesis": [
+          "gpt",
+          {
+            "alias": "kimi",
+            "providers": [
+              "go"
+            ]
+          }
+        ]
       },
       "fileAgent": false
     },
     "review-check": {
       "mode": "5x",
       "slots": {
-        "technical_expert": ["kimi", "qwen-max"],
-        "devils_advocate": ["deepseek-pro"],
-        "systems_thinker": ["glm"],
+        "technical_expert": [
+          "kimi",
+          "qwen-max"
+        ],
+        "devils_advocate": [
+          "deepseek-pro"
+        ],
+        "systems_thinker": [
+          "glm"
+        ],
         "judge": [
           {
             "decide": {
               "state": "{{panel}}",
               "question": "Do the experts agree on a single core recommendation?",
               "options": [
-                { "id": "agrees", "description": "They converge on the same recommendation." },
-                { "id": "partial", "description": "They overlap but differ on a substantive point." },
-                { "id": "disagrees", "description": "They recommend different things." }
+                {
+                  "id": "agrees",
+                  "description": "They converge on the same recommendation."
+                },
+                {
+                  "id": "partial",
+                  "description": "They overlap but differ on a substantive point."
+                },
+                {
+                  "id": "disagrees",
+                  "description": "They recommend different things."
+                }
               ]
             },
-            "sufficientWhen": { "choiceIs": ["agrees"], "minConfidence": 0.85 }
+            "sufficientWhen": {
+              "choiceIs": [
+                "agrees"
+              ],
+              "minConfidence": 0.85
+            }
           },
           "deepseek-pro"
         ],
-        "synthesis": ["kimi", "qwen-max"]
+        "synthesis": [
+          "kimi",
+          "qwen-max"
+        ]
       },
       "fileAgent": false,
       "verify": [
@@ -131,18 +273,36 @@
       "route": {
         "instructions": "How much deliberation does this request need?",
         "criteria": {
-          "trivial": { "description": "A direct factual or mechanical question", "then": "quick" },
-          "single_concern": { "description": "One design decision with limited blast radius", "then": "quick" },
+          "trivial": {
+            "description": "A direct factual or mechanical question",
+            "then": "quick"
+          },
+          "single_concern": {
+            "description": "One design decision with limited blast radius",
+            "then": "quick"
+          },
           "multi_concern": "Several interacting decisions or cross-cutting change",
           "architectural": "System-level tradeoffs with long-lived consequences"
         }
       },
       "slots": {
-        "technical_expert": ["kimi", "qwen-max"],
-        "devils_advocate": ["deepseek-pro"],
-        "systems_thinker": ["glm"],
-        "judge": ["deepseek-pro"],
-        "synthesis": ["kimi", "qwen-max"]
+        "technical_expert": [
+          "kimi",
+          "qwen-max"
+        ],
+        "devils_advocate": [
+          "deepseek-pro"
+        ],
+        "systems_thinker": [
+          "glm"
+        ],
+        "judge": [
+          "deepseek-pro"
+        ],
+        "synthesis": [
+          "kimi",
+          "qwen-max"
+        ]
       },
       "fileAgent": false
     }

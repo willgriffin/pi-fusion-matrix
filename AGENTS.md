@@ -36,8 +36,9 @@ is a bug in one of them.
   unmet) advances to the next candidate with reason `"insufficient"` — reported distinctly from a
   failure, with its answer and confidence, and handed forward as a prior. Every run records
   `details.cascades`, because a cascade whose cheap path rarely wins is configuration to delete.
-- **Aliases are version-free.** Vendor model ids appear only in fixtures and docs, never in `fusions`
-  or `slots`.
+- **Aliases are version-free.** A vendor id appears only in `aliases.<name>.model` (and fixtures/docs),
+  never in a `fusions` entry, a `slots` list, or code. It cannot live in `models.json` instead: pi sends
+  a model's `id` upstream verbatim and keys the registry by `provider` + `id`.
 
 ## Validation
 
