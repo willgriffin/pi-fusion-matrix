@@ -50,17 +50,25 @@ function readJson(file) {
   }
 }
 
-/** Every layer that exists, lowest priority first, each with the directory it was declared in. */
+/**
+ * Every layer that exists, lowest priority first, each labelled with what it is.
+ *
+ * The three surfaces that can leave the machine or run code — decision backends, `verify` gates, and
+ * persona prompt paths — are trusted only from the packaged config and the machine-wide directory. The
+ * session cwd layer is *a repository*: cloning a project must never be enough to point a credential at
+ * someone else's endpoint, execute a command, or read a file into a prompt. Aliases, personas, modes,
+ * and fusions may still come from anywhere.
+ */
 export function configLayers({ cwd = process.cwd() } = {}) {
   const files = [
-    path.join(REPO_ROOT, "matrix.json"),
-    path.join(os.homedir(), ".config", "pi-fusion-matrix", "matrix.json"),
-    path.join(cwd, ".pi-fusion-matrix.json"),
+    { file: path.join(REPO_ROOT, "matrix.json"), kind: "packaged" },
+    { file: path.join(os.homedir(), ".config", "pi-fusion-matrix", "matrix.json"), kind: "machine" },
+    { file: path.join(cwd, ".pi-fusion-matrix.json"), kind: "cwd" },
   ];
   const layers = [];
-  for (const file of files) {
+  for (const { file, kind } of files) {
     const config = readJson(file);
-    if (config) layers.push({ file, dir: path.dirname(file), config });
+    if (config) layers.push({ file, kind, dir: path.dirname(file), config });
   }
   return layers;
 }
@@ -73,21 +81,42 @@ export function loadMatrixConfig({ cwd = process.cwd() } = {}) {
   const layers = configLayers({ cwd });
   if (layers.length === 0) throw new Error("no matrix.json found; the packaged config is missing");
   let config = {};
-  const sources = { personas: {}, aliases: {}, modes: {}, fusions: {} };
+  const sources = { personas: {}, aliases: {}, modes: {}, fusions: {}, backends: {} };
   for (const layer of layers) {
     config = mergeConfig(config, layer.config);
     for (const section of Object.keys(sources)) {
-      for (const name of Object.keys(layer.config[section] ?? {})) sources[section][name] = layer.dir;
+      for (const name of Object.keys(layer.config[section] ?? {})) {
+        sources[section][name] = { dir: layer.dir, kind: layer.kind, file: layer.file, trusted: layer.kind !== "cwd" };
+      }
     }
   }
   return { config, layers, sources };
 }
 
-/** Inline text, or a path relative to the declaring config file's directory. */
-export function resolvePrompt(prompt, dir) {
+/**
+ * Inline text, or a path relative to the declaring config file's directory.
+ *
+ * A persona prompt is sent to a model provider, so it is a read exfiltration surface: from an untrusted
+ * layer the path must stay inside that layer's directory, and an absolute path is refused. The packaged
+ * and machine layers may point anywhere, because the operator wrote them.
+ */
+export function promptPath(prompt, source) {
+  if (typeof prompt !== "string") return null;
+  if (prompt.includes("\n")) return null;                       // inline text, not a path
+  const dir = source?.dir ?? REPO_ROOT;
+  if (path.isAbsolute(prompt)) return source?.trusted === false ? null : prompt;
+  const resolved = path.resolve(dir, prompt);
+  const relative = path.relative(dir, resolved);
+  // An untrusted layer may only point at a file beneath itself.
+  if (source?.trusted === false && (relative.startsWith("..") || path.isAbsolute(relative))) return null;
+  return resolved;
+}
+
+export function resolvePrompt(prompt, source) {
   if (typeof prompt !== "string") return null;
   if (prompt.includes("\n")) return prompt;
-  const file = path.isAbsolute(prompt) ? prompt : path.resolve(dir ?? REPO_ROOT, prompt);
+  const file = promptPath(prompt, source);
+  if (!file) return null;
   try {
     return fs.readFileSync(file, "utf8").trimEnd();
   } catch {
@@ -150,8 +179,14 @@ export function validateConfig(config, { sources } = {}) {
     if (!isObject(persona)) { err(`persona "${name}" is not an object`); continue; }
     if (!persona.prompt) { err(`persona "${name}" has no prompt`); continue; }
     if (sources) {
-      const text = resolvePrompt(persona.prompt, sources.personas[name]);
-      if (text === null) err(`persona "${name}" prompt path does not exist: ${persona.prompt}`);
+      const source = sources.personas[name];
+      if (promptPath(persona.prompt, source) === null && !persona.prompt.includes("\n")) {
+        err(source?.trusted === false
+          ? `persona "${name}" prompt path must be relative and inside ${source.dir} when it comes from the session directory`
+          : `persona "${name}" prompt path does not exist: ${persona.prompt}`);
+      } else if (resolvePrompt(persona.prompt, source) === null) {
+        err(`persona "${name}" prompt path does not exist: ${persona.prompt}`);
+      }
     }
     if (persona.temperature !== undefined && (persona.temperature < 0 || persona.temperature > 2)) {
       err(`persona "${name}" temperature ${persona.temperature} outside 0..2`);
@@ -288,6 +323,12 @@ export function validateConfig(config, { sources } = {}) {
       if (entry?.gate) {
         if (!Array.isArray(entry.gate.command) || entry.gate.command.length === 0) err(`${where}: gate command is empty`);
         if (entry.gate.timeoutMs !== undefined && entry.gate.timeoutMs > 600000) err(`${where}: gate timeoutMs above 600000`);
+        // A gate executes argv. Only the packaged and machine layers may ask for that; a repository
+        // must never make a fusion run arbitrary commands.
+        const origin = sources?.fusions?.[id];
+        if (origin && origin.kind === "cwd") {
+          err(`${where}: a gate command may only be declared by the packaged or machine-wide config, not by the session directory`);
+        }
         continue;
       }
       if (!isObject(entry)) { err(`${where}: entry is not an object`); continue; }
@@ -314,6 +355,28 @@ export function validateConfig(config, { sources } = {}) {
     }
     if (backend.timeoutMs !== undefined && (backend.timeoutMs < 1000 || backend.timeoutMs > 600000)) {
       err(`backend "${name}": timeoutMs ${backend.timeoutMs} outside 1000..600000`);
+    }
+    // A decision backend sends the deliberation state, and its credential, to `url`. Only the packaged
+    // and machine layers may define one; a repository may not.
+    const origin = sources?.backends?.[name];
+    if (origin && origin.kind === "cwd") {
+      err(`backend "${name}" is declared by the session directory; decision backends may only come from the packaged or machine-wide config`);
+    }
+    // The canonical env var per kind, so config can never name an arbitrary variable to read, and a
+    // non-loopback backend must name one at all.
+    const env = backend.kind === "typesafe" ? "TYPESAFE_API_KEY" : backend.kind === "semif" ? "SEMIF_API_KEY" : null;
+    const loopbackUrl = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])([:/]|$)/.test(backend.url ?? "");
+    if (env && backend.apiKeyEnv !== undefined && backend.apiKeyEnv !== env) {
+      err(`backend "${name}": apiKeyEnv must be ${env} for a ${backend.kind} backend, not "${backend.apiKeyEnv}"`);
+    }
+    if (backend.url && !loopbackUrl && backend.apiKeyEnv === undefined) {
+      err(`backend "${name}": a non-loopback backend must name its apiKeyEnv (${env})`);
+    }
+    if (backend.url) {
+      const loopback = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])([:/]|$)/.test(backend.url);
+      if (!/^https:\/\//.test(backend.url) && !loopback) {
+        err(`backend "${name}": url must be https, or http on loopback, not "${backend.url}"`);
+      }
     }
     if (backend.kind === "semif" && backend.model && decide.models?.[backend.model] === undefined) {
       err(`backend "${name}": model "${backend.model}" is not in decide.models`);

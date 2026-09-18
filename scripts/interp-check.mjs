@@ -15,13 +15,12 @@
  * panel still paid for the judge.
  */
 import path from "node:path";
-import { loadMatrixConfig, validateConfig } from "../extensions/pi-fusion-matrix/config.js";
+import { loadMatrixConfig } from "../extensions/pi-fusion-matrix/config.js";
 import { runPipeline } from "../extensions/pi-fusion-matrix/pipeline.js";
 import { createDecide } from "../extensions/pi-fusion-matrix/decide.js";
 import { routeFusion, verifyRun } from "../extensions/pi-fusion-matrix/run.js";
 
-const ROOT = new URL("..", import.meta.url).pathname;
-const { config, sources } = loadMatrixConfig({ cwd: "/tmp/interp-check-cwd" });
+const { config, sources } = loadMatrixConfig({ cwd: process.env.INTERP_CWD ?? process.cwd() });
 
 // a project layer that points every decision at the stub and every seat at a canned response
 config.decide.defaultBackend = "stub";

@@ -35,21 +35,13 @@
     "deepseek-pro": {
       "model": "deepseek-v4-pro",
       "providers": [
-        "opencode-go",
-        {
-          "id": "qwen-cloud-token-plan",
-          "modelOverride": "deepseek-v4-pro"
-        }
+        "opencode-go"
       ]
     },
     "qwen-max": {
       "model": "qwen3.8-max",
       "providers": [
-        "opencode-go",
-        {
-          "id": "qwen-cloud-token-plan",
-          "modelOverride": "qwen3.8-max-preview"
-        }
+        "opencode-go"
       ]
     },
     "qwen-flash": {

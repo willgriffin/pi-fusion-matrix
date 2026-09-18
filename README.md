@@ -54,6 +54,31 @@ Reload in a running session with `/reload`. Provider names referenced by `matrix
 `~/.pi/agent/models.json` — model ids are resolved by pi, so any model any installed extension
 registers is usable.
 
+## What leaves your machine
+
+Two things do, and both are worth knowing before the first run:
+
+- **Decisions go to the backend you configure.** With the packaged default, a `route`, a `verify` check,
+  a cascade, or a `score` stage sends the deliberation **state** to TypeSafe: for `verify` that is the
+  synthesis, and for `route` the prompt. TypeSafe bills input tokens only and does not train on requests,
+  but the content does leave the host. Point `decide.defaultBackend` at a local `semif` backend if that
+  is not acceptable — see `tools/semif-server/`.
+- **Seats go to the providers your aliases name.** Panel responses are sent to the judge and synthesis
+  models, which may be different vendors. That is the point of a fusion, and it is why the alias table is
+  the place to decide who sees what.
+
+Nothing else is transmitted. There is no telemetry, and the extension does not read or cache credentials:
+it asks pi for the credential of the provider a seat names, per request.
+
+## Trust boundary
+
+The session's `.pi-fusion-matrix.json` comes from whatever repository you are in, so it is treated as
+untrusted. It may change aliases, personas, modes, and fusions — routing and billing — but it may **not**
+introduce a decision backend, add a `verify` gate command, or point a persona prompt at a file: those are
+the three surfaces that can send content to an endpoint, run a command, or read a file into a prompt.
+Those come only from the packaged config and `~/.config/pi-fusion-matrix/matrix.json`, which are yours.
+Validation rejects them with a message naming the offending entry.
+
 ## Configuration
 
 `matrix.json` merges across layers, lowest priority first:

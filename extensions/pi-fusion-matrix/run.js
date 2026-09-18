@@ -62,38 +62,44 @@ export function classifyFailure(text) {
  * after load, from the file's real path, where no `node_modules` exists. `process.argv[1]` is also the
  * bin shim (`…/bin/pi`), a symlink into the package, so it must be resolved before walking up.
  */
-async function peerCandidates(subpath, bare) {
-  const list = [bare];
-  const roots = [];
-  for (const raw of [process.argv[1], process.execPath]) {
-    if (!raw) continue;
-    try { roots.push(fs.realpathSync(raw)); } catch { roots.push(raw); }
-  }
-  for (const root of roots) {
-    let dir = path.dirname(path.resolve(root));
-    for (let i = 0; i < 6 && dir !== path.dirname(dir); i += 1) {
-      list.push(path.join(dir, subpath));
-      dir = path.dirname(dir);
-    }
-  }
-  list.push(path.join(AGENT_DIR, subpath));
-  return [...new Set(list)];
-}
-
-/** Load the first candidate that imports and satisfies `check`. */
+/**
+ * Peer modules come from pi's own installation, and nothing else.
+ *
+ * The tempting alternative — walking ancestors of the entry script — was a supply-chain hole: a module
+ * planted in any writable ancestor directory is *executed* by `import` before any check, and would then
+ * receive pi's resolved credential for every seat. So the installation root is derived from the real
+ * path of the script pi was launched with, each candidate is realpath-verified to live inside that
+ * installation's `node_modules`, and a miss fails closed instead of continuing down a search path.
+ *
+ * (`process.argv[1]` is the bin shim, a symlink into the package, which is why it must be resolved
+ * first. A compiled single-file pi has no on-disk package: this throws with that stated.)
+ */
 async function loadPeer(subpath, bare, check) {
-  const attempts = [];
-  for (const candidate of await peerCandidates(subpath, bare)) {
-    try {
-      const specifier = candidate.startsWith("/") ? pathToFileURL(candidate).href : candidate;
-      const mod = await import(specifier);
-      if (check(mod)) return { mod, from: candidate };
-      attempts.push(`${candidate}: loaded but did not satisfy the check`);
-    } catch (error) {
-      attempts.push(`${candidate}: ${error?.message ?? error}`);
-    }
+  const entry = process.argv[1] ?? "";
+  let real = null;
+  try { real = fs.realpathSync(entry); } catch { /* compiled binary or missing shim */ }
+  if (!real) throw new Error(`cannot locate pi's installation to load ${bare} from (entry ${entry || "unknown"})`);
+
+  // Walk up from pi's own entry — bounded to a few levels, and each level must actually contain the
+  // module — so the search cannot wander into a directory a repository can write to.
+  let root = null;
+  let dir = path.dirname(real);
+  for (let i = 0; i < 4 && dir !== path.dirname(dir); i += 1) {
+    if (fs.existsSync(path.join(dir, subpath))) { root = dir; break; }
+    dir = path.dirname(dir);
   }
-  throw new Error(`cannot load ${bare}; argv1=${process.argv[1]}; tried:\n  ${attempts.map((a) => a.slice(0, 140)).join("\n  ")}`);
+  if (!root) {
+    throw new Error(`${bare} is not installed beside the running pi (looked up from ${path.dirname(real)}); this extension uses the copy pi ships, never a search path`);
+  }
+
+  const resolved = fs.realpathSync(path.join(root, subpath));
+  const realRoot = fs.realpathSync(root);
+  if (!resolved.startsWith(realRoot + path.sep)) {
+    throw new Error(`${bare} resolved outside pi's installation (${resolved}); refusing to import it`);
+  }
+  const mod = await import(pathToFileURL(resolved).href);
+  if (!check(mod)) throw new Error(`${bare} at ${resolved} did not export what this extension needs`);
+  return { mod, from: resolved };
 }
 
 let piCache;
@@ -407,24 +413,49 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
   };
 }
 
-/** A gate runs once, in the session cwd, with a bounded output tail. No loop, no feedback. */
+const GATE_OUTPUT_BYTES = 64 * 1024;
+const GATE_KILL_GRACE_MS = 5000;
+
+/**
+ * A gate runs once, in the session cwd, with bounded output. No loop, no feedback into a stage.
+ *
+ * Output is a ring buffer, not an unbounded string (a gate that prints forever must not exhaust the
+ * process), and the timeout escalates SIGTERM → SIGKILL so a child that ignores the first signal cannot
+ * hang the run. `gate.command` is argv, never a shell — and config validation allows a gate only from a
+ * trusted layer, so a repository cannot ask for one.
+ */
 export function makeRunGate(parentSignal) {
   return async function runGate(gate, signal) {
     const { spawn } = await import("node:child_process");
     const [command, ...args] = gate.command;
-    const controller = new AbortController();
-    const onAbort = () => controller.abort();
-    (signal ?? parentSignal)?.addEventListener?.("abort", onAbort, { once: true });
-    const child = spawn(command, args, { cwd: process.cwd(), signal: controller.signal, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
-    child.stdout?.on("data", (d) => { output += d.toString(); });
-    child.stderr?.on("data", (d) => { output += d.toString(); });
+    const collect = (chunk) => {
+      output += chunk.toString();
+      if (output.length > GATE_OUTPUT_BYTES) output = output.slice(-GATE_OUTPUT_BYTES);
+    };
+    child.stdout?.on("data", collect);
+    child.stderr?.on("data", collect);
+
+    let timedOut = false;
+    let killTimer;
+    const escalate = () => {
+      timedOut = true;
+      try { child.kill("SIGTERM"); } catch { /* already gone */ }
+      killTimer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* already gone */ } }, GATE_KILL_GRACE_MS);
+    };
+    const timer = setTimeout(escalate, gate.timeoutMs ?? 120000);
+    const onAbort = () => escalate();
+    (signal ?? parentSignal)?.addEventListener?.("abort", onAbort, { once: true });
+
     const exit = await new Promise((resolve) => {
       child.on("close", (code) => resolve(code ?? 0));
       child.on("error", () => resolve(-1));
-      setTimeout(() => controller.abort(), gate.timeoutMs ?? 120000);
     });
-    return { exit, output: output.split("\n").slice(-40).join("\n") };
+    clearTimeout(timer);
+    if (killTimer) clearTimeout(killTimer);
+    (signal ?? parentSignal)?.removeEventListener?.("abort", onAbort);
+    return { exit: timedOut ? -1 : exit, timedOut, output: output.split("\n").slice(-40).join("\n") };
   };
 }
 

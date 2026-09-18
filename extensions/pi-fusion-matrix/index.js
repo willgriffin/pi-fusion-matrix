@@ -175,17 +175,28 @@ async function runOnce({ config, sources, fusion, prompt, getRegistry, decide, c
   const verification = await verifyRun({ config, fusion: routed.fusion, vars, decide, emit, runGate: makeRunGate() });
   const files = await fileAgentStep({ config, fusion: routed.fusion, prompt, synthesis: run.text, registry: getRegistry(), callModel, emit });
 
+  // Confined to the project. The content is model output derived from panel responses, so a path that
+  // escapes the workspace — absolute, or `..` — is refused and reported rather than written. (The
+  // provider stream path hands writes to pi's own permission-gated `write` tool; this path has no such
+  // gate, so it has to enforce its own.)
+  const root = (() => { try { return fs.realpathSync(process.cwd()); } catch { return process.cwd(); } })();
   const saved = [];
   const failedWrites = [];
   for (const call of files.toolCalls ?? []) {
     const target = call?.arguments?.path;
     const content = call?.arguments?.content;
     if (!target || typeof content !== "string") { failedWrites.push(`${target ?? "(no path)"}: no content`); continue; }
+    if (path.isAbsolute(target)) { failedWrites.push(`${target}: absolute paths are refused; use a path inside the project`); continue; }
+    const absolute = path.resolve(root, target);
+    const relative = path.relative(root, absolute);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      failedWrites.push(`${target}: outside the project directory, refused`);
+      continue;
+    }
     try {
-      const absolute = path.resolve(process.cwd(), target);
       fs.mkdirSync(path.dirname(absolute), { recursive: true });
       fs.writeFileSync(absolute, content, "utf8");
-      saved.push(target);
+      saved.push(relative);
     } catch (error) {
       failedWrites.push(`${target}: ${error?.message ?? String(error)}`);
     }
