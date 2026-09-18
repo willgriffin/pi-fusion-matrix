@@ -1,6 +1,6 @@
 {
   "aliases": {
-    "deepseek-flash": { "providers": ["go", "tp", "oc"] },
+    "deepseek-flash": { "providers": ["go", "tp", "corp"] },
     "deepseek-pro": { "providers": ["go", "tp"] },
     "glm": { "providers": ["go", "tp"] },
     "glm-flash": { "providers": ["go", "tp"] },

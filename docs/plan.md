@@ -2,7 +2,8 @@
 
 ## Context
 
-`@quarkos/pi-fusion` (vendored at `~/Work/willgriffin/repos/pi/extensions/pi-fusion/`) hardcodes one
+`@quarkos/pi-fusion` ([upstream](https://github.com/QuarkOS/Pi-Fusion); a local vendored copy serves
+as the reference implementation) hardcodes one
 provider per fusion: `applyProfile` sets `config.provider` and a single
 `providers[provider].defaultModels` map of five bare model ids, and `lib/api.js` builds one
 `ApiClient` with one baseUrl and one key. That cannot express what is needed: a fusion whose five
@@ -34,7 +35,7 @@ Low confidence escalates to the expensive path rather than silently deciding.
 
 ### Step 1 — New repo, package skeleton, config loading
 
-Create the repository checkout (git repo) with:
+Create the repository root with:
 
 ```
 package.json            # private package declaring pi.extensions
@@ -91,8 +92,7 @@ deps; pi installs nothing for a local-path package.
 Wire it into the pi config repo by symlink (documented local-path sharing; no npm publish):
 
 ```bash
-ln -s <repo>/extensions/pi-fusion-matrix \
-      <pi-checkout>/extensions/pi-fusion-matrix
+ln -s "$PWD/extensions/pi-fusion-matrix" ~/.pi/agent/extensions/pi-fusion-matrix
 ```
 
 `config.ts` exports these types and functions:
@@ -182,7 +182,7 @@ export function loadMatrixConfig(): { config: MatrixConfig; layers: string[] };
 3. `<session cwd>/.pi-fusion-matrix.json`
 
 Reuse the merge shape the reference implementation uses (
-`extensions/pi-fusion/lib/config.js:58-67` (`mergeConfig`: objects merge field by field, arrays and
+`<vendored-fork>/lib/config.js:58-67` (`mergeConfig`: objects merge field by field, arrays and
 scalars replace; it is verified working in this session). Copy that function rather than writing a
 new one.
 
@@ -216,7 +216,7 @@ piece of configuration registers, and a stale name must fail at use, not at star
 ```json
 {
   "aliases": {
-    "deepseek-flash": { "providers": ["go", "tp", "oc"] },
+    "deepseek-flash": { "providers": ["go", "tp", "corp"] },
     "deepseek-pro": { "providers": ["go", "tp"] },
     "glm": { "providers": ["go", "tp"] },
     "glm-flash": { "providers": ["go", "tp"] },
@@ -408,15 +408,20 @@ each with its own key reference and endpoint:
       "apiKey": "$OPENAI_API_KEY",
       "models": [ { "id": "gpt-5.6-sol", "reasoning": true } ]
     },
-    "oc": {
-      "baseUrl": "https://<gateway-host>/v1",
+    "corp": {
+      "baseUrl": "https://gateway.example.com/v1",
       "api": "openai-completions",
-      "apiKey": "!sops -d --extract '[\"stringData\"][\"<virtual-key-name>\"]' <gateway-virtual-key-secret-manifest>",
+      "apiKey": "!sops -d --extract '[\"data\"][\"api_key\"]' ./secrets/corp-gateway.enc.yaml",
       "models": [ { "id": "deepseek-v4.1-flash" } ]
     }
   }
 }
 ```
+
+`corp` is the shape for a private gateway: any provider whose `apiKey` is a `!command` (sops, a secret
+manager CLI, `security find-generic-password`) rather than an environment variable. pi resolves that
+command at request time and its output is never committed — which is why this repository can ship a
+provider block as an example without carrying a credential.
 
 Add `openai`/`google`/`anthropic` style models here only as needed: `models.json` may list an
 arbitrary model id per provider, and this extension resolves the drill-down itself (Step 3), so no
@@ -424,10 +429,10 @@ entry in the client's own catalogue is required.
 
 Per-organization billing is a second, keyed entry in the same file — a copy of the block above whose
 `apiKey` points at another account's secret (for example `"tp-work": { "baseUrl": "...", "apiKey":
-"!sops -d ...tp-work-key...", "models": [ ...same ids... ] }`), with the alias's `providers` list
-edited in the repo-local `matrix.json` (`"providers": ["go", "tp-work", "tp"]`) when that project
-must bill elsewhere first. Both files live outside the workspace, so every repo can carry its own
-`matrix.json` while the secrets stay in pi's own store.
+"!sops -d ./secrets/tp-work-key.enc.yaml", "models": [ ...same ids... ] }`), with the alias's
+`providers` list edited in the repo-local `matrix.json` (`"providers": ["go", "tp-work", "tp"]`) when
+that project must bill elsewhere first. Both files live outside the workspace, so every repo can carry
+its own `matrix.json` while the secrets stay in pi's own store.
 
 ### Step 3 — Registration, resolution, execution
 
@@ -466,9 +471,9 @@ requirement (`docs/custom-provider.md`).
 
 `streamSimple` MUST return its stream synchronously and then push real `AssistantMessage` events
 (`start`, `text_start`, `text_delta`, `text_end`, `done` or `error`). Copy this structure from the
-working vendored implementation rather than inventing it: `extensions/pi-fusion/index.js:507-745`
+working vendored implementation rather than inventing it: `<vendored-fork>/index.js:507-745`
 (base message, `freshUsage`, `msg`, `sendDelta`, abort checks, `toolcall_start`/`toolcall_end`
-emission) and `extensions/pi-fusion/lib/event-stream.js` for the duck-typed stream.
+emission) and `<vendored-fork>/lib/event-stream.js` for the duck-typed stream.
 
 `resolve.ts`:
 
@@ -511,7 +516,7 @@ async function runSlot(slot: SlotKey, candidates: SlotCandidate[], ctx: RunConte
 
 `runSlot` algorithm — two fallback layers, each independently configured and reported:
 1. `prompt` = first message of the trailing run of `role === "user"` messages — the injected-prelude
-   fix, copied from `extensions/pi-fusion/index.js:485-506` (`extractPrompt`).
+   fix, copied from `<vendored-fork>/index.js:485-506` (`extractPrompt`).
 2. Expand the slot list with `resolveCandidates` per entry, keeping entry order. Each entry contributes
    its own ordered provider list. The expansion is the execution plan; log it once per run in the
    banner as `<slot>: <alias>@<provider>` sequences.
@@ -558,7 +563,7 @@ Temperature per slot: `0.5` for `technical_expert` and `synthesis`, `0.8` for `d
 `0.6` for `systems_thinker`, `0.2` for `judge` — the reference implementation's values. Keep the
 `kimi` special case (`temperature: 1.0`
 when the model id contains `kimi`), and the models-reject-temperature memory from
-`extensions/pi-fusion/lib/api.js` (patch 6): a module-level `Set` of provider/model keys; on an error
+`<vendored-fork>/lib/api.js` (patch 6): a module-level `Set` of provider/model keys; on an error
 whose text matches `/temperature/i`, add the key, omit `temperature` on the retry (same candidate,
 not an advance), emit one `⚠️ <provider>/<model> rejects a temperature override; retrying without it.`
 delta. The corresponding prevention lives in `models.json`: for a model that always rejects it, set
@@ -567,13 +572,13 @@ the memory above covers the case where it was not set.
 
 Pipeline shape in `runFusion`: 3x = two panel slots concurrently, then synthesis (both streams
 forwarded); 5x = three panel slots concurrently, then judge (JSON, parsed with the bracket-recovery
-fallback from `extensions/pi-fusion/lib/deliberation.js`), then synthesis. Prompts come from
+fallback from `<vendored-fork>/lib/deliberation.js`), then synthesis. Prompts come from
 `fusion.prompts[slot]` when set, else `prompts.ts` literals. A SemIf element inside a slot's list is
 executed in place, and its result enters the judge/synthesis context in that slot's position.
 
 File agent: when `fusion.fileAgent` is `{ alias }`, resolve that alias through the same
 `resolveCandidates` path (so it also inherits the provider chain, e.g. `deepseek-flash` on Go then
-the token plan) and run it with the `WRITE_TOOL` schema copied from `extensions/pi-fusion/index.js`,
+the token plan) and run it with the `WRITE_TOOL` schema copied from `<vendored-fork>/index.js`,
 emitting `toolcall_start`/`toolcall_end` blocks exactly as `index.js:718-730` does, so pi performs the
 writes. When `false`, skip and end with `stopReason: "stop"`.
 
@@ -765,7 +770,7 @@ anywhere: it is a *reference implementation* for behaviors this repo re-derives,
 with no `~/Work` checkout.
 
 The pipeline, in order, mirroring the shape verified working in
-`extensions/pi-fusion/lib/deliberation.js` (read as reference, not copied):
+`<vendored-fork>/lib/deliberation.js` (read as reference, not copied):
 
 1. **3x** — `technical_expert` and `devils_advocate` concurrently via `runSlot`, then `synthesis`.
 2. **5x** — `technical_expert`, `devils_advocate`, `systems_thinker` concurrently via `runSlot`, then
@@ -796,24 +801,25 @@ The pipeline, in order, mirroring the shape verified working in
    `calculateCost` (the fork's only pi-ai use, `index.js:704-712`) — this extension has no price table.
 
 Prompts live in `prompts.ts` as literals, transcribed from
-`extensions/pi-fusion/pi-harness.config.json` (`panel.*.systemPrompt`, `judge.systemPrompt`,
+`<vendored-fork>/pi-harness.config.json` (`panel.*.systemPrompt`, `judge.systemPrompt`,
 `synthesis.systemPrompt`) before that directory is removed. They are upstream's 1,500-token-concise
 prompts and are the one thing worth copying verbatim.
 
 ## Critical files & anchors
 
-Reference-only (read to re-derive behavior; never imported, and the directory may be deleted once this
-plan's verification passes):
+Reference-only — read from the vendored copy of upstream `@quarkos/pi-fusion` (referred to below as
+`<vendored-fork>`, the checkout of that project on the implementer's machine) to re-derive behavior.
+It is never imported, and that copy may be deleted once this plan's verification passes:
 
-- `extensions/pi-fusion/lib/deliberation.js` — the pipeline order, judge JSON recovery, and the
+- `<vendored-fork>/lib/deliberation.js` — the pipeline order, judge JSON recovery, and the
   prompt-assembly headers to reproduce (Step 6).
-- `extensions/pi-fusion/index.js:478-745` — the verified `streamSimple` event sequence and the
+- `<vendored-fork>/index.js:478-745` — the verified `streamSimple` event sequence and the
   `toolcall_start`/`toolcall_end` emission that makes pi execute file-agent writes.
-- `extensions/pi-fusion/lib/api.js` — the quota/credential/missing-model/transient taxonomy and the
+- `<vendored-fork>/lib/api.js` — the quota/credential/missing-model/transient taxonomy and the
   temperature-rejection memory that Step 3's table encodes.
-- `extensions/pi-fusion/pi-harness.config.json` — source of the three prompt literals for `prompts.ts`
+- `<vendored-fork>/pi-harness.config.json` — source of the three prompt literals for `prompts.ts`
   (transcribe before deleting anything).
-- `extensions/pi-fusion/index.js:485-506` — `extractPrompt`: the trailing-user-run prompt selection to
+- `<vendored-fork>/index.js:485-506` — `extractPrompt`: the trailing-user-run prompt selection to
   reuse verbatim.
 
 pi-side references:
@@ -832,8 +838,8 @@ pi-side references:
 ## Verification
 
 Prerequisites: the `models.json` block from Step 2 merged into `~/.pi/agent/models.json`, and the keys
-it references available (`OC_GO_CC_API_KEY`, `ALIBABA_TOKEN_PLAN_API_KEY`, `OPENAI_API_KEY`; the `oc`
-provider additionally needs the sops age key); `/tmp/fusion-matrix-check/` as `cwd` for scratch runs (create, and remove at the end); the
+it references available (`OC_GO_CC_API_KEY`, `ALIBABA_TOKEN_PLAN_API_KEY`, `OPENAI_API_KEY`; the `corp`
+provider additionally needs whatever its `!command` reads); `/tmp/fusion-matrix-check/` as `cwd` for scratch runs (create, and remove at the end); the
 pi config repo symlink from Step 1 in place.
 
 1. **Model registration** — `cd /tmp/fusion-matrix-check && pi --list-models fusion` prints
@@ -896,11 +902,11 @@ pi config repo symlink from Step 1 in place.
     `go-alt` (banner and `details.models` show it) with no edit to any fusion and no credential in the
     project file. Remove the override afterwards. This is the check that per-repo billing needs no
     profile system.
-12. **Independence from the fork** — `grep -rn "pi-fusion\|Work/willgriffin" extensions/ matrix.json
+12. **Independence from the fork** — `grep -rn "pi-fusion\|/Users/\|~/Work" extensions/ matrix.json
     package.json` must return no import or path reference (only doc/comment mentions of the reference
-    directory are allowed). Then move `~/Work/willgriffin/repos/pi/extensions/pi-fusion` aside, run
+    directory are allowed). Then move the vendored reference fork out of the pi extensions directory, run
     `pi -p "Reply with exactly: ZQX1" --model fusion-deep --no-session`, and confirm it still works —
-    this is the check that the package runs from a container with no `~/Work`. Restore the directory
+    this is the check that the package runs with no developer checkout present. Restore the directory
     afterwards.
 13. **Alias is version-free** — `grep -rn "glm-5\|qwen3\.8\|deepseek-v4\|kimi-k3"` across
     `extensions/pi-fusion-matrix/` and `matrix.json` must match only test fixtures or comments, never
