@@ -60,11 +60,16 @@ that iterate until green, and plan-then-DAG execution. `verify` gates run once a
 Run before shipping, from the repository root:
 
 ```bash
-node scripts/semif-probe.mjs --backend http://127.0.0.1:8792/score      # offline contract
+node scripts/typesafe-stub.mjs & node scripts/semif-stub.mjs &          # local backends
 node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone
+node scripts/semif-probe.mjs    --backend http://127.0.0.1:8792/score
+node scripts/interp-check.mjs                                           # interpreter contracts
+node scripts/doctor.mjs                                                 # config + connectivity
 ```
 
-Both stubs must be running first (`node scripts/semif-stub.mjs &`, `node scripts/typesafe-stub.mjs &`).
+The interpreter and doctor checks need no keys, no network, and no quota — they are the checks that must
+still run when a provider's limit blocks a live one. Live end-to-end runs are in `docs/plan.md`
+§Verification and need pi plus the providers the aliases name.
 End-to-end checks are listed in `docs/plan.md` §Verification and require pi plus, for live decision
 calls, `TYPESAFE_API_KEY`.
 
