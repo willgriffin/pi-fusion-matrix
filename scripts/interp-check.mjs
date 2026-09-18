@@ -14,13 +14,14 @@
  * It caught a real gap on first run: stage-level `sufficientWhen` was unimplemented, so a converged
  * panel still paid for the judge.
  */
-import path from "node:path";
 import { loadMatrixConfig } from "../extensions/pi-fusion-matrix/config.js";
 import { runPipeline } from "../extensions/pi-fusion-matrix/pipeline.js";
 import { createDecide } from "../extensions/pi-fusion-matrix/decide.js";
 import { routeFusion, verifyRun } from "../extensions/pi-fusion-matrix/run.js";
 
-const { config, sources } = loadMatrixConfig({ cwd: process.env.INTERP_CWD ?? process.cwd() });
+// The packaged layer only: a developer's machine-wide layer and a project layer would otherwise decide
+// what "N/N" means, and this check has to be the same number on every machine.
+const { config, sources } = loadMatrixConfig({ cwd: process.cwd(), layers: ["packaged"] });
 
 // a project layer that points every decision at the stub and every seat at a canned response
 config.decide.defaultBackend = "stub";
@@ -73,14 +74,44 @@ const configScored = JSON.parse(JSON.stringify(config));
 configScored.modes.scored = { stages: [
   { parallel: ["technical", "skeptic", "systems"], input: "prompt" },
   { score: { instructions: "How well does each response address the question?", criteria: ["off-topic", "partial", "solid", "thorough"] }, over: "panel" },
-  { render: "panel" },
+  // The stage that consumes the weights, which is where they become observable (plan §Verification 18).
+  { render: "panel", input: "panel+weights" },
 ] };
 configScored.fusions.scored = { mode: "scored", candidates: { technical: ["glm"], skeptic: ["glm"], systems: ["glm"] } };
-let backendRequests = 0;
-const countingDecide = async (spec, vars, signal) => { backendRequests += 1; return decide(spec, vars, signal); };
-run = await runPipeline({ config: configScored, sources, fusion: { ...configScored.fusions.scored, id: "scored" }, prompt: "rate these", callModel, decide: countingDecide, emit: silent, registry });
-check("score: one batched request for three seats", backendRequests === 1, `backend requests=${backendRequests}`);
-check("score: weights render sorted persona lines", /technical|skeptic|systems/.test(JSON.stringify(run.details)) || true, "(weights feed the next stage's input)");
+// The request itself is the contract: one POST carrying one question per seat, each of them a `score`
+// question over the mode's levels. A fan-out typed as `choice` answers with an option id instead of a
+// level, which is how every weight once rendered as 0.00 with a phantom line beside it.
+const scoreRequests = [];
+const scoredDecide = createDecide({
+  config: configScored,
+  fetchImpl: async (url, init) => { scoreRequests.push(JSON.parse(init.body)); return fetch(url, init); },
+});
+// decisive: the stub's score then sits at the top level with a real confidence, so the rendered lines
+// are non-degenerate whatever mode an earlier block left behind.
+await setMode("decisive");
+run = await runPipeline({ config: configScored, sources, fusion: { ...configScored.fusions.scored, id: "scored" }, prompt: "rate these", callModel, decide: scoredDecide, emit: silent, registry });
+const scoredSeats = ["technical", "skeptic", "systems"];
+const scoreQuestions = Object.entries(scoreRequests[0]?.questions ?? {});
+check("score: one batched request for three seats",
+  scoreRequests.length === 1
+    && scoreQuestions.length === scoredSeats.length
+    && scoredSeats.every((seat) => scoreQuestions.some(([id, q]) => id === seat && q.type === "score"))
+    && scoreQuestions.every(([, q]) => q.type === "score" && q.criteria?.length >= 2),
+  `requests=${scoreRequests.length}, questions=${JSON.stringify(scoreQuestions.map(([id, q]) => [id, q.type, q.criteria?.length]))}`);
+// The weights are read where the pipeline publishes them — as the rendered block the next stage's
+// input starts with — one `persona: score (confidence)` line per panel seat, best first.
+const weightsBlock = String(run.text ?? "").split("\n\n")[0];
+const weightLines = weightsBlock.split("\n").filter(Boolean);
+const weighed = weightLines.map((line) => {
+  const match = line.match(/^([a-z-]+): (\d+\.\d\d) \(confidence (\d+\.\d\d)\)$/);
+  return match ? { persona: match[1], score: Number(match[2]) } : null;
+});
+check("score: weights render sorted persona lines",
+  weightLines.length === scoredSeats.length
+    && weighed.every((w) => w !== null)
+    && scoredSeats.every((seat) => weighed.some((w) => w.persona === seat))
+    && weighed.every((w, i) => i === 0 || weighed[i - 1].score >= w.score),
+  `weights=${JSON.stringify(weightsBlock)}`);
 
 // 5. verify: a low noul warns, a gate reports its exit, neither blocks
 await setMode("ambiguous");
@@ -95,7 +126,11 @@ config.fusions.target = { mode: "single", candidates: { technical: ["glm"] } };
 config.fusions.router = { ...config.fusions["review-routed"], id: "router", route: { ...config.fusions["review-routed"].route, sufficientWhen: { minConfidence: 0.8 } } };
 await setMode("decisive");
 let routed = await routeFusion({ config, fusion: config.fusions.router, prompt: "x", decide, emit: silent });
-check("route: confident match routes to the target", routed.fusion.id !== "router" || routed.routing?.declined, `routedTo=${routed.routing?.routedTo ?? "declined: " + (routed.routing?.declined ?? "?")}`);
+// The stub's decisive answer takes the route's first criterion, and only that criterion carries an
+// action (`then: "quick"`) — so the run must be redirected, not merely "not declined".
+check("route: confident match routes to the target",
+  routed.routing?.routedTo === "quick" && routed.fusion.id === "quick",
+  `routedTo=${routed.routing?.routedTo ?? "none"}, fusion=${routed.fusion.id}`);
 await setMode("ambiguous");
 routed = await routeFusion({ config, fusion: config.fusions.router, prompt: "x", decide, emit: silent });
 check("route: low confidence declines and says so", Boolean(routed.routing?.declined), routed.routing?.declined ?? "no decline recorded");

@@ -3,18 +3,24 @@
  * typesafe-probe.mjs — assert the TypeSafe contract against a backend (the stub, or the real one).
  *
  *   node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone
- *   node scripts/typesafe-probe.mjs --backend https://api.typesafe.ai/v1/systemone --model jev-1.13.0
+ *   node scripts/typesafe-probe.mjs --backend https://api.typesafe.ai/v1/systemone
+ *
+ * The model defaults to the packaged pin (`backends.typesafe.model`, `jev-1.13.0`), not to a literal
+ * here: the pin lives in `matrix.json` so a version bump is one reviewed edit, and the probe and the
+ * extension cannot drift apart. A backend that serves something else takes `--model`.
  *
  * Asserts, per row: HTTP 200; one answer per question id; `probabilities` keyed by the criteria ids and
  * summing to 1; and `confidence` present on every choice and score answer. Exits 1 with the failing row
  * and response body, because "the backend is misconfigured" and "the extension is wrong" must not look
  * the same.
  */
+import { loadMatrixConfig } from "../extensions/pi-fusion-matrix/config.js";
+
 const args = process.argv.slice(2);
 const arg = (name, fallback) => { const i = args.indexOf(`--${name}`); return i === -1 ? fallback : args[i + 1]; };
 
 const backend = arg("backend", "http://127.0.0.1:8793/v1/systemone");
-const model = arg("model", "jev-stub");
+const model = arg("model", loadMatrixConfig({ cwd: process.cwd() }).config.backends?.typesafe?.model ?? "jev-1.13.0");
 const apiKey = process.env[arg("apiKeyEnv", "TYPESAFE_API_KEY")] ?? "";
 
 const rows = [
