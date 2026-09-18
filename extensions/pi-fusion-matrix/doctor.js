@@ -91,12 +91,19 @@ export async function runDoctor({ config, sources, registry, online = false, fet
 
   // ---- reach + drift (online) ----
   const live = new Map();
-  if (online && !registry) add("info", "reach", "online checks need a model registry; skipped");
+  // Opting into `--online` and then checking nothing is the same "learned nothing" as a listing that
+  // failed: a CI job that asked for reachability must not get a green from an environment that has no
+  // registry. The informational reach finding — an id pi does not catalogue — is a different thing: a
+  // miss the operator is told about, not a check that did not happen.
+  if (online && !registry) add("warn", "reach", "online checks need a model registry (run inside pi or through /matrix-doctor); nothing about reachability or drift was checked, so this is not a clean bill");
   if (online && registry) {
     for (const provider of providers) {
       const result = await liveModels(provider, { registry, fetchImpl, signal });
       live.set(provider, result);
-      if (!result.ok) add("info", "reach", `could not list models for "${provider}" (${result.reason}); reachability unknown for it`);
+      // A failed listing learned nothing, so it may not read as clean: a retired or renamed id behind
+      // an unreachable provider would go unreported, which is what exit 3 is for. The finding carries
+      // no `repair` — nothing here is a models.json addition, and `--repair` must not offer it as one.
+      if (!result.ok) add("warn", "reach", `could not list models for "${provider}" (${result.reason}); reachability is unknown, so nothing it serves can be called current`);
     }
     for (const [name, alias] of Object.entries(aliases)) {
       const catalogued = new Set((registry?.getAll?.() ?? []).filter((m) => m.provider && alias.providers?.some((r) => refId(r) === m.provider)).map((m) => m.id));
@@ -116,10 +123,14 @@ export async function runDoctor({ config, sources, registry, online = false, fet
     }
   }
 
+  // Exit 3 is "reachability or drift" and covers both because each is a claim about upstream reality.
+  // A `reach` listing that failed is a warning for the opposite reason a drift finding is: it learned
+  // nothing, so it must not pass. The catalogue-miss findings stay `info` — an id pi does not list is
+  // expected, and only the drift warning (the provider no longer serving it) is a finding.
   const exit = errors.length > 0
     ? EXIT.config
     : findings.some((f) => f.check === "connect" && f.level === "error") ? EXIT.connect
-      : findings.some((f) => f.level === "warn") ? EXIT.drift
+      : findings.some((f) => (f.check === "reach" || f.check === "drift") && f.level === "warn") ? EXIT.drift
         : EXIT.clean;
 
   return { findings, exit };

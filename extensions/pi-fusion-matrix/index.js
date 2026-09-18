@@ -5,8 +5,8 @@
  * resolves a credential or constructs a base URL: seats go through pi's registry (resolve.js).
  *
  * Config loads once at startup and fails loudly — a config that cannot run should not register models
- * that pretend it can. The registry arrives on `session_start`, so the stream reads it through a getter
- * rather than capturing a null at load time.
+ * that pretend it can. The registry arrives on `session_start` — one per session — so the stream reads
+ * it through a getter rather than capturing a null at load time.
  */
 
 import fs from "node:fs";
@@ -26,13 +26,42 @@ export default async function (pi) {
     throw new Error(`pi-fusion-matrix: ${first}${rest.length ? ` (and ${rest.length} more; run /matrix-doctor)` : ""}`);
   }
 
-  let registry = null;
-  pi.on("session_start", (_event, ctx) => { registry = ctx.modelRegistry; });
+  // One registry per session, looked up by id. pi rebinds the runtime and re-emits `session_start` on
+  // reload, resume, and fork, so a single slot would re-point a run that belongs to another session —
+  // and it read null before the first start. The stream knows its session (`options.sessionId`, what
+  // pi's agent loop forwards), the tool and command paths read `ctx.sessionManager`; a caller with no
+  // id to offer gets the newest capture, and a capture that had no id is stored under a fresh
+  // monotonic key so it can never overwrite one that did.
+  const registries = new Map();
+  let latestRegistry = null;
+  let captures = 0;
+  const sessionIdOf = (ctx) => ctx?.sessionManager?.getSessionId?.();
+  pi.on("session_start", (_event, ctx) => {
+    latestRegistry = ctx?.modelRegistry ?? null;
+    const sessionId = sessionIdOf(ctx);
+    registries.set(sessionId ? `id:${sessionId}` : `capture:${++captures}`, latestRegistry);
+  });
+
+  /** The registry for a session id, or the newest capture when the caller cannot name its own. */
+  const getRegistry = (sessionId) => (sessionId && registries.has(`id:${sessionId}`) ? registries.get(`id:${sessionId}`) : latestRegistry);
 
   let piAi = null;
   const getPi = async () => (piAi ??= await loadPi());
   const callModel = makeCallModel(getPi);
   const decide = createDecide({ config });
+
+  // `createFusionStream` asks for its registry once, when a run starts, so the getter has to know the
+  // session by then: one stream function per session (not per run, and not one shared between them).
+  const streams = new Map();
+  const streamForSession = (sessionId) => {
+    const key = sessionId ?? "";
+    let stream = streams.get(key);
+    if (!stream) {
+      stream = createFusionStream({ config, sources, getRegistry: () => getRegistry(sessionId), decide, callModel, getPi });
+      streams.set(key, stream);
+    }
+    return stream;
+  };
 
   const providerId = config.providerId ?? "fusion-matrix";
   const fusionIds = Object.keys(config.fusions);
@@ -53,14 +82,7 @@ export default async function (pi) {
       maxTokens: config.fusions[id].model?.maxTokens ?? 8192,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     })),
-    streamSimple: createFusionStream({
-      config,
-      sources,
-      getRegistry: () => registry,
-      decide,
-      callModel,
-      getPi,
-    }),
+    streamSimple: (model, context, options) => streamForSession(options?.sessionId)(model, context, options),
   });
 
   pi.registerTool({
@@ -76,13 +98,13 @@ export default async function (pi) {
       },
       required: ["prompt"],
     },
-    execute: async (_toolCallId, params) => {
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const fusion = params.fusion ?? config.defaultFusion ?? fusionIds[0];
       if (!config.fusions[fusion]) {
         return { content: [{ type: "text", text: `unknown fusion "${fusion}"; known: ${fusionIds.join(", ")}` }], details: { fusion } };
       }
       try {
-        const result = await runOnce({ config, sources, fusion, prompt: params.prompt, getRegistry: () => registry, decide, callModel });
+        const result = await runOnce({ config, sources, fusion, prompt: params.prompt, getRegistry: () => getRegistry(sessionIdOf(ctx)), decide, callModel });
         return { content: [{ type: "text", text: result.text }], details: { fusion, ...result.details } };
       } catch (error) {
         const message = error?.message ?? String(error);
@@ -106,7 +128,7 @@ export default async function (pi) {
 
       ctx.ui.setStatus("matrix", `🧠 ${fusion}…`);
       try {
-        const result = await runOnce({ config, sources, fusion, prompt, getRegistry: () => registry, decide, callModel, onProgress: (line) => ctx.ui.setStatus("matrix", line) });
+        const result = await runOnce({ config, sources, fusion, prompt, getRegistry: () => getRegistry(sessionIdOf(ctx)), decide, callModel, onProgress: (line) => ctx.ui.setStatus("matrix", line) });
         pi.sendMessage({ customType: "matrix-answer", content: result.text, display: true }, { triggerTurn: false });
       } catch (error) {
         ctx.ui.notify(`fusion failed: ${error?.message ?? String(error)}`, "error");
@@ -149,7 +171,7 @@ export default async function (pi) {
   pi.registerCommand("matrix-doctor", {
     description: "Validate the config, check provider connectivity, and report catalogue drift",
     handler: async (args, ctx) => {
-      const { findings, exit } = await runDoctor({ config, sources, registry, online: /\bonline\b/.test(String(args ?? "")) });
+      const { findings, exit } = await runDoctor({ config, sources, registry: getRegistry(sessionIdOf(ctx)), online: /\bonline\b/.test(String(args ?? "")) });
       const snippet = repairSnippet(findings);
       ctx.ui.notify(`${formatFindings(findings)}${snippet ? `\n\nsuggested models.json additions:\n${snippet}` : ""}\n\nexit ${exit}`, exit === EXIT.clean ? "info" : "error");
     },
@@ -167,11 +189,24 @@ async function runOnce({ config, sources, fusion, prompt, getRegistry, decide, c
   const { runPipeline } = await import("./pipeline.js");
   const { routeFusion, verifyRun, fileAgentStep, makeRunGate } = await import("./run.js");
   const notes = [];
-  const emit = { delta: (text) => { notes.push(text.trim()); onProgress?.(text.trim().slice(0, 120)); }, substitution: () => {} };
+  const substitutionLines = [];
+  const emit = {
+    delta: (text) => { notes.push(text.trim()); onProgress?.(text.trim().slice(0, 120)); },
+    // The provider path renders a substitution inline; a tool result has no stream to render into, so
+    // the same ` ├─ ↩ …` line is kept here for `notes` and prepended to the text the caller returns.
+    substitution: (entry) => {
+      const line = ` ├─ ↩ ${entry.seat} ${entry.from} → ${entry.to} (${entry.reason})`;
+      substitutionLines.push(line);
+      notes.push(line.trim());
+      onProgress?.(line.trim().slice(0, 120));
+    },
+  };
 
   const routed = await routeFusion({ config, fusion: { ...config.fusions[fusion], id: fusion }, prompt, decide, emit });
   const run = await runPipeline({ config, sources, fusion: routed.fusion, prompt, registry: getRegistry(), callModel, decide, emit });
-  const vars = { prompt, panel: "", judge: run.text, synthesis: run.text, cwd: process.cwd() };
+  // `run.vars` is the panel as the panel saw it: `{{panel}}` in a verify question reads the seats'
+  // answers and `{{judge}}` the judge's, which the final text cannot stand in for.
+  const vars = run.vars ?? { prompt, panel: "", judge: run.text, synthesis: run.text, cwd: process.cwd() };
   const verification = await verifyRun({ config, fusion: routed.fusion, vars, decide, emit, runGate: makeRunGate() });
   const files = await fileAgentStep({ config, fusion: routed.fusion, prompt, synthesis: run.text, registry: getRegistry(), callModel, emit });
 
@@ -203,6 +238,7 @@ async function runOnce({ config, sources, fusion, prompt, getRegistry, decide, c
   }
 
   const summary = [
+    substitutionLines.length ? `${substitutionLines.join("\n")}\n\n` : "",
     run.text,
     saved.length ? `\n\n---\nSaved ${saved.length} file(s): ${saved.map((f) => `\`${f}\``).join(", ")}` : "",
     failedWrites.length ? `\n\n⚠️ Could not write: ${failedWrites.join("; ")}` : "",

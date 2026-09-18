@@ -8,9 +8,10 @@
  *   node scripts/doctor.mjs --repair       # print the additive models.json snippet, write nothing
  *   node scripts/doctor.mjs --cwd <path>   # resolve layers as a session in <path> would
  *
- * Exit status separates "broken" from "out of date": 1 config, 2 connectivity, 3 reachability/drift.
- * Inside a bare node process there is no model registry, so connectivity is reported as unknown rather
- * than guessed — run it inside pi (or through /matrix-doctor) for those checks.
+ * Exit status separates "broken" from "out of date": 0 clean, 1 config, 2 connectivity, 3 reachability or
+ * drift. Inside a bare node process there is no model registry, so connectivity is reported as unknown
+ * rather than guessed, and asking for `--online` there exits 3: the reachability check did not run.
+ * Run it inside pi (or through /matrix-doctor) for those checks.
  */
 import path from "node:path";
 import { loadMatrixConfig } from "../extensions/pi-fusion-matrix/config.js";
