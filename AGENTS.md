@@ -22,7 +22,8 @@ is a bug in one of them.
 
 - **No credential handling.** Never read, resolve, cache, or log an API key. Providers arrive from
   `~/.pi/agent/models.json`; this package references provider ids only.
-- **No `~/Work` imports.** Nothing may import from a sibling checkout. `@quarkos/pi-fusion` is a
+- **No absolute or sibling-checkout imports.** Nothing may import from a developer checkout path.
+  `@quarkos/pi-fusion` is a
   reference implementation to be re-derived, never a dependency — it must run in a container with no
   developer checkout present.
 - **No silent degradation.** Every substitution, skipped slot, truncated decision state, or failed

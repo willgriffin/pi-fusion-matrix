@@ -766,8 +766,8 @@ loaded. It never writes configuration and never switches a profile.
 
 `run.ts` owns the pipeline outright. `@quarkos/pi-fusion` is not imported, installed, or required
 anywhere: it is a *reference implementation* for behaviors this repo re-derives, not a dependency.
-`pip`-style path imports of `~/Work/...` are forbidden in this package — it must run from a container
-with no `~/Work` checkout.
+Absolute and sibling-checkout path imports are forbidden in this package — it must run from a container
+with no developer checkout present.
 
 The pipeline, in order, mirroring the shape verified working in
 `<vendored-fork>/lib/deliberation.js` (read as reference, not copied):
@@ -902,7 +902,7 @@ pi config repo symlink from Step 1 in place.
     `go-alt` (banner and `details.models` show it) with no edit to any fusion and no credential in the
     project file. Remove the override afterwards. This is the check that per-repo billing needs no
     profile system.
-12. **Independence from the fork** — `grep -rn "pi-fusion\|/Users/\|~/Work" extensions/ matrix.json
+12. **Independence from the fork** — `grep -rn "pi-fusion\|/Users/\|~/" extensions/ matrix.json
     package.json` must return no import or path reference (only doc/comment mentions of the reference
     directory are allowed). Then move the vendored reference fork out of the pi extensions directory, run
     `pi -p "Reply with exactly: ZQX1" --model fusion-deep --no-session`, and confirm it still works —
