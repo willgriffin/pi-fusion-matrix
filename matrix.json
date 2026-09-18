@@ -559,18 +559,21 @@
     "semif": {
       "kind": "semif",
       "url": "http://127.0.0.1:8791/score",
-      "timeoutMs": 30000
+      "timeoutMs": 30000,
+      "model": "qwen3.5-4b"
     },
     "semif-hosted": {
       "kind": "semif",
       "url": "https://SET-THE-HOSTED-SEMIF-URL/score",
       "apiKeyEnv": "SEMIF_API_KEY",
-      "timeoutMs": 30000
+      "timeoutMs": 30000,
+      "model": "qwen3.5-4b"
     },
     "semif-stub": {
       "kind": "semif",
       "url": "http://127.0.0.1:8792/score",
-      "timeoutMs": 5000
+      "timeoutMs": 5000,
+      "model": "qwen3.5-4b"
     }
   }
 }

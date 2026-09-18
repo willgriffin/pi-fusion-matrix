@@ -330,7 +330,7 @@ Validation runs on every load and throws `pi-fusion-matrix: <problem>`; never fa
 - `temperature` outside 0..2, or `output` other than `text`/`json` → error.
 - a `verify` gate with an empty `command` → error; `timeoutMs` above 600000 → error.
 - `DecideSpec` declaring both `options` and `questions`, or neither → error.
-- `options` (SemIf-shaped choice) with a length outside 2..16 → error.
+- a `criteria` map outside 2..16 options → error.
 - `questions` with zero entries, or a `score` question with fewer than two `criteria` levels → error.
 - a decision naming a `backend` absent from `backends` → error; `decide.defaultBackend` absent → error.
 - `questions` on a `kind: "semif"` backend → error, naming the option-form alternative, because the
@@ -960,9 +960,14 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    `model: glm-5.3-flash`, `provider: opencode-go`, and a `template` id that pi *does* catalogue. Then
    point the same alias at a provider pi does not know (`{"aliases": {"glm-flash": {"providers":
    ["nope", "opencode-go"]}}}`) and confirm the `missing provider` substitution appears and the run
-   still answers. If this item fails, every later check is built on sand: the fallback would be
-   catalogued-ids-only, the aliases would have to change, and E1 must know before it writes the
-   resolver.
+   still answers. **Probed 2026-09-18** with a synthesized model against `opencode-go`: `ctx.modelRegistry`
+   is present in the extension context; `find("opencode-go", "glm-5.3")` returns a template with
+   `api=openai-completions`; `find(…, "glm-5.3-flash")` is absent as expected;
+   `getApiKeyAndHeaders(seatModel)` returns `ok` with a 67-character key; `import("@earendil-works/pi-ai/compat")`
+   resolves from an extension; and the call succeeds **only** with an explicit `x-opencode-session` header
+   (`sessionId` in options returned the same `400 MissingSessionID`). If this item fails, every later
+   check is built on sand: the fallback would be catalogued-ids-only, the aliases would have to change,
+   and E1 must know before it writes the resolver.
 
 2. **Model registration** — `cd /tmp/fusion-matrix-check && pi --list-models fusion` prints all
    twelve: `standard`, `quick`, `solo`, `workhorse`, `sota`, `deep`, `brief`, `opinions`, `debate`,
