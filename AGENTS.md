@@ -31,8 +31,12 @@ that iterate until green, and plan-then-DAG execution. `verify` gates run once a
 
 ## Hard constraints
 
-- **No credential handling.** Never read, resolve, cache, or log an API key. Providers arrive from
-  `~/.pi/agent/models.json`; this package references provider ids only.
+- **No credential handling.** Never read, resolve, cache, or log an API key. Provider ids are pi's own
+  built-ins; the credential comes from pi (`ctx.modelRegistry.getApiKeyAndHeaders`). This package
+  references provider ids only and ships no `models.json` block.
+- **Never substitute a model to make a list line up.** An alias's `model` is exactly what runs. A vendor
+  id absent from pi's catalogue is fine — seats resolve by provider + id — and drift is reported by the
+  doctor, never repaired by rewriting an alias.
 - **No absolute or sibling-checkout imports.** Nothing may import from a developer checkout path.
   `@quarkos/pi-fusion` is a
   reference implementation to be re-derived, never a dependency — it must run in a container with no

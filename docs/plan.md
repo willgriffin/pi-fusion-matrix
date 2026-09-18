@@ -406,72 +406,23 @@ Persona prompts live in `prompts/*.md` and are referenced by path, so editing wh
 an edit to a text file, not to code. A `prompt` may also be inline, and `fusions.<id>.prompts` overrides
 one persona for one fusion only.
 
-The provider names in `aliases.*.providers` are satisfied by pi's `models.json`. The implementer
-writes this block into `~/.pi/agent/models.json` (merge into the existing `providers` object; never
-replace the file's other providers), which is the entire billing story — one provider per account,
-each with its own key reference and endpoint:
+The provider ids in `aliases.*.providers` are **pi's own** — `opencode-go`, `zai`, `kimi-coding`,
+`openai`, and whatever a repository adds — and each provider's endpoint, api flavour, and catalogue come
+from pi. The packaged defaults therefore need **no `models.json` block at all**: they route only through
+providers this machine already has authenticated (`opencode-go`, `zai`, `kimi-coding` from pi's
+credential store; `openai` from `OPENAI_API_KEY`; `qwen-cloud-token-plan` as the operator's own
+`models.json` entry).
 
-```json
-{
-  "providers": {
-    "go": {
-      "baseUrl": "https://opencode.ai/zen/go/v1",
-      "api": "openai-completions",
-      "apiKey": "$OC_GO_CC_API_KEY",
-      "models": [
-        { "id": "glm-5.3" }, { "id": "glm-5.3-flash" }, { "id": "kimi-k3" },
-        { "id": "deepseek-v4.1-flash" }, { "id": "deepseek-v4-pro" },
-        { "id": "qwen3.8-max" }, { "id": "qwen3.8-flash" }, { "id": "grok-4.6" },
-        { "id": "gpt-5.6-luna", "reasoning": true }
-      ]
-    },
-    "tp": {
-      "baseUrl": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
-      "api": "openai-completions",
-      "apiKey": "$ALIBABA_TOKEN_PLAN_API_KEY",
-      "models": [
-        { "id": "glm-5.3" }, { "id": "qwen3.8-max" }, { "id": "qwen3.8-flash" },
-        { "id": "deepseek-v4.1-flash" }, { "id": "deepseek-v4-pro" },
-        { "id": "deepseek-v4-flash-0731" }
-      ]
-    },
-    "zen": {
-      "baseUrl": "https://opencode.ai/zen/v1",
-      "api": "openai-completions",
-      "apiKey": "$OPENCODE_API_KEY",
-      "models": [ { "id": "grok-4.6" }, { "id": "gpt-5.6-luna", "reasoning": true } ]
-    },
-    "oai": {
-      "baseUrl": "https://api.openai.com/v1",
-      "api": "openai-completions",
-      "apiKey": "$OPENAI_API_KEY",
-      "models": [ { "id": "gpt-5.6-sol", "reasoning": true } ]
-    },
-    "corp": {
-      "baseUrl": "https://gateway.example.com/v1",
-      "api": "openai-completions",
-      "apiKey": "!sops -d --extract '[\"data\"][\"api_key\"]' ./secrets/corp-gateway.enc.yaml",
-      "models": [ { "id": "deepseek-v4.1-flash" } ]
-    }
-  }
-}
-```
+Two cases still touch `models.json`, and neither is required for the packaged config to run:
 
-`corp` is the shape for a private gateway: any provider whose `apiKey` is a `!command` (sops, a secret
-manager CLI, `security find-generic-password`) rather than an environment variable. pi resolves that
-command at request time and its output is never committed — which is why this repository can ship a
-provider block as an example without carrying a credential.
-
-Add `openai`/`google`/`anthropic` style models here only as needed: `models.json` may list an
-arbitrary model id per provider, and this extension resolves the drill-down itself (Step 3), so no
-entry in the client's own catalogue is required.
-
-Per-organization billing is a second, keyed entry in the same file — a copy of the block above whose
-`apiKey` points at another account's secret (for example `"tp-work": { "baseUrl": "...", "apiKey":
-"!sops -d ./secrets/tp-work-key.enc.yaml", "models": [ ...same ids... ] }`), with the alias's
-`providers` list edited in the repo-local `matrix.json` (`"providers": ["go", "tp-work", "tp"]`) when
-that project must bill elsewhere first. Both files live outside the workspace, so every repo can carry
-its own `matrix.json` while the secrets stay in pi's own store.
+- **Adding an account or a gateway.** A private gateway, or a second account for a vendor that is
+  already a built-in provider, is a provider block the operator writes — the same pattern as their
+  existing `qwen-cloud-token-plan` entry (`baseUrl`, `api`, `apiKey` as `$ENV_VAR` or a `!command`, and
+  a `models` list). The alias then names that id. Nothing in this repository ships such a block.
+- **Wanting an id in pi's own picker.** Seats do not need a catalogued id (Step 3's credential seam), so
+  this is a convenience only: `{"providers": {"opencode-go": {"models": [{"id": "glm-5.3-flash"}]}}}`
+  upserts into a built-in provider, keeping its existing models (pi's documented merge semantics). The
+  doctor can print this snippet on request; it never writes it silently.
 
 ### Step 3 — Registration, resolution, execution
 
@@ -525,9 +476,8 @@ export type Resolved = { alias: string; provider: string; model: string; maxToke
 export function resolveCandidates(config: MatrixConfig, candidate: SlotCandidate): Resolved[];
 ```
 
-`resolveCandidates` expands one slot entry into an ordered list — this is the whole resolution model,
-and it consults only the alias table (providers live in pi's store, so nothing here reads a key or a
-URL):
+`resolveCandidates` expands one candidate entry into an ordered list — this is the whole resolution
+model, and it consults only the alias table (provider ids are pi's; nothing here reads a key or a URL):
 
 1. A `{ semif }` entry returns `[]`; the caller handles SemIf separately (Step 4).
 2. Normalize the entry: a bare string is `{ alias: string }`; an object carries `alias` plus an
@@ -540,10 +490,30 @@ URL):
    `alias.model` (optionally overridden per provider), so a vendor release edits one field in
    `matrix.json` and touches nothing else.
 
-Provider existence is verified in `run.ts` right before the call, not at load: the fallback executor
-asks pi's runtime for the resolved model list and, when the provider id is absent, records a
-substitution with `reason: "missing provider"` and moves on. This keeps the validation out of
-startup and makes a stale provider name a per-slot degradation instead of a hard failure.
+**The credential seam, and why a vendor id need not be in pi's catalogue.** pi's model list is curated
+and lags the live catalogues — `opencode-go` is catalogued with 19 ids while its live catalogue serves
+roughly twice that, so `glm-5.3-flash`, `deepseek-v4.1-flash`, and `grok-4.6` are absent from pi's list
+yet accepted by the provider. A seat therefore does **not** look its id up in the registry. It takes a
+same-provider model as the shape template and asks pi for the credential:
+
+```ts
+const template = ctx.modelRegistry.find(provider, anyCataloguedIdOf(provider));   // api, baseUrl, compat
+if (!template) → the provider is not configured at all
+const seatModel = { ...template, id: resolved.model };                            // our id, not pi's list
+const auth = await ctx.modelRegistry.getApiKeyAndHeaders(seatModel);              // pi resolves it
+```
+
+`getApiKeyAndHeaders(model)` resolves by `model.provider` (`ModelRuntime.getAuth(providerOrModel)`), so
+it works for an id pi has never heard of, and this extension still never reads a secret. Consequences:
+an alias may name any id its provider accepts; a vendor release is one `model` field; and no
+`models.json` entry is needed to make a model usable. The `pick` of template is by preference order
+(catalogued model of that provider, else the provider's first) and recorded in `details.seats[].template`
+so an odd template choice is visible rather than mysterious.
+
+Provider *existence* is still checked at use, not at load: a provider id that pi does not know, or one
+with no configured credential, records a substitution with `reason: "missing provider"` and advances.
+Config-level correctness — that a provider id is one pi has, and that its credential resolves — is the
+doctor's job (Step 7), not the loader's.
 
 **The stage interpreter.** `runFusion` reads `config.modes[fusion.mode].stages` and walks them in
 order, building a `vars` map as it goes:
@@ -587,25 +557,26 @@ async function runSeat(
    - decide entry → `decide(...)` per Step 4; failure records a substitution `reason: "decision"` and
      moves to the next entry. A decision's text contribution to the judge/synthesis context is
      `option: probability` lines (`<id>: <p>` sorted descending), and the winner is marked.
-   - Otherwise resolve the model through pi's own runtime and stream it:
+   - Otherwise build the seat's model through the credential seam above and stream it:
      ```ts
-     // `session` and the extension context come from the surrounding run; `ctx.modelRegistry` is the
-     // registry pi exposes to the extension, and `resolveModel`/`getAvailable` are its read APIs.
-     const model = ctx.modelRegistry.find(resolved.provider, resolved.model); // undefined → missing
-     const message = model
-       ? await streamSimple(model, { messages }, { signal: options.signal, temperature }).result()
-       : undefined;
+     const template = ctx.modelRegistry.find(resolved.provider, anyCataloguedIdOf(resolved.provider));
+     if (!template) return advance("missing provider");
+     const seatModel = { ...template, id: resolved.model, ...(auth.baseUrl ? { baseUrl: auth.baseUrl } : {}) };
+     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(seatModel);
+     if (!auth.ok) return advance("credential");
+     const message = await streamSimple(seatModel, { messages }, {
+       apiKey: auth.apiKey, headers: auth.headers, signal: options.signal, temperature, reasoning,
+     }).result();
      ```
-     `streamSimple` is imported from `@earendil-works/pi-ai/compat` (Step 6). Passing pi's own `Model`
-     object means the api id, baseUrl, headers, apiKey, and `compat` flags all come from pi's
-     resolution — this extension never constructs them. Slot text = concatenated `text` blocks of
-     `message.content`; usage = `message.usage`; failure = `message.stopReason === "error"` with
-     `message.errorMessage`; `model === undefined` means the provider or model id is not registered.
+     `streamSimple` is imported from `@earendil-works/pi-ai/compat` (Step 6). The api id, baseUrl,
+     `compat` flags, and credential all come from pi; only the vendor id is ours. Seat text =
+     concatenated `text` blocks of `message.content`; usage = `message.usage`; failure =
+     `message.stopReason === "error"` with `message.errorMessage`.
 4. Failure classification (the contract; `same name` = advancing inside one alias's provider list,
    `new name` = moving to the next candidate entry):
    | Signal | Action | reason string | layer |
    |---|---|---|---|
-   | `model` unresolved (`find` returned undefined) | advance | `"missing provider"` | both |
+   | no template model for the provider — pi does not know it or it is unconfigured | advance | `"missing provider"` | both |
    | `stopReason === "error"`, text matches `/\b429\b|usage limit|quota|balance/i` | advance at once | `"quota"` | both |
    | text matches `/\b40[13]\b|unauthorized|invalid api key/i` | advance | `"credential"` | both |
    | text matches `/not found|unknown model|\b404\b/i` | advance | `"missing model"` | both |
@@ -624,12 +595,12 @@ async function runSeat(
    The exact prior string is recorded in `details.cascades[].prior` so prompt assembly is inspectable
    without network capture.
 5. Substitution lines differ per layer so the reader can tell a billing swap from a model change:
-   - inside an alias: ` ├─ ↩ judge deepseek-pro@go → deepseek-pro@tp (quota)\n`
-   - across entries:   ` ├─ ↩ judge qwen-max@go → glm@go (quota)\n`
-   `deepseek-pro@go → deepseek-pro@tp` is quality-preserving (same alias name, same vendor model in
-   both accounts); a cross-entry line means a different alias answered and must be visible in both
-   the transcript and `details.substitutions`.
-6. Everything exhausted → `error = "all candidates failed: deepseek-pro@go (quota), deepseek-pro@tp (credential)"`,
+   - inside an alias: ` ├─ ↩ judge deepseek-pro@opencode-go → deepseek-pro@qwen-cloud-token-plan (quota)\n`
+   - across entries:   ` ├─ ↩ judge qwen-max@opencode-go → glm@opencode-go (quota)\n`
+   A same-alias line is quality-preserving (one vendor model, another account); a cross-entry line
+   means a different alias answered, and must be visible in both the transcript and
+   `details.substitutions`.
+6. Everything exhausted → `error = "all candidates failed: deepseek-pro@opencode-go (quota), deepseek-pro@qwen-cloud-token-plan (credential)"`,
    `degraded: true`; the pipeline continues with that seat marked unavailable. A seat dying never aborts
    the run, even in the two-seat shapes where the reference implementation's 3x would have thrown —
    that asymmetry is a deliberate change.
@@ -916,6 +887,34 @@ their own file without touching this repository. The packaged prompts were trans
 `<vendored-fork>/pi-harness.config.json` before that checkout is removed; `merge.md` and
 `synth-lean.md` are the two written here.
 
+### Step 7 — The doctor
+
+`matrix-doctor` is how config drift surfaces as a report instead of a mid-run surprise. It is a command
+(`/matrix-doctor`) and a standalone script (`node scripts/doctor.mjs`), and it never mutates config.
+
+| Check | Catches | Needs network |
+|---|---|---|
+| `config` | schema, stage dataflow, roster/shape agreement, prompt paths — the Step 1 rules, re-run outside a session | no |
+| `connect` | an alias routing through a provider pi does not know, or one with no configured credential (`hasConfiguredAuth`), and an alias with only one route (no fallback to fall back to) | no |
+| `reach` | a vendor id the provider **no longer serves** (retired or renamed) as distinct from one it serves but pi does not catalogue — the latter is expected and fine | yes, one `GET /models` per provider |
+| `drift` | an id that disappeared upstream while `matrix.json` still names it, and a catalogued id that is newer than what an alias pins | yes |
+
+Exit status: `0` clean, `1` config errors, `2` connectivity problems, `3` reachability or drift
+findings — so CI and a pre-run hook can distinguish "broken" from "out of date".
+
+Rules, all following from the no-silent-degradation invariant:
+
+- **Additive repairs only.** `--repair` may print (and with `--write`, apply) the `models.json` upsert
+  snippet for an id you asked to see in pi's picker. It must never rewrite an alias's `model`, never
+  substitute a different id, and never choose a "close enough" model — a repaired config is a config the
+  operator chose, plus ids.
+- **Offline by default.** `config` and `connect` need no egress; `reach` and `drift` are opt-in
+  (`--online`) because containers and CI often have none.
+- **Loud when it cannot fix.** Every finding names the alias, the provider, the id, and the exact
+  snippet or command that would resolve it; an unfixable finding exits non-zero rather than passing.
+- **The doctor never guesses intent.** The alias table is a curated decision about what to run. The
+  doctor's job is to say when reality has moved, not to pick a replacement for you.
+
 ## Critical files & anchors
 
 Reference-only — read from the vendored copy of upstream `@quarkos/pi-fusion` (referred to below as
@@ -948,16 +947,28 @@ pi-side references:
 
 ## Verification
 
-Prerequisites: the `models.json` block from Step 2 merged into `~/.pi/agent/models.json`, and the keys
-it references available (`OC_GO_CC_API_KEY`, `ALIBABA_TOKEN_PLAN_API_KEY`, `OPENAI_API_KEY`; the `corp`
-provider additionally needs whatever its `!command` reads); `/tmp/fusion-matrix-check/` as `cwd` for scratch runs (create, and remove at the end); the
-pi config repo symlink from Step 1 in place.
+Prerequisites: the providers the packaged aliases name must be configured in pi — `opencode-go`, `zai`
+and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, and the operator's own
+`qwen-cloud-token-plan` entry. No `models.json` change is required for the packaged config (Step 2).
+`TYPESAFE_API_KEY` for the live decision checks. `/tmp/fusion-matrix-check/` as `cwd` for scratch runs
+(create, remove at the end), and the pi config repo symlink from Step 1 in place.
 
-1. **Model registration** — `cd /tmp/fusion-matrix-check && pi --list-models fusion` prints all
+1. **Credential seam (do this first)** — with `opencode-go` connected, run
+   `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/glm-flash --no-session`. `glm-flash` is
+   `glm-5.3-flash`, which pi does not catalogue, so success proves the seat built a model object for an
+   uncatalogued id and pi resolved the provider credential. Confirm `details.seats[0]` shows
+   `model: glm-5.3-flash`, `provider: opencode-go`, and a `template` id that pi *does* catalogue. Then
+   point the same alias at a provider pi does not know (`{"aliases": {"glm-flash": {"providers":
+   ["nope", "opencode-go"]}}}`) and confirm the `missing provider` substitution appears and the run
+   still answers. If this item fails, every later check is built on sand: the fallback would be
+   catalogued-ids-only, the aliases would have to change, and E1 must know before it writes the
+   resolver.
+
+2. **Model registration** — `cd /tmp/fusion-matrix-check && pi --list-models fusion` prints all
    twelve: `standard`, `quick`, `solo`, `workhorse`, `sota`, `deep`, `brief`, `opinions`, `debate`,
    `review`, `review-check`, `review-routed`, each under the `fusion-matrix` provider. Failure here
    means the api id, manifest, or symlink is wrong.
-2. **Config validation** — three separate project files, each run expected to fail at load with the
+3. **Config validation** — three separate project files, each run expected to fail at load with the
    named message: an unknown alias in a candidate list
    (`{"fusions": {"deep": {"candidates": {"judge": ["no-such-alias"]}}}}` →
    `unknown alias "no-such-alias"; known: …`); a mode whose roster does not match its shape
@@ -965,27 +976,27 @@ pi config repo symlink from Step 1 in place.
    {"render": "panel"}]}}}` → names the missing candidate key); and a stage reading something nobody
    produced (`{"modes": {"lean": {"stages": [{"single": "synth-lean", "input": "panel+judge"}]}}}` →
    `stage 0 input "panel+judge" has no preceding single stage`). Remove each file afterwards.
-3. **Provider-layer fallback (same alias, new billing route)** — in
+4. **Provider-layer fallback (same alias, new billing route)** — in
    `/tmp/fusion-matrix-check/.pi-fusion-matrix.json` set
    `{"aliases": {"deepseek-pro": {"providers": ["nope", "tp"]}}}`. A `fusion-matrix/deep` run must print
    ` ├─ ↩ skeptic deepseek-pro@nope → deepseek-pro@tp (missing provider)`, complete, and —
    driven through the `deliberate` tool — report exactly one substitution whose `from` and `to` share
    the same alias name. Remove the override afterwards. This verifies both the native-provider lookup
    and that a stale provider name degrades per seat instead of aborting.
-4. **Slot-layer fallback (new alias)** — in the same project file set
+5. **Slot-layer fallback (new alias)** — in the same project file set
    `{"fusions": {"deep": {"candidates": {"systems": ["kimi", "glm"]}}},
    "aliases": {"kimi": {"providers": ["nope"]}}}`. The run must print
    ` ├─ ↩ systems kimi@nope → glm@go (missing provider)` and
    `details.substitutions[0].from`/`.to` must carry the two different alias names. This is the check
    that distinguishes the two layers; identical `from`/`to` text means the reporting is wrong.
-5. **Empirical quota advance** — with the Go 5-hour window exhausted (observed 2026-09-18:
+6. **Empirical quota advance** — with the Go 5-hour window exhausted (observed 2026-09-18:
    HTTP 429 `5-hour usage limit reached`), `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/deep
    --no-session` must fall through to each alias's next provider and still answer, instead of the
    121 s retry loop the reference implementation exhibits.
-6. **Prompt correctness under injected preludes** — with the full extension set loaded (context-mode
+7. **Prompt correctness under injected preludes** — with the full extension set loaded (context-mode
    active), `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/standard --no-session` must return `ZQX1`, not a
    deliberation about context-mode's tool hierarchy.
-7. **Decision contract offline** — `node scripts/typesafe-stub.mjs &` and
+8. **Decision contract offline** — `node scripts/typesafe-stub.mjs &` and
    `node scripts/semif-stub.mjs &`, then
    `node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone` and
    `node scripts/semif-probe.mjs --backend http://127.0.0.1:8792/score` must both exit 0. Point
@@ -993,13 +1004,13 @@ pi config repo symlink from Step 1 in place.
    `pi -p "Summarize the tradeoffs of optimistic locking" --model fusion-matrix/review-check --no-session`:
    the judge element must resolve in place and `details.decisions` must carry the winner and the full
    probability map. Kill the stubs afterwards.
-8. **TypeSafe live** — export `TYPESAFE_API_KEY`, set `decide.defaultBackend` to `typesafe`, and run
+9. **TypeSafe live** — export `TYPESAFE_API_KEY`, set `decide.defaultBackend` to `typesafe`, and run
    `node scripts/typesafe-probe.mjs --backend https://api.typesafe.ai/v1/systemone`; it must exit 0 and
    print the answering `model` (`jev-1.13.0`). Then run `fusion-matrix/review-check` live and confirm
    `details.decisions[].verify` carries three typed answers (`noul`, `noul`, `choice`) and that each
    `choice`/`score` answer has `confidence`. A `401` here means the key is absent or wrong, not that
    the wiring is broken.
-9. **Conservative invariants** — (a) temporarily set `verify[0]` to a question the synthesis cannot
+10. **Conservative invariants** — (a) temporarily set `verify[0]` to a question the synthesis cannot
    satisfy (for example `noul` "the answer contains the exact phrase BANANA") and confirm the run
    still completes with one `⚠️ verify:` delta and an unchanged synthesis — verification must never
    rewrite or block; (b) point `route` at a `semif` backend and confirm the load error
@@ -1009,7 +1020,7 @@ pi config repo symlink from Step 1 in place.
    with the ` routed` line and `details.routing` both present; (d) set `route.sufficientWhen.minConfidence`
    to 1.0 and confirm the run proceeds as `fusion-matrix/review-routed` with `details.routing` recording
    the declined route — the gate must be able to decline, and must say so.
-10. **Judge cascade** — with the decision stub returning a decisive high-confidence answer,
+11. **Judge cascade** — with the decision stub returning a decisive high-confidence answer,
     `fusion-matrix/review-check` must report ` ├─ ️ judge via decision (agrees, conf 0.9x) — skipping
     deepseek-pro`, must *not* call the generative judge, and must record
     `details.cascades[0].sufficient === true`. With the stub returning `unclear` at 0.51, the same run
@@ -1018,30 +1029,31 @@ pi config repo symlink from Step 1 in place.
     answer. Then set `sufficientWhen.choiceIs` to an option the stub never returns and confirm every
     run escalates — a cascade whose cheap path can never win is measurable dead weight, which is what
     `details.cascades` exists to reveal.
-11. **Oversized state** — put a ~150 KB `{{panel}}` through `fusion-matrix/review-check` against the live
+12. **Oversized state** — put a ~150 KB `{{panel}}` through `fusion-matrix/review-check` against the live
     backend: the run must emit one `⚠️ decision state truncated` delta, still complete, and report the
     decision. A `4xx` from the backend instead means truncation did not engage.
-12. **Per-project billing selection** — add a second provider block to `~/.pi/agent/models.json` (copy
-    `go` as `go-alt`, same key) and set
+13. **Per-project billing selection** — add a second provider block to `~/.pi/agent/models.json` (copy
+    the built-in `opencode-go` shape as `opencode-go-work`, with that account's key) and set
     `/tmp/fusion-matrix-check/.pi-fusion-matrix.json` to
-    `{"aliases": {"glm": {"providers": ["go-alt", "go"]}}}`. A `--model fusion-matrix/standard` run must execute on
-    `go-alt` (banner and `details.models` show it) with no edit to any fusion and no credential in the
-    project file. Remove the override afterwards. This is the check that per-repo billing needs no
-    profile system.
-13. **Independence from the fork** — `grep -rn "pi-fusion\|/Users/\|~/" extensions/ matrix.json
+    `{"aliases": {"glm": {"providers": ["opencode-go-work", "opencode-go", "zai"]}}}`. A
+    `--model fusion-matrix/standard` run must execute on `opencode-go-work` (banner and
+    `details.seats[].provider` show it) with no edit to any fusion and no credential in the project
+    file. Remove the override afterwards. This is the check that per-repo billing needs no profile
+    system — only a provider id, which is pi's vocabulary, not ours.
+14. **Independence from the fork** — `grep -rn "pi-fusion\|/Users/\|~/" extensions/ matrix.json
     package.json` must return no import or path reference (only doc/comment mentions of the reference
     directory are allowed). Then move the vendored reference fork out of the pi extensions directory, run
     `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/deep --no-session`, and confirm it still works —
     this is the check that the package runs with no developer checkout present. Restore the directory
     afterwards.
-14. **Alias is version-free** — `grep -rn "glm-5\|qwen3\.8\|deepseek-v4\|kimi-k3"` across
+15. **Alias is version-free** — `grep -rn "glm-5\|qwen3\.8\|deepseek-v4\|kimi-k3"` across
     `extensions/pi-fusion-matrix/` and `matrix.json` must match only `aliases.*.model`, fixtures, and
     comments — never `fusions`, `candidates`, or code. A `models.json` version bump (for example `deepseek-v4.1-flash` →
     `deepseek-v4-flash` on `go`) must change behavior with no edit to this repo; confirm by bumping it
     and running `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/standard`: the run succeeds and
     `details.models` shows the new vendor id behind the unchanged alias.
 
-15. **Mode shapes are cost contracts** — run each and count the calls. `fusion-matrix/solo` is one
+16. **Mode shapes are cost contracts** — run each and count the calls. `fusion-matrix/solo` is one
     seat and no judge; `fusion-matrix/workhorse` is two seats plus a merge, and the merged text must
     differ from both seat texts (a merge that echoes a panel response is not a merge);
     `fusion-matrix/sota` is the same shape with its frontier roster named in the banner;
@@ -1050,11 +1062,11 @@ pi config repo symlink from Step 1 in place.
     and no generation, and records `render` in `details.stages`; `fusion-matrix/debate` makes nine
     (3 seats x 3 rounds). A shape that quietly adds or drops a call is a bug: the call count is the
     feature.
-16. **Debate envelopes** — in `fusion-matrix/debate`, every round after the first carries each *other*
+17. **Debate envelopes** — in `fusion-matrix/debate`, every round after the first carries each *other*
     seat's previous-round output and never its own; `details.rounds[].inputs` records the envelope per
     seat per round. Then point one seat's only provider at `nope`: that seat is labelled and dropped,
     the remaining two continue, and if only one survives the rounds stop early rather than running alone.
-17. **Decision stages** — with a temporary mode in the project file,
+18. **Decision stages** — with a temporary mode in the project file,
     `{ "score": { "instructions": "How well does this response address the question?",
                   "criteria": ["off-topic", "partial", "solid", "thorough"] }, "over": "panel" }` must
     issue **one** backend request for the three seats (the stub records request count), and the stage
@@ -1062,6 +1074,15 @@ pi config repo symlink from Step 1 in place.
     a persona with `thinking: "off"` must show as omitted or off in `details.seats[].thinking`, while
     `deep`'s judge (persona default `medium`, fusion override `high`) shows `high` — sampling is
     configuration, and the run record must show what was actually requested.
+
+19. **Doctor** — `node scripts/doctor.mjs` and `/matrix-doctor` over the packaged config: exit 0 clean
+    (offline), exit 1 with a named alias when a `model` is removed from `matrix.json` (config error),
+    exit 2 naming the provider when an alias routes through one pi does not know or has no credential
+    for, and exit 3 with `--online` when an alias names an id the provider no longer serves. `--repair`
+    must print the `models.json` upsert snippet and, without `--write`, leave both `matrix.json` and
+    `models.json` byte-identical (assert by hash before and after); with `--write` it may add ids but
+    must not change any alias's `model` field. A single-route alias must be reported as having no
+    fallback rather than passing silently.
 
 ## Assumptions & contingencies
 
@@ -1128,6 +1149,11 @@ pi config repo symlink from Step 1 in place.
 - **Same alias across providers means the same slot, not necessarily the same vendor id.** Where two
   providers name one model differently, use the object form:
   `{"id": "tp", "modelOverride": "qwen3.8-max-preview"}`.
+- **A vendor id need not be in pi's catalogue, and that is the point.** pi's curated model list lags
+  the live catalogues; seats resolve by provider + id through the credential seam, so an alias names
+  what the provider actually serves. Nothing in this repository copies a catalogue, and nothing
+  silently substitutes a model to make a list line up: a `model` field is exactly what runs, and a
+  finding about drift is a report (the doctor), never a rewrite.
 - **Shapes and seats are configuration; the executor is code.** `modes` are stage lists and `personas`
   are seats, so adding a shape or re-pointing a seat is an edit to `matrix.json`. What stays code is the
   stage *kinds* (`parallel`, `single`, `decide`, `score`, `render`), the connector set, and the assembly

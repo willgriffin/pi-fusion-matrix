@@ -20,9 +20,11 @@ Status: planned. The implementation spec is [`docs/plan.md`](docs/plan.md); work
 - **Two fallback layers** — inside an alias, providers are tried in order (same model, different
   billing route: quality-preserving); across a slot, aliases are tried in order (different model:
   reported as a substitution).
-- **Version-free aliases** — a slot names `deepseek-flash`, never a vendor version. The id actually
-  sent upstream lives in `aliases.<name>.model`, so a vendor release edits one field and no alias name,
-  fusion, or slot. Endpoints and credentials stay in pi's own `~/.pi/agent/models.json`.
+- **Version-free aliases** — a seat names `deepseek-flash`, never a vendor version. The id sent
+  upstream lives in `aliases.<name>.model` and the routes in `providers` (pi's own provider ids:
+  `opencode-go`, `zai`, `kimi-coding`, `openai`), so a vendor release edits one field and no alias
+  name, fusion, or seat. Endpoints and credentials stay entirely pi's — no `models.json` block ships,
+  and a vendor id does not need to be in pi's catalogue to be used.
 - **Decisions** — a `decide` element for closed questions over an option set, backed by TypeSafe
   (default; calibrated `confidence`, no local service) or SemIf (local, zero marginal cost).
   Conservative by construction: `verify` reports and never rewrites; `route` selects a whole fusion
@@ -67,8 +69,10 @@ system is involved.
 
 ## Commands
 
-- `/fusion <id> <prompt>` — run a named fusion; with no id, `defaultFusion` is used.
-- `/fusion-matrix` — list resolvable aliases, fusions, backends, and the config layers loaded.
+- `/matrix <id> <prompt>` — run a named fusion; with no id, `defaultFusion` is used.
+- `/matrix-info` — list resolvable aliases, fusions, backends, and the config layers loaded.
+- `/matrix-doctor` — validate the config, check provider connectivity, and report catalogue drift
+  (`--online` for the network checks, `--repair` prints the one additive fix).
 
 ## License
 
