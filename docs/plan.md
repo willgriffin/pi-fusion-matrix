@@ -611,6 +611,11 @@ an advance), and emit one `⚠️ <provider>/<model> rejects a temperature overr
 delta. Prevention belongs in `models.json`: a model that always rejects it gets
 `"samplingParams": { "temperature": 1 }`, which pi merges into the request body.
 
+Tool path: the `matrix` tool and the `/matrix` command cannot emit a pi stream, so they execute the file
+agent's writes themselves (`mkdir -p`, then write; per-file failures reported) and return the run record
+in `details` — substitutions, cascades, routing, verification, seats, usage, notes. Reporting "N files
+saved" without writing them would be a false claim, which is why the writes happen there.
+
 File agent: when `fusion.fileAgent` is `{ alias }`, resolve that alias through the same
 `resolveCandidates` path (so it also inherits the provider chain, e.g. `deepseek-flash` on Go then
 the token plan) and run it with the `WRITE_TOOL` schema copied from `<vendored-fork>/index.js`,
@@ -621,9 +626,9 @@ Registration of tool and commands:
 
 ```ts
 pi.registerTool({
-  name: "deliberate", label: "Deliberate",
-  description: "Run a multi-model deliberation on a design question or coding problem.",
-  promptSnippet: "Run multi-model deliberation on complex design questions",
+  name: "matrix", label: "Matrix",
+  description: "Run a named fusion — a configured pipeline of models deliberating on one question.",
+  promptSnippet: "Run a multi-model deliberation on a design question",
   parameters: Type.Object({
     prompt: Type.String({ description: "The query or design task to analyze." }),
     fusion: Type.Optional(Type.String({ description: 'Fusion id from matrix.json (e.g. "deep"). Omit for "default".' })),
@@ -631,8 +636,9 @@ pi.registerTool({
   execute: async (_toolCallId, params) => { /* content: synthesis text,
     details: { fusion, models, substitutions, slotErrors, panelResponses, judgeAnalysis, usage } */ },
 });
-pi.registerCommand("fusion", { description: "Run a named fusion: /fusion <id> <prompt>", handler: async (args, ctx) => {} });
-pi.registerCommand("fusion-matrix", { description: "List profiles, accounts, aliases, and fusions", handler: async (_args, ctx) => {} });
+pi.registerCommand("matrix", { description: "Run a named fusion: /matrix <id> <prompt>", handler: async (args, ctx) => {} });
+pi.registerCommand("matrix-info", { description: "List modes, fusions, seats, and provider routes", handler: async (_args, ctx) => {} });
+pi.registerCommand("matrix-doctor", { description: "Validate the config, check connectivity, report drift", handler: async (args, ctx) => {} });
 ```
 
 Every run records the shape it actually ran, not the one it was configured for:
@@ -658,9 +664,9 @@ degraded run is a wrong answer and must be visible. `seats[].model` is the vendo
 answered, so a provider-level substitution stays auditable after the fact, and `stages[].calls` is what
 makes a shape's cost contract checkable.
 
-`/fusion` parses the first whitespace-delimited token as a fusion id when it matches a key in
+`/matrix` parses the first whitespace-delimited token as a fusion id when it matches a key in
 `fusions`; otherwise the whole argument string is the prompt and `defaultFusion` is used. Unknown id →
-`ctx.ui.notify('unknown fusion "x"; known: default, deep, ...', "error")` and no run.
+`ctx.ui.notify('unknown fusion "x"; known: standard, deep, ...', "error")` and no run.
 A decision entry reports as before; a `gate` entry runs a command and records its exit status.
 
 **`route` runs before the first stage** (Step 3 step 1). The clause is one choice question built from
@@ -1097,6 +1103,15 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     prints its snippet while leaving every tracked file byte-identical (asserted by hash).
 
 ## Assumptions & contingencies
+
+- **This extension's names are its own.** The vendored `@quarkos/pi-fusion` copy was archived out of the
+  pi extensions directory — it also registered a `deliberate` tool and a `/fusion` command, and pi keeps
+  the first registration per name — so this package owns the `fusion-matrix/*` models, the `matrix` tool,
+  and `/matrix`, `/matrix-info`, `/matrix-doctor`.
+- **Providers, endpoints, and credentials are pi's, and no `models.json` block ships.** Provider ids are
+  pi's own built-ins resolved from its credential store and env; this repo never resolves a secret or
+  builds an endpoint. Only two cases touch that file, both optional: adding an account or a gateway, and
+  wanting an id in pi's own picker (the doctor prints that snippet; it never writes it silently).
 
 - **Delegation runs pi's resolver and transport.** `streamSimple` from `@earendil-works/pi-ai/compat`
   is the documented streaming entry point and is still exported (verified in
