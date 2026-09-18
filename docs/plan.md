@@ -44,33 +44,27 @@ Create the repository root with:
 
 ```
 package.json            # private package declaring pi.extensions
-matrix.json             # packaged default aliases + fusions (Step 2)
+matrix.json             # the packaged config (aliases, personas, modes, fusions, decide, backends)
 README.md
+AGENTS.md
+docs/plan.md            # this spec
+prompts/                # persona prompts, referenced by path from matrix.json
+  technical.md skeptic.md systems.md judge.md synth.md synth-lean.md merge.md
 extensions/pi-fusion-matrix/
-  index.ts              # entry: load config, register provider/tool/commands
-  config.ts             # layered load, merge, validate, template interpolation
-  resolve.ts            # alias → native provider/model pairs; slot expansion
-  run.ts                # fusion pipeline, slot execution, fallback advance, reporting, verify, route
-  decide.ts             # decision client: typesafe + semif kinds (stdlib HTTP only)
-prompts/
-  technical.md          # persona prompts, referenced by path from matrix.json
-  skeptic.md
-  systems.md
-  judge.md
-  synth.md
-  synth-lean.md
-  merge.md
-  pipeline.ts           # stage interpreter: parallel/single/decide/score/render, rounds, render
+  index.js              # entry: provider, tool, commands
+  config.js             # layered load, merge, interpolation, the Step 1 rule set
+  resolve.js            # alias → provider/model, the credential seam, template choice
+  pipeline.js           # stage interpreter: parallel/single/decide/score/render, rounds, cascades
+  run.js                # pi's stream protocol, route, verify, file agent, peer resolution
+  decide.js             # TypeSafe and SemIf clients
+  doctor.js             # config, connect, reach, drift
 scripts/
-  semif-probe.mjs       # SemIf contract probe over upstream's decisions.jsonl fixture
-  typesafe-probe.mjs    # TypeSafe contract probe: option form + batched typed questions
-  semif-stub.mjs        # offline /score stub, port 8792
-  typesafe-stub.mjs     # offline /v1/systemone stub, port 8793
-tools/semif-server/     # operator-run scoring service (Step 4)
-  server.py
-  requirements.txt
-  Dockerfile
-  README.md
+  doctor.mjs            # standalone doctor entry point
+  interp-check.mjs      # offline interpreter contracts (no keys, no quota)
+  semif-stub.mjs typesafe-stub.mjs
+  semif-probe.mjs typesafe-probe.mjs
+tools/semif-server/     # operator-run scoring service
+  server.py requirements.txt Dockerfile README.md
 ```
 
 There is no `accounts.ts`, no credential resolution, and no baseUrl anywhere in this extension:
@@ -522,7 +516,7 @@ order, building a `vars` map as it goes:
 |---|---|
 | `parallel` | one `runSeat` per listed persona, concurrently; results become `panel`, labelled by persona. With `rounds: n`, the first round uses `input` and every later round re-runs the same seats with `roundInput` (`peers`), each seat receiving every *other* seat's previous-round output as `## <persona> — previous opinion`. A seat that failed is labelled and dropped from later rounds, and rounds stop early if fewer than two seats survive. |
 | `single` | one `runSeat` for the named persona. `alsoSynthesize: true` may appear only on the last stage: that stage is told to produce the final answer after its own analysis, so a merged-judge shape costs one call fewer than a separate synthesis. |
-| `decide` | one backend request for the stage's `criteria`; contributes `option: probability` lines to later stages, and can end the cascade when `sufficientWhen` holds. |
+| `decide` | one backend request for the stage's `criteria`; contributes `option: probability` lines to later stages. With `sufficientWhen`: a sufficient answer **skips the stage it gates** (the next one) and the run reports what it skipped; an insufficient one runs it and hands the answer forward as a prior line, so the escalated stage addresses the ambiguity instead of rediscovering it. |
 | `score` | one question per item of `over` (`panel`), batched into a single backend request; contributes per-seat weights to `panel+weights`. |
 | `render` | no model call: assembles already-produced text (`panel`) into the assistant message. This is how a shape ends without generating — an opinion grid is assembled, not authored. |
 
@@ -1089,6 +1083,19 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     must not change any alias's `model` field. A single-route alias must be reported as having no
     fallback rather than passing silently.
 
+20. **Offline interpreter contracts** — `node scripts/typesafe-stub.mjs &` then
+    `node scripts/interp-check.mjs` must pass 9/9: a decisive stage decision skips the stage it gates
+    with no judge call; an ambiguous one calls the judge and records a prior containing the cheap read's
+    answer; debate makes 3 seats × 3 rounds with peers' opinions; a `score` stage issues **one** batched
+    request for three seats; `verify` warns without blocking; a confident route redirects and an
+    unconfident one declines. This is the check that must run when a provider's quota blocks the live
+    items — and it caught a real gap on first use: stage-level `sufficientWhen` was unimplemented, so a
+    converged panel still paid for the judge.
+21. **Doctor exit codes and non-mutation** — with an injected registry and catalogue: clean config exits
+    0; a bad alias exits 1; an unknown provider and an unauthenticated provider each exit 2; a retired id
+    with `--online` exits 3; a single-route alias is reported rather than passed silently; and `--repair`
+    prints its snippet while leaving every tracked file byte-identical (asserted by hash).
+
 ## Assumptions & contingencies
 
 - **Delegation runs pi's resolver and transport.** `streamSimple` from `@earendil-works/pi-ai/compat`
@@ -1170,6 +1177,20 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
   and a feedback channel; and their plan-then-DAG-then-execute collaboration is a task scheduler, not a
   deliberation pipeline. The `gate` entry under `verify` is deliberately report-only — it runs a command
   once and records the result, and never feeds back into a stage.
+- **pi-ai's `Context.systemPrompt` is the only place a system instruction goes.** Measured 2026-09-18: a
+  system-*role message* alongside `tools` makes the call fail with
+  `Cannot read properties of undefined (reading 'length')` on the same model that works without it. Seats
+  and the file agent pass the persona prompt through `systemPrompt`.
+- **Tool schemas must be Typebox, not plain JSON schema.** The same request over curl in the OpenAI wire
+  shape returned 200 with a `tool_calls` finish reason, while pi-ai given a plain JSON-schema object
+  produced that gateway-side error. The two peers (`@earendil-works/pi-ai/compat`, `typebox`) are
+  resolved by walking up from the *real* entry script, because a bare specifier does not resolve from a
+  symlinked extension directory and `process.argv[1]` is the bin shim.
+- **A provider can mix api flavours, so the template for an uncatalogued id decides the wire protocol.**
+  pi's `opencode-go` serves glm-* over `openai-completions`, minimax/qwen3.8-max over
+  `anthropic-messages`, and luna/grok over `openai-responses`; picking "the first sibling" sent a tool
+  call through the wrong one. Template choice prefers the nearest id prefix, then the most compatible
+  api, and is reported as `details.seats[].template`.
 - **Thresholds live in `sufficientWhen`, in one place.** A decision is actionable when its answer
   matches and its confidence clears the bar; nothing else in the config carries a probability
   threshold. A cascade is only worth its extra call when the cheap path usually decides, which is why

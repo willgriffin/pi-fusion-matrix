@@ -303,12 +303,21 @@ export async function runPipeline({
   const rounds = [];
   const substitutions = [];
   const cascades = [];
+  const cascadeRecords = [];
   let text = "";
   let stagesRun = 0;
   let panelSeats = [];
 
   const stageList = mode?.stages ?? [];
+  const skipped = new Set();
   for (let index = 0; index < stageList.length; index += 1) {
+    // A sufficient `decide` stage skips the stage it gates — the cascade pattern: the cheap read
+    // decides whether the expensive step is needed at all.
+    if (skipped.has(index)) {
+      stages.push({ index, kind: "skipped", calls: 0 });
+      emit.delta(` ├─ ⏭️ stage ${index} skipped\n`);
+      continue;
+    }
     const stage = stageList[index];
     const isLast = index === stageList.length - 1;
     const kind = ["parallel", "single", "decide", "score", "render"].find((k) => stage[k] !== undefined);
@@ -355,7 +364,8 @@ export async function runPipeline({
     if (kind === "single") {
       const name = stage.single;
       record.seats = [name];
-      vars.input = resolveInput(stage.input, vars);
+      vars.input = [resolveInput(stage.input, vars), vars.decisionPrior].filter(Boolean).join("\n\n");
+      vars.decisionPrior = undefined;
       vars.alsoSynthesize = Boolean(stage.alsoSynthesize);
       const seat = await runSeat({
         personaName: name, persona: personas[name] ?? { name, prompt: "", temperature: 0.7 },
@@ -391,6 +401,21 @@ export async function runPipeline({
       const rendered = renderDecision(answer);
       vars.previous = rendered;
       vars.judge = rendered;
+      const sufficient = isSufficient(answer, stage.sufficientWhen);
+      cascadeRecords.push({
+        seat: "stage", kind: "decision", answer, sufficient,
+        advancedTo: sufficient ? undefined : "next stage",
+        // An escalated stage is told what the cheap read said, so it addresses the ambiguity rather
+        // than rediscovering it.
+        prior: sufficient ? undefined : priorLine(answer),
+      });
+      if (stage.sufficientWhen) {
+        emit.delta(sufficient
+          ? ` ├─ ✅ decision sufficient (${describeAnswer(answer, stage.sufficientWhen)}) — skipping stage ${index + 1}\n`
+          : ` ├─  decision insufficient (${describeAnswer(answer, stage.sufficientWhen)}) — running stage ${index + 1}\n`);
+        if (sufficient && index + 1 < stageList.length) skipped.add(index + 1);
+        else vars.decisionPrior = priorLine(answer);
+      }
       if (isLast) text = rendered;
     }
 
@@ -426,7 +451,7 @@ export async function runPipeline({
     text,
     usage,
     decisionUsage,
-    details: { fusion: fusion.id, mode: fusion.mode, stages, seats: seatRecords, rounds, substitutions, cascades },
+    details: { fusion: fusion.id, mode: fusion.mode, stages, seats: seatRecords, rounds, substitutions, cascades: [...cascades, ...cascadeRecords] },
     stagesRun,
   };
 }
