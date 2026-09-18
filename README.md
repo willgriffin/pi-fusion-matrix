@@ -58,11 +58,13 @@ registers is usable.
 
 Two things do, and both are worth knowing before the first run:
 
-- **Decisions go to the backend you configure.** With the packaged default, a `route`, a `verify` check,
-  a cascade, or a `score` stage sends the deliberation **state** to TypeSafe: for `verify` that is the
-  synthesis, and for `route` the prompt. TypeSafe bills input tokens only and does not train on requests,
-  but the content does leave the host. Point `decide.defaultBackend` at a local `semif` backend if that
-  is not acceptable — see `tools/semif-server/`.
+- **Decisions go to the backend you configure.** The packaged default is TypeSafe (`backends.typesafe`,
+  `https://api.typesafe.ai/v1/systemone`, key from `TYPESAFE_API_KEY`), and every decision call sends the
+  deliberation **state** there: the panel's raw responses for a cascade or a `score` stage (source code
+  included, when the review carried it in), the synthesis for `verify`, and the prompt for `route`.
+  TypeSafe bills input tokens only and does not train on requests, but that content does leave the host
+  verbatim. Point `decide.defaultBackend` at the local `semif` backend (`backends.semif`,
+  `http://127.0.0.1:8791/score`) for content that must not leave the host — see `tools/semif-server/`.
 - **Seats go to the providers your aliases name.** Panel responses are sent to the judge and synthesis
   models, which may be different vendors. That is the point of a fusion, and it is why the alias table is
   the place to decide who sees what.

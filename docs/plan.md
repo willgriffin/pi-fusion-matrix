@@ -167,7 +167,7 @@ export type SufficientWhen = {
 /** A slot entry is an alias id, an object pinning/reordering that alias's providers, or a decision. */
 export type SlotCandidate =
   | string
-  | { alias: string; providers?: (string | ProviderRef)[] }
+  | { alias: string; providers?: (string | ProviderRef)[]; thinking?: Persona["thinking"] }
   | { decide: DecideSpec; sufficientWhen?: SufficientWhen };
 
 /**
@@ -196,6 +196,13 @@ export type Persona = {
 export type StageInput = "prompt" | "panel" | "panel+judge" | "panel+weights" | "peers" | "previous" | string;
 
 /**
+ * A `score` stage rates each item of `over` against an ordered list of levels — `criteria` is the one
+ * surface where it is an array rather than an option map — and all items travel as `score` questions
+ * batched into one request, so the answer carries a level and a confidence per seat.
+ */
+export type ScoreSpec = { instructions: string; criteria: string[]; state?: string; backend?: string };
+
+/**
  * A stage. Exactly one of `parallel`, `single`, `decide`, `score`, `render` is set.
  *   parallel  run every listed persona concurrently, one candidate chain each
  *   single    run one persona once (`alsoSynthesize` folds the final answer into this call)
@@ -207,7 +214,7 @@ export type Stage =
   | { parallel: string[]; input: StageInput; name?: string; rounds?: number; roundInput?: StageInput }
   | { single: string; input: StageInput; name?: string; alsoSynthesize?: boolean }
   | { decide: DecideSpec; input: StageInput; name?: string; sufficientWhen?: SufficientWhen }
-  | { score: DecideSpec; over: "panel"; input?: StageInput; name?: string }
+  | { score: ScoreSpec; over: "panel"; input?: StageInput; name?: string }
   | { render: "panel"; input?: StageInput };
 
 /** A named pipeline shape. `3x`-style and `5x`-style delibitation are stage lists, not code branches. */
@@ -262,7 +269,7 @@ export type MatrixConfig = {
   providerId?: string;
   /** Display name for that provider. Default "Fusion Matrix". */
   providerName?: string;
-  /** Fusion used by `/fusion` with no id and by the `deliberate` tool with no `fusion` argument. */
+  /** Fusion used by `/matrix` with no id and by the `matrix` tool with no `fusion` argument. */
   defaultFusion?: string;
   aliases: Record<string, AliasSpec>;
   /** Seats, defined once and reused across modes. */
@@ -319,6 +326,8 @@ Validation runs on every load and throws `pi-fusion-matrix: <problem>`; never fa
   ceiling, not just a shape).
 - `alsoSynthesize` on anything but the final stage → error.
 - `score` without `over`, or `over` other than `panel` → error.
+- a `score` stage's `criteria` is a list of 2..16 rating levels with `instructions`; an array
+  `criteria` on any other decision surface → error, naming the score stage as the only legal home.
 - `thinking` overrides naming a persona the mode does not use → error.
 - a persona `prompt` path that does not exist → error naming the persona and the resolved path.
 - `temperature` outside 0..2, or `output` other than `text`/`json` → error.
@@ -398,7 +407,9 @@ a three-question verification), and `review-routed` (the committee behind a comp
 
 Persona prompts live in `prompts/*.md` and are referenced by path, so editing what a seat is told is
 an edit to a text file, not to code. A `prompt` may also be inline, and `fusions.<id>.prompts` overrides
-one persona for one fusion only.
+one persona for one fusion only. An override is resolved by existence rather than by shape — a file
+beside the config that declared the fusion wins, and its own text is used when there is no such file —
+because the packaged `review` override is a single line and would otherwise read as a filename.
 
 The provider ids in `aliases.*.providers` are **pi's own** — `opencode-go`, `zai`, `kimi-coding`,
 `openai`, and whatever a repository adds — and each provider's endpoint, api flavour, and catalogue come
@@ -465,7 +476,7 @@ emission) and `<vendored-fork>/lib/event-stream.js` for the duck-typed stream.
 `resolve.ts`:
 
 ```ts
-export type Resolved = { alias: string; provider: string; model: string; maxTokens: number; reasoning: boolean };
+export type Resolved = { alias: string; provider: string; model: string; maxTokens?: number; reasoning?: boolean; thinking?: Persona["thinking"] };
 /** Every (provider, model) pair an alias or slot entry can produce, in order. */
 export function resolveCandidates(config: MatrixConfig, candidate: SlotCandidate): Resolved[];
 ```
@@ -474,12 +485,18 @@ export function resolveCandidates(config: MatrixConfig, candidate: SlotCandidate
 model, and it consults only the alias table (provider ids are pi's; nothing here reads a key or a URL):
 
 1. A `{ semif }` entry returns `[]`; the caller handles SemIf separately (Step 4).
-2. Normalize the entry: a bare string is `{ alias: string }`; an object carries `alias` plus an
-   optional per-slot `providers` override.
+2. Normalize the entry: a bare string is `{ alias: string }`; an object carries `alias` plus optional
+   per-slot `providers` and `thinking` overrides.
 3. `alias = config.aliases[aliasId]`; missing → throw `unknown alias "x"; known: ...`.
 4. `refs = providers ?? alias.providers`; empty after the override → throw `alias "x" has no providers`.
 5. For each ref in order, push `{ alias: aliasId, provider: ref.id ?? ref, model:
-   ref.modelOverride ?? alias.model, maxTokens: alias.maxTokens ?? 4096, reasoning: alias.reasoning ?? false }`.
+   ref.modelOverride ?? alias.model, maxTokens: alias.maxTokens, reasoning: alias.reasoning }`.
+   Both knobs are optional, and only what the alias declares is carried: the alias wins where it
+   declares them and pi's template supplies the rest, because pi's model object is what the adapters
+   read — they gate thinking on `model.reasoning` (`dist/api/anthropic-messages.js:773`,
+   `azure-openai-responses.js:219`) and size the request from `model.maxTokens` — so a default here
+   would overwrite pi's accurate sibling value for every alias that declares neither, silently
+   disabling thinking and capping output.
    The alias name stays version-free in every fusion and slot; the vendor id sent upstream comes from
    `alias.model` (optionally overridden per provider), so a vendor release edits one field in
    `matrix.json` and touches nothing else.
@@ -534,7 +551,7 @@ reaches a run.
 type Substitution = { seat: string; from: string; to: string; reason: string };
 type SeatResult = {
   text: string; label: string; usage: Usage; substitutions: Substitution[];
-  decisions?: DecideAnswer[]; error?: string; degraded: boolean;
+  error?: string; degraded: boolean;
 };
 async function runSeat(
   persona: string, candidates: SlotCandidate[], ctx: SeatContext,
@@ -648,13 +665,14 @@ type RunDetails = {
   fusion: string; mode: string;
   stages: { index: number; kind: "parallel" | "single" | "decide" | "score" | "render";
             seats?: string[]; calls: number }[];
-  seats: { persona: string; alias: string; provider: string; model: string;
-           thinking?: string; usage: Usage; degraded?: boolean; error?: string }[];
+  seats: { persona: string; alias: string; provider: string; model: string; template?: string;
+           thinking?: string; usage: Usage; degraded?: boolean; error?: string; reason?: string }[];
+  seatErrors: { persona: string; error?: string; reason?: string }[];
   rounds?: { round: number; seats: string[]; inputs: Record<string, string> }[];
   substitutions: Substitution[];
   cascades: Cascade[];               // answer, sufficiency, prior, next candidate
-  routing?: { answer: DecideAnswer; routedTo?: string; declined?: string };
-  verification?: { check: string; result: unknown; gate?: { exit: number; output: string } }[];
+  routing?: { answer: DecideAnswer; routedTo?: string; declined?: string; threshold: number };
+  verification?: { check: string; result: unknown; gate?: { exit: number; timedOut?: boolean; durationMs: number; output: string } }[];
   usage: Usage;
 };
 ```
@@ -833,7 +851,7 @@ that must bill to another account:
    `{"aliases": {"deepseek-flash": {"providers": ["go", "tp-work", "tp"]}}}` — layers deep-merge, and
    arrays replace, so this one alias is the whole project override.
 
-`pi.registerCommand("fusion-matrix", ...)` therefore only lists what is currently resolvable: every
+`pi.registerCommand("matrix-info", ...)` therefore only lists what is currently resolvable: every
 alias with its provider chain, the fusion ids, the `backends` kinds, and which config layers were
 loaded. It never writes configuration and never switches a profile.
 
@@ -985,7 +1003,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    `/tmp/fusion-matrix-check/.pi-fusion-matrix.json` set
    `{"aliases": {"deepseek-pro": {"providers": ["nope", "tp"]}}}`. A `fusion-matrix/deep` run must print
    ` ├─ ↩ skeptic deepseek-pro@nope → deepseek-pro@tp (missing provider)`, complete, and —
-   driven through the `deliberate` tool — report exactly one substitution whose `from` and `to` share
+   driven through the `matrix` tool — report exactly one substitution whose `from` and `to` share
    the same alias name. Remove the override afterwards. This verifies both the native-provider lookup
    and that a stale provider name degrades per seat instead of aborting.
 5. **Slot-layer fallback (new alias)** — in the same project file set
@@ -1007,12 +1025,12 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    `node scripts/semif-probe.mjs --backend http://127.0.0.1:8792/score` must both exit 0. Point
    `decide.defaultBackend` at `typesafe-stub` and run
    `pi -p "Summarize the tradeoffs of optimistic locking" --model fusion-matrix/review-check --no-session`:
-   the judge element must resolve in place and `details.decisions` must carry the winner and the full
-   probability map. Kill the stubs afterwards.
+   the judge element must resolve in place and `details.cascades[].answer` must carry the winner
+   (`choice`) and the full `probabilities` map. Kill the stubs afterwards.
 9. **TypeSafe live** — export `TYPESAFE_API_KEY`, set `decide.defaultBackend` to `typesafe`, and run
    `node scripts/typesafe-probe.mjs --backend https://api.typesafe.ai/v1/systemone`; it must exit 0 and
    print the answering `model` (`jev-1.13.0`). Then run `fusion-matrix/review-check` live and confirm
-   `details.decisions[].verify` carries three typed answers (`noul`, `noul`, `choice`) and that each
+   `details.verification[].result` carries three typed answers (`noul`, `noul`, `choice`) and that each
    `choice`/`score` answer has `confidence`. A `401` here means the key is absent or wrong, not that
    the wiring is broken.
 10. **Conservative invariants** — (a) temporarily set `verify[0]` to a question the synthesis cannot
