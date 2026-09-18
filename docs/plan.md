@@ -1045,9 +1045,10 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     `details.seats[].provider` show it) with no edit to any fusion and no credential in the project
     file. Remove the override afterwards. This is the check that per-repo billing needs no profile
     system — only a provider id, which is pi's vocabulary, not ours.
-14. **Independence from the fork** — `grep -rn "pi-fusion\|/Users/\|~/" extensions/ matrix.json
+14. **Independence from the fork** — `grep -rn "pi-fusion\|/Users/\|~/" extensions/ scripts/ matrix.json
     package.json` must return no import or path reference (only doc/comment mentions of the reference
-    directory are allowed). Then move the vendored reference fork out of the pi extensions directory, run
+    directory are allowed). `scripts/` is included because a harness importing by absolute path publishes
+    the developer's layout. Then move the vendored reference fork out of the pi extensions directory, run
     `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/deep --no-session`, and confirm it still works —
     this is the check that the package runs with no developer checkout present. Restore the directory
     afterwards.
