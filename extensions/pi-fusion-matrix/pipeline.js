@@ -354,7 +354,12 @@ export async function runPipeline({
           substitutions.push(...seat.substitutions);
           cascades.push(...seat.cascades);
         }
-        rounds.push({ round, seats: roundSeats.filter((s) => !s.degraded).map((s) => s.persona), inputs: { input: String(vars.input ?? "").slice(0, 200) } });
+        rounds.push({
+          round,
+          seats: roundSeats.filter((s) => !s.degraded).map((s) => s.persona),
+          dropped: roundSeats.filter((s) => s.degraded).map((s) => `${s.persona} (${s.reason ?? "unknown"})`),
+          inputs: Object.fromEntries(roundSeats.map((s) => [s.persona, `${s.persona} received ${String(vars.input ?? "").length} chars in round ${round}`])),
+        });
       }
       vars.panel = renderPanel(lastSeats);
       vars.previous = vars.panel;
@@ -449,6 +454,9 @@ export async function runPipeline({
 
   return {
     text,
+    // The vars snapshot is what `verify` needs: the panel as the panel saw it, the judge's own
+    // output, and the answer — not the answer standing in for all three.
+    vars: { prompt: vars.prompt, panel: vars.panel ?? "", judge: vars.judge ?? "", synthesis: text, cwd },
     usage,
     decisionUsage,
     details: { fusion: fusion.id, mode: fusion.mode, stages, seats: seatRecords, rounds, substitutions, cascades: [...cascades, ...cascadeRecords] },

@@ -104,6 +104,9 @@ export function createDecide({ config, fetchImpl = globalThis.fetch, log } = {})
     const apiKey = backend.apiKeyEnv ? process.env[backend.apiKeyEnv] : undefined;
     if (backend.apiKeyEnv && !apiKey) throw new Error(`decision backend "${backendName}" needs env var ${backend.apiKeyEnv}`);
 
+    if (backend.kind === "semif" && spec.questions) {
+      throw new Error(`backend "${backendName}" is SemIf and takes one question per request; use a criteria decision or the questions form on a typesafe backend`);
+    }
     const state = truncateState(interpolate(spec.state ?? vars.input ?? "", vars, "decision state"), STATE_BUDGET_TOKENS, log);
     const options = { apiKey, timeoutMs: backend.timeoutMs, signal, log };
     const criteria = spec.criteria;

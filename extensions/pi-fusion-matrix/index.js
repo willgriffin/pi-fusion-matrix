@@ -9,8 +9,9 @@
  * rather than capturing a null at load time.
  */
 
-import process from "node:process";
+import fs from "node:fs";
 import path from "node:path";
+import process from "node:process";
 import { loadMatrixConfig, validateConfig, REPO_ROOT } from "./config.js";
 import { loadPi, makeCallModel, createFusionStream } from "./run.js";
 import { createDecide } from "./decide.js";
@@ -81,8 +82,8 @@ export default async function (pi) {
         return { content: [{ type: "text", text: `unknown fusion "${fusion}"; known: ${fusionIds.join(", ")}` }], details: { fusion } };
       }
       try {
-        const text = await runOnce({ config, sources, fusion, prompt: params.prompt, getRegistry: () => registry, decide, callModel });
-        return { content: [{ type: "text", text }], details: { fusion } };
+        const result = await runOnce({ config, sources, fusion, prompt: params.prompt, getRegistry: () => registry, decide, callModel });
+        return { content: [{ type: "text", text: result.text }], details: { fusion, ...result.details } };
       } catch (error) {
         const message = error?.message ?? String(error);
         return { content: [{ type: "text", text: `fusion failed: ${message}` }], details: { fusion, error: message } };
@@ -105,8 +106,8 @@ export default async function (pi) {
 
       ctx.ui.setStatus("matrix", `🧠 ${fusion}…`);
       try {
-        const answer = await runOnce({ config, sources, fusion, prompt, getRegistry: () => registry, decide, callModel, onProgress: (line) => ctx.ui.setStatus("matrix", line) });
-        pi.sendMessage({ customType: "matrix-answer", content: answer, display: true }, { triggerTurn: false });
+        const result = await runOnce({ config, sources, fusion, prompt, getRegistry: () => registry, decide, callModel, onProgress: (line) => ctx.ui.setStatus("matrix", line) });
+        pi.sendMessage({ customType: "matrix-answer", content: result.text, display: true }, { triggerTurn: false });
       } catch (error) {
         ctx.ui.notify(`fusion failed: ${error?.message ?? String(error)}`, "error");
       } finally {
@@ -155,16 +156,58 @@ export default async function (pi) {
   });
 }
 
-/** One complete run, for the tool and the command paths (the provider path owns its own stream). */
+/**
+ * One complete run for the tool and command paths, which cannot emit a pi stream.
+ *
+ * The file agent's writes are executed here rather than handed to pi: a tool result cannot carry
+ * tool calls, so nothing else would write them and reporting "saved N files" without writing would be a
+ * false claim. Failures are per file and reported as written-or-not.
+ */
 async function runOnce({ config, sources, fusion, prompt, getRegistry, decide, callModel, onProgress }) {
-  const { runPipeline, freshUsage, accumulateUsage } = await import("./pipeline.js");
+  const { runPipeline } = await import("./pipeline.js");
   const { routeFusion, verifyRun, fileAgentStep, makeRunGate } = await import("./run.js");
-  const emit = { delta: (text) => onProgress?.(text.trim().slice(0, 120)), substitution: () => {} };
+  const notes = [];
+  const emit = { delta: (text) => { notes.push(text.trim()); onProgress?.(text.trim().slice(0, 120)); }, substitution: () => {} };
+
   const routed = await routeFusion({ config, fusion: { ...config.fusions[fusion], id: fusion }, prompt, decide, emit });
   const run = await runPipeline({ config, sources, fusion: routed.fusion, prompt, registry: getRegistry(), callModel, decide, emit });
-  const usage = accumulateUsage(run.usage, run.decisionUsage);
-  await verifyRun({ config, fusion: routed.fusion, vars: { prompt, synthesis: run.text, judge: run.text }, decide, emit, runGate: makeRunGate() });
+  const vars = { prompt, panel: "", judge: run.text, synthesis: run.text, cwd: process.cwd() };
+  const verification = await verifyRun({ config, fusion: routed.fusion, vars, decide, emit, runGate: makeRunGate() });
   const files = await fileAgentStep({ config, fusion: routed.fusion, prompt, synthesis: run.text, registry: getRegistry(), callModel, emit });
-  const saved = (files.toolCalls ?? []).map((c) => c?.arguments?.path).filter(Boolean);
-  return saved.length ? `${run.text}\n\n---\nSaved ${saved.length} file(s): ${saved.join(", ")}` : run.text;
+
+  const saved = [];
+  const failedWrites = [];
+  for (const call of files.toolCalls ?? []) {
+    const target = call?.arguments?.path;
+    const content = call?.arguments?.content;
+    if (!target || typeof content !== "string") { failedWrites.push(`${target ?? "(no path)"}: no content`); continue; }
+    try {
+      const absolute = path.resolve(process.cwd(), target);
+      fs.mkdirSync(path.dirname(absolute), { recursive: true });
+      fs.writeFileSync(absolute, content, "utf8");
+      saved.push(target);
+    } catch (error) {
+      failedWrites.push(`${target}: ${error?.message ?? String(error)}`);
+    }
+  }
+
+  const summary = [
+    run.text,
+    saved.length ? `\n\n---\nSaved ${saved.length} file(s): ${saved.map((f) => `\`${f}\``).join(", ")}` : "",
+    failedWrites.length ? `\n\n⚠️ Could not write: ${failedWrites.join("; ")}` : "",
+  ].join("");
+
+  return {
+    text: summary,
+    details: {
+      ...run.details,
+      routing: routed.routing,
+      verification,
+      saved,
+      failedWrites,
+      notes,
+      usage: run.usage,
+      decisionUsage: run.decisionUsage,
+    },
+  };
 }

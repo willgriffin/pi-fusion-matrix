@@ -373,7 +373,7 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
           emit.delta(`\n⚠️ No deliberation happened: ${failed.length} of ${seats.length} seats were unavailable (${reasons}). Nothing was synthesized — this is not an answer.\n`);
         }
 
-        const vars = { prompt, panel: "", judge: run.text, synthesis: run.text, cwd: process.cwd() };
+        const vars = run.vars ?? { prompt, panel: "", judge: run.text, synthesis: run.text, cwd: process.cwd() };
         const usage = run.usage;
         accumulateUsage(usage, run.decisionUsage);
 
