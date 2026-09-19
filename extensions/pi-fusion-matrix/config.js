@@ -233,12 +233,15 @@ function firstCandidate(candidates) {
  * alias it runs on. One definition declares both faces, so re-pointing the writer re-points what codes
  * under that rung.
  *
- * `proxy.alias` re-points which model that seat runs on — the case where the writer is a fine merge and
- * a thin coder. A mode that ends in `render` (or a bare `decide`) writes nothing, so it declares no
- * executor and always deliberates; the loader rejects a `proxy` on one, because its executor would have
- * no persona and the thinking rule would have no row to read.
+ * `proxy.alias` re-points which model that seat runs on — on that alias's own provider chain — which is
+ * the case where the writer is a fine merge and a thin coder. A mode that ends in `render` (or a bare
+ * `decide`) writes nothing, so it declares no executor and always deliberates; the loader rejects a
+ * `proxy` on one, because its executor would have no persona and the thinking rule would have no row to
+ * read.
  *
- * @returns `{ persona, alias, declared }` or `null` when the fusion has no execute face.
+ * @returns `{ persona, alias, candidate, declared, route }` or `null` when the fusion has no
+ * execute face. `route` is what the proxied turn resolves: the override's alias when one is declared, else
+ * the writing seat's candidate.
  */
 export function executorOf(config, fusion) {
   const stages = config?.modes?.[fusion?.mode]?.stages ?? [];
@@ -250,7 +253,11 @@ export function executorOf(config, fusion) {
   if (persona === null) return null;
   const candidate = firstCandidate(fusion?.candidates?.[persona]);
   const alias = declared ?? (typeof candidate === "string" ? candidate : candidate?.alias);
-  return alias ? { persona, alias, candidate, declared } : null;
+  if (!alias) return null;
+  // `route` is what the proxied turn resolves, and `candidate` is what the *writing seat* declared —
+  // they differ exactly when `proxy.alias` names a different model, whose providers are its own rather
+  // than the writer's, while the seat's thinking level still governs the turn.
+  return { persona, alias, candidate, declared, route: declared ?? candidate };
 }
 
 /**
@@ -267,8 +274,9 @@ export function executorThinking(config, fusion) {
   if (!writer) return undefined;
   const declared = fusion?.thinking?.[writer.persona];
   if (declared === HARNESS_THINKING) return undefined;
-  // The fusion's own override first, then the level the seat's candidate declares for itself, then the
-  // persona's — the same three the pipeline reads for that seat, so the two faces sample alike.
+  // The fusion's own override first, then the level the writing seat's candidate declares for itself,
+  // then the persona's — the same three the pipeline reads for that seat, so the two faces sample alike.
+  // A `proxy.alias` override changes which model acts, never which seat's thinking governs.
   const candidate = isObject(writer.candidate) ? writer.candidate.thinking : undefined;
   return declared ?? candidate ?? config?.personas?.[writer.persona]?.thinking;
 }

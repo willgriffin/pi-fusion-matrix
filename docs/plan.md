@@ -1062,7 +1062,10 @@ would be dropped in silence — the loader rejects it instead.
 
 The proxied turn walks that seat's **candidate**, not merely the alias's own route: the object form
 carries a per-seat provider order, a `modelOverride`, and a thinking level, and the two faces have to
-walk the same candidates, or the coding turn can run on an account the seat deliberately excluded.
+walk the same candidates, or the coding turn can run on an account the seat deliberately excluded. When
+`proxy.alias` is set, that alias's *own* provider chain is what answers — its providers are its own, not
+the writer's — while the writing seat's declared thinking level still governs the turn, because which
+model acts and how hard it thinks are two different declarations.
 
 The consequences are worth keeping in view: re-pointing a writer also upgrades that rung's
 *deliberation* synthesis (usually wanted, one call), and a rung whose writer is a flash model is a cheap

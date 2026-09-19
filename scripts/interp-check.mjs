@@ -14,6 +14,9 @@
  * It caught a real gap on first run: stage-level `sufficientWhen` was unimplemented, so a converged
  * panel still paid for the judge.
  */
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { loadMatrixConfig, mergeConfig, validateConfig } from "../extensions/pi-fusion-matrix/config.js";
 import { runPipeline } from "../extensions/pi-fusion-matrix/pipeline.js";
 import { createDecide } from "../extensions/pi-fusion-matrix/decide.js";
@@ -354,22 +357,37 @@ const stubApi = {
   registerCommand: (name, definition) => commands.set(name, definition),
 };
 const { default: extensionFactory } = await import("../extensions/pi-fusion-matrix/index.js");
-await extensionFactory(stubApi);
-const registeredModels = new Map(registered.get(config.providerId ?? "fusion-matrix").models.map((m) => [m.id, m]));
-check("registration: a proxying rung advertises the executor's numbers and capability",
-  registeredModels.get("quick").contextWindow === 1000000 && registeredModels.get("quick").maxTokens === 384000
+// A scratch cwd so the entry point's own load (packaged + machine + a project layer here) can carry a
+// `proxy.alias` override: what pi registers and what `/matrix-info` prints are the two surfaces a user
+// sees before any run, and both must follow the model that will actually answer.
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "pfm-intercept-"));
+fs.mkdirSync(path.join(scratch, ".pi"), { recursive: true });
+fs.writeFileSync(path.join(scratch, ".pi", "pi-fusion-matrix.json"), JSON.stringify({ fusions: { quick: { proxy: { alias: "glm-flash" } } } }));
+const originalCwd = process.cwd();
+process.chdir(scratch);
+try {
+  await extensionFactory(stubApi);
+} finally {
+  process.chdir(originalCwd);
+}
+const registeredModels = new Map(registered.get("fusion-matrix").models.map((m) => [m.id, m]));
+// `quick` carries a project-layer `proxy.alias` here, so its advertised numbers are the override's, not
+// its writer's — the harness budgets for the model that will answer.
+check("registration: the advertised numbers follow the model that answers",
+  registeredModels.get("quick").contextWindow === 1000000 && registeredModels.get("quick").maxTokens === 131072
     && registeredModels.get("quick").reasoning === true
     && registeredModels.get("best").contextWindow === 1000000 && registeredModels.get("best").maxTokens === 131072,
-  `quick=${registeredModels.get("quick").contextWindow}/${registeredModels.get("quick").maxTokens}, best=${registeredModels.get("best").contextWindow}/${registeredModels.get("best").maxTokens}`);
+  `quick(proxy→glm-flash)=${registeredModels.get("quick").contextWindow}/${registeredModels.get("quick").maxTokens}, best=${registeredModels.get("best").contextWindow}/${registeredModels.get("best").maxTokens}`);
 check("registration: a rung with no execute face keeps the package default",
   registeredModels.get("opinions").contextWindow === 128000 && registeredModels.get("opinions").maxTokens === 8192
     && registeredModels.get("opinions").reasoning === false,
   `opinions=${registeredModels.get("opinions").contextWindow}/${registeredModels.get("opinions").maxTokens}/reasoning=${registeredModels.get("opinions").reasoning}`);
 
+
 let info = "";
 await commands.get("matrix-info").handler(undefined, { ui: { notify: (text) => { info = text; } } });
 check("matrix-info: every fusion prints its execute face",
-  / {2}quick: single\n[\s\S]*? {4}executes: deepseek-flash @low \(writing seat technical\)/.test(info)
+  / {2}quick: single\n[\s\S]*? {4}executes: glm-flash @low \(proxy alias\)/.test(info)
     && / {2}best: pair-judged\n[\s\S]*? {4}executes: glm-flash @high \(writing seat synth\)/.test(info)
     && / {2}review-check: committee-cascaded[^\n]*\n[\s\S]*? {4}executes: kimi @harness \(writing seat synth\)/.test(info)
     && /executes: — \(no writing seat/.test(info),
@@ -404,6 +422,28 @@ await driveStream(fusionStream(makeProxyPeer(objectSeen))(fusionModel("proxy-obj
 check("proxy: a writer's candidate object pins the route and the level",
   objectSeen[0]?.model.provider === "kimi-coding" && objectSeen[0]?.options.reasoning === "high",
   `provider=${objectSeen[0]?.model.provider} @${objectSeen[0]?.options.reasoning}`);
+
+// `proxy.alias` names the executor outright: the override's own provider chain answers, while the writing
+// seat's declared level still governs the turn. (It was ignored on the wire until a review found that the
+// route resolved the writer's candidate even when the override was set — registration and `/matrix-info`
+// said one thing and the stream did another.)
+config.fusions["proxy-override"] = {
+  mode: "pair-judged",
+  thinking: { technical: "low", skeptic: "low", judge: "high", synth: "high" },
+  proxy: { alias: "glm-flash" },
+  candidates: {
+    technical: [{ alias: "kimi", providers: ["kimi-coding"], thinking: "high" }],
+    skeptic: ["glm"],
+    judge: ["deepseek-flash"],
+    synth: [{ alias: "kimi", providers: ["kimi-coding"], thinking: "low" }],
+  },
+};
+const overrideSeen = [];
+await driveStream(fusionStream(makeProxyPeer(overrideSeen))(fusionModel("proxy-override"), harnessContext, harnessOptions));
+check("proxy: `proxy.alias` answers on the override's own route, at the writer's level",
+  overrideSeen[0]?.model.id === "glm-5.3-flash" && overrideSeen[0]?.model.provider === "opencode-go"
+    && overrideSeen[0]?.options.reasoning === "high",
+  `model=${overrideSeen[0]?.model.id}@${overrideSeen[0]?.model.provider} @${overrideSeen[0]?.options.reasoning}`);
 
 // Every proxy rule the loader enforces, asserted where it is enforced rather than only through a harness.
 const { config: fresh } = loadMatrixConfig({ cwd: process.cwd(), layers: ["packaged"] });

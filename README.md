@@ -179,7 +179,9 @@ re-pointing that one seat re-points what codes under the rung:
 fine merge and a thin coder — it is not a way to give a `render`-ended mode an execute face, and the
 loader rejects a `proxy` on one, because its executor would have no persona for the level rule to read.
 The proxied turn walks that seat's *candidate*, so a per-seat provider order, `modelOverride`, or
-thinking level applies to executing exactly as it does to deliberating. The writing seat's
+thinking level applies to executing exactly as it does to deliberating; with `proxy.alias` set, that
+alias's own provider chain answers instead, at the thinking level the writing seat declares. The writing
+seat's
 `thinking` takes a concrete level, `"harness"` (run at whatever level the harness sent — it resolves
 `auto` before the extension ever sees it), or nothing (the writing seat's persona level, else the
 harness's). A proxying fusion registers its executor's context window and max output rather than a
