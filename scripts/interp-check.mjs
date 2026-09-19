@@ -123,13 +123,13 @@ check("verify: decision entries recorded", verification.length >= 1, `entries=${
 
 // 6. route: a sufficient match routes; a low-confidence one declines
 config.fusions.target = { mode: "single", candidates: { technical: ["glm"] } };
-config.fusions.router = { ...config.fusions["review-routed"], id: "router", route: { ...config.fusions["review-routed"].route, sufficientWhen: { minConfidence: 0.8 } } };
+config.fusions.router = { ...config.fusions["default-smrt"], id: "router", route: { ...config.fusions["default-smrt"].route, sufficientWhen: { minConfidence: 0.8 } } };
 await setMode("decisive");
 let routed = await routeFusion({ config, fusion: config.fusions.router, prompt: "x", decide, emit: silent });
-// The stub's decisive answer takes the route's first criterion, and only that criterion carries an
-// action (`then: "quick"`) — so the run must be redirected, not merely "not declined".
+// The stub's decisive answer takes the route's first criterion, and that criterion carries an action
+// (`then: "cheap"`) — so the run must be redirected to that rung, not merely "not declined".
 check("route: confident match routes to the target",
-  routed.routing?.routedTo === "quick" && routed.fusion.id === "quick",
+  routed.routing?.routedTo === "cheap" && routed.fusion.id === "cheap",
   `routedTo=${routed.routing?.routedTo ?? "none"}, fusion=${routed.fusion.id}`);
 await setMode("ambiguous");
 routed = await routeFusion({ config, fusion: config.fusions.router, prompt: "x", decide, emit: silent });

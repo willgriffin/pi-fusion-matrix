@@ -7,12 +7,12 @@ A [pi](https://pi.dev) extension — and one for [omp](https://github.com/can135
 stack — for multi-model deliberation. One codebase, both harnesses. It owns resolution, routing, and
 execution: which model chain answers each seat, whether a cheap decision can answer instead of a model
 call, which shape a run takes, and which fusion a request should even use in the first place. It
-registers one model per fusion (`fusion-matrix/deep`, `fusion-matrix/standard`, …), runs each seat
+registers one model per fusion (`fusion-matrix/best`, `fusion-matrix/cheap`, …), runs each seat
 through the harness's own provider runtime and credential store, and returns a normal
 assistant-message stream. Providers, endpoints, credentials, transport, and accounting stay the
 harness's.
 
-Status: implemented and verified on both harnesses — twelve fusions register and run on pi
+Status: implemented and verified on both harnesses — eight fusions register and run on pi
 0.84.2/0.85.1 and on omp 18.2.6, from one codebase. The twenty-one verification items in
 [`docs/plan.md`](docs/plan.md) carry their evidence inline, and the repository's own offline contracts
 (`scripts/interp-check.mjs`, `scripts/doctor.mjs`, both probes) pass with no keys and no network.
@@ -52,12 +52,13 @@ The same directory loads in **omp**, which reads the same pi-style extension API
 
 ```bash
 ln -s "$PWD/extensions/pi-fusion-matrix" ~/.omp/agent/extensions/pi-fusion-matrix   # omp's own extension dir
-omp --extension "$PWD/extensions/pi-fusion-matrix/index.js" -p "…" --model fusion-matrix/solo   # or for one run
+omp --extension "$PWD/extensions/pi-fusion-matrix/index.js" -p "…" --model fusion-matrix/cheap   # or for one run
 ```
 
-Both were verified end to end: the same commit answers `ZQX1` through `fusion-matrix/solo`, streams a
-panel, runs the file agent (writing a file through the harness's own tool call), and reports the same
-substitutions on pi 0.84.2/0.85.1 and omp 18.2.6.
+Both were verified end to end: the same commit answers `ZQX1` through the one-seat fusion shipped then
+(`solo`; `cheap` and `quick` are those rungs now), streams a panel, runs the file agent (writing a
+file through the harness's own tool call), and reports the same substitutions on pi 0.84.2/0.85.1 and
+omp 18.2.6.
 
 ### One extension, two harnesses
 
@@ -95,8 +96,12 @@ Requirements before the first run:
 
 ```bash
 pi -p "In two sentences: when is optimistic locking the wrong default?" \
-   --model fusion-matrix/deep --no-session
+   --model fusion-matrix/best --no-session
 ```
+
+`best` is the ladder's ceiling — two seats, a judge, and a synthesis. A recorded five-seat committee
+run (the fusion was then named `deep`; `review-check` ships the same five seats today) shows the
+stream's anatomy:
 
 ```
  ├─ plan technical: kimi@opencode-go → kimi@kimi-coding → qwen-max@opencode-go
@@ -115,7 +120,7 @@ pi -p "In two sentences: when is optimistic locking the wrong default?" \
 
 Read that transcript as the run's shape. `plan …` is the expansion of the roster into routes, printed
 before the first call, so the route each seat *will* take is visible rather than inferred. `⏳` is a
-seat starting, named as `provider/vendor-model @thinking` — the judge's `@high` comes from the fusion's
+seat starting, named as `provider/vendor-model @thinking` — the judge's `@high` came from that fusion's
 `thinking` override, and the vendor ids are the ones actually sent upstream. Then the answer streams
 from the synthesis seat only; the other four report status lines, because five interleaved answers are
 unreadable.
@@ -128,7 +133,7 @@ A fusion is reachable three ways:
 | tool | the `matrix` tool (fusion + prompt), for an agent that should deliberate mid-task |
 | command | `/matrix <id> <prompt>`, with `/matrix` alone using `defaultFusion` |
 
-`pi --list-models fusion` lists all twelve, and `/matrix-info` prints the resolvable aliases with
+`pi --list-models fusion` lists all eight, and `/matrix-info` prints the resolvable aliases with
 their routes, the modes, the fusions with their rosters, and the config layers loaded.
 
 ## The primitives
@@ -141,7 +146,7 @@ compose (`decide`, `route`, `verify`, `fileAgent`, and the `score` stage kind).
 
 | where | decides | written with |
 |---|---|---|
-| before the run | which **fusion** this request deserves — cheap, deep, or a named alternative | `route` |
+| before the run | which **fusion** this request deserves — `cheap`, `quick`, `good`, or `best` | `route` |
 | inside a run, per seat | which **model and which account** answers it, in what fallback order | `aliases.*.providers`, a slot's `candidates` |
 | inside a seat | whether a **decision** answers it outright, or escalates to a model call | a `decide` candidate + `sufficientWhen` |
 
@@ -203,8 +208,8 @@ above), and a persona whose path does not exist is a load error naming it, not a
 the seat for a JSON object, parses it with a fence-then-braces recovery, and keeps the raw text under
 `unique_insights` if parsing fails, so a downstream stage still receives something.
 
-A fusion can override one persona's prompt for one fusion only (`review` uses that for its critique
-synthesis), and its `thinking` level the same way.
+A fusion can override one persona's prompt for one fusion only, and its `thinking` level the same
+way — `good` uses the latter to hold all three of its seats at `low`.
 
 ### `mode` — a shape: an ordered list of stages
 
@@ -221,13 +226,14 @@ synthesis), and its `thinking` level the same way.
 }
 ```
 
-A mode says what happens, never which model does it. Eight ship, and the call count is the feature —
+A mode says what happens, never which model does it. Nine ship, and the call count is the feature —
 a shape that quietly adds or drops a call is a bug:
 
 | mode | stages | model calls |
 |---|---|---|
 | `single` | `single` | 1 |
 | `pair` | `parallel` → `single` | 3 |
+| `pair-judged` | `parallel` → `single` → `single` | 4 |
 | `lean` | `parallel` → `single` (synthesizer absorbs the judge) | 3 |
 | `committee` | `parallel` → `single` → `single` | 5 |
 | `committee-merged` | `parallel` → `single` `alsoSynthesize` | 4 |
@@ -235,28 +241,32 @@ a shape that quietly adds or drops a call is a bug:
 | `debate` | `parallel` `rounds: 3` → `render` | 9 |
 | `committee-cascaded` | `parallel` → `decide` → `single` → `single` | 5 + 1 decision call |
 
+`pair`, `committee`, and `committee-merged` ship as vocabulary with no fusion on them. The eight
+fusions sit on `single` (`cheap`, `quick`, and `default-smrt`, which adds one route decision),
+`lean` (`good`), `pair-judged` (`best`), `opinion` (`opinions`), `debate` (`debate`), and
+`committee-cascaded` (`review-check`).
+
 ### `fusion` — a mode bound to a roster, and the model pi registers
 
 ```json
 {
   "fusions": {
-    "deep": {
-      "mode": "committee",
-      "thinking": { "judge": "high" },
+    "best": {
+      "mode": "pair-judged",
+      "thinking": { "judge": "high", "synth": "high" },
       "candidates": {
-        "technical": ["kimi", "qwen-max"],
-        "skeptic": ["deepseek-pro"],
-        "systems": ["glm"],
-        "judge": ["deepseek-pro"],
-        "synth": ["kimi", "qwen-max"]
+        "technical": ["deepseek-pro"],
+        "skeptic": ["glm"],
+        "judge": ["deepseek-flash"],
+        "synth": ["glm-flash"]
       },
-      "fileAgent": { "alias": "deepseek-flash" }
+      "fileAgent": false
     }
   }
 }
 ```
 
-This is the object you actually invoke: it becomes `fusion-matrix/deep`. Every persona the mode uses
+This is the object you actually invoke: it becomes `fusion-matrix/best`. Every persona the mode uses
 must appear in the roster and nothing may appear that the mode does not use — the loader rejects the
 mismatch rather than orphaning a model silently. Optional keys: `thinking` and `prompts` (per-persona
 overrides), `fileAgent`, `maxAdvance` (how many candidates one seat may walk, default 3), `verify`, and
@@ -400,9 +410,12 @@ target may not route again (one hop). The gate defaults to `minConfidence` 0.5 a
 threshold is recorded, because "unsure means spend, not gamble" has to be visible when it declines.
 An outage is reported as an outage — never as "no option matched".
 
-This is the escalation route: `review-routed` sends `"Reply with exactly: ZQX1"` to the cheap fusion
-(` ├─ ↪ routed to quick (trivial, conf 1.00)`) and keeps an architectural prompt on the full committee
-(` ├─  route declined (architectural); running review-routed`).
+This is the escalation route: `default-smrt` sends `"Reply with exactly: ZQX1"` to `cheap`, and keeps
+an architectural prompt on its own seat — its criteria are `cheap`, `quick`, `good`, and `best`, with
+`unsure` falling to `quick`, and it is the packaged `defaultFusion`. As recorded on 2026-09-18, the
+router shipped then (`review-routed`; `default-smrt` has since replaced it) printed
+` ├─ ↪ routed to quick (trivial, conf 1.00)` and
+` ├─  route declined (architectural); running review-routed`.
 
 ### `verify` — report after the synthesis, never rewrite it
 
@@ -427,11 +440,12 @@ and backends may only be declared by the packaged config or `~/.config/pi-fusion
 ### `fileAgent` — files out of a synthesis
 
 ```json
-{ "fusions": { "standard": { "fileAgent": { "alias": "deepseek-flash" } } } }
+{ "fusions": { "best": { "fileAgent": { "alias": "deepseek-flash" } } } }
 ```
 
 One cheap seat, after the synthesis, decides whether the answer contains files worth saving and asks
 to write them. It is not a stage — it cannot change the answer — and `"fileAgent": false` disables it.
+The packaged fusions all ship it disabled; enabling it for one fusion is the line above.
 In a streamed pi run the writes are handed to pi as tool calls, so pi's own permission gate applies; a
 write result ends the run with a confirmation rather than starting a second deliberation. Through the
 tool and command paths there is no such gate, so the extension confines writes to the session
@@ -573,15 +587,18 @@ This project exists because someone else worked out how to make several models d
 agent, and published it.
 
 - **[pi-fusion](https://github.com/QuarkOS/Pi-Fusion)** (`@quarkos/pi-fusion`) by **Antigravity Pair** —
-  the multi-model deliberation harness the whole design is derived from: its pipeline order,
-  prompt-assembly headers, failure taxonomy, temperature-rejection memory, and `streamSimple` event
-  sequence are what this repository re-derives in its own code. The persona prompts in `prompts/*.md`
+  the multi-model deliberation harness the whole design is derived from: its pipeline order, committee
+  shapes, seat assembly, prompt-assembly headers, failure taxonomy, temperature-rejection memory, and
+  `streamSimple` event sequence are what this repository re-derives in its own code — the judge →
+  synthesis stages under `best` and the cascaded committee `review-check` runs are its panel → judge →
+  synthesis pipeline. The persona prompts in `prompts/*.md`
   are transcribed verbatim from its `pi-harness.config.json`, so its **MIT licence (© 2026 Quark)** and
   notice travel with them — see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). It is a reference,
   never a dependency: nothing here imports it, and the locally-patched vendored copy that served as the
   working reference is archived and can be deleted.
 - **[fusion-harness](https://github.com/disler/fusion-harness)** by **IndyDevDan** (MIT, © 2026) — the
-  other reference, and the source of this project's deliberation surface: N-way independent opinions,
+  other reference, and the source of this project's `single` and pair shapes (one model; two seats and
+  a merge) and of its deliberation surface: N-way independent opinions,
   and debate rounds where each seat receives every other seat's labelled prior opinion, a failed seat is
   dropped from later rounds, and no judge arbitrates. Its single-writer rule is why the file agent is
   one seat and not many. Three of its shapes are deliberately *not* here, and that boundary is stated in

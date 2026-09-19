@@ -1,7 +1,7 @@
 {
   "providerId": "fusion-matrix",
   "providerName": "Fusion Matrix",
-  "defaultFusion": "standard",
+  "defaultFusion": "default-smrt",
   "aliases": {
     "glm": {
       "model": "glm-5.3",
@@ -129,6 +129,25 @@
         }
       ]
     },
+    "pair-judged": {
+      "stages": [
+        {
+          "parallel": [
+            "technical",
+            "skeptic"
+          ],
+          "input": "prompt"
+        },
+        {
+          "single": "judge",
+          "input": "panel"
+        },
+        {
+          "single": "synth",
+          "input": "panel+judge"
+        }
+      ]
+    },
     "lean": {
       "stages": [
         {
@@ -252,51 +271,40 @@
     }
   },
   "fusions": {
-    "standard": {
-      "mode": "lean",
-      "candidates": {
-        "technical": [
-          "glm"
-        ],
-        "skeptic": [
-          "glm"
-        ],
-        "synth-lean": [
-          "glm"
-        ]
-      },
-      "fileAgent": {
-        "alias": "deepseek-flash"
-      }
-    },
-    "quick": {
-      "mode": "lean",
-      "candidates": {
-        "technical": [
-          "glm-flash"
-        ],
-        "skeptic": [
-          "glm-flash"
-        ],
-        "synth-lean": [
-          "glm"
-        ]
-      },
-      "fileAgent": {
-        "alias": "deepseek-flash"
-      }
-    },
-    "solo": {
+    "cheap": {
+      "name": "Cheap · one flash seat",
       "mode": "single",
+      "thinking": {
+        "technical": "low"
+      },
       "candidates": {
         "technical": [
-          "glm"
+          "qwen-flash"
         ]
       },
       "fileAgent": false
     },
-    "workhorse": {
-      "mode": "pair",
+    "quick": {
+      "name": "Quick · deepseek flash",
+      "mode": "single",
+      "thinking": {
+        "technical": "low"
+      },
+      "candidates": {
+        "technical": [
+          "deepseek-flash"
+        ]
+      },
+      "fileAgent": false
+    },
+    "good": {
+      "name": "Good · two flash seats + merge",
+      "mode": "lean",
+      "thinking": {
+        "technical": "low",
+        "skeptic": "low",
+        "synth-lean": "low"
+      },
       "candidates": {
         "technical": [
           "deepseek-flash"
@@ -304,71 +312,74 @@
         "skeptic": [
           "glm-flash"
         ],
-        "merge": [
-          "glm"
-        ]
-      },
-      "fileAgent": {
-        "alias": "deepseek-flash"
-      }
-    },
-    "sota": {
-      "mode": "pair",
-      "candidates": {
-        "technical": [
-          "kimi"
-        ],
-        "skeptic": [
-          "deepseek-pro"
-        ],
-        "merge": [
-          "gpt"
+        "synth-lean": [
+          "qwen-flash"
         ]
       },
       "fileAgent": false
     },
-    "deep": {
-      "mode": "committee",
+    "best": {
+      "name": "Best · judged pair",
+      "mode": "pair-judged",
+      "thinking": {
+        "technical": "low",
+        "skeptic": "low",
+        "judge": "high",
+        "synth": "high"
+      },
       "candidates": {
         "technical": [
-          "kimi",
-          "qwen-max"
-        ],
-        "skeptic": [
           "deepseek-pro"
         ],
-        "systems": [
+        "skeptic": [
           "glm"
         ],
         "judge": [
-          "deepseek-pro"
+          "deepseek-flash"
         ],
         "synth": [
-          "kimi",
-          "qwen-max"
+          "glm-flash"
         ]
       },
-      "thinking": {
-        "judge": "high"
-      },
-      "fileAgent": {
-        "alias": "deepseek-flash"
-      }
+      "fileAgent": false
     },
-    "brief": {
-      "mode": "committee-merged",
+    "default-smrt": {
+      "name": "Default · routed",
+      "mode": "single",
+      "thinking": {
+        "technical": "low"
+      },
+      "route": {
+        "instructions": "How much work does this request need? Judge the work itself, not how it was phrased, and prefer the cheapest rung that can carry it.",
+        "criteria": {
+          "cheap": {
+            "description": "A lookup, a definition, or a one-line factual answer — no judgement needed.",
+            "then": "cheap"
+          },
+          "quick": {
+            "description": "An ordinary question or a small change that needs one careful pass.",
+            "then": "quick"
+          },
+          "good": {
+            "description": "Two or three things interact, or the answer is better with a second opinion.",
+            "then": "good"
+          },
+          "best": {
+            "description": "Expensive to get wrong: design tradeoffs, correctness-critical work, or several interacting decisions.",
+            "then": "best"
+          },
+          "unsure": {
+            "description": "Ambiguous, or missing the context you would need to judge.",
+            "then": "quick"
+          }
+        },
+        "sufficientWhen": {
+          "minConfidence": 0.4
+        }
+      },
       "candidates": {
         "technical": [
-          "kimi"
-        ],
-        "skeptic": [
-          "deepseek-pro"
-        ],
-        "systems": [
-          "glm"
-        ],
-        "judge": [
-          "deepseek-pro"
+          "deepseek-flash"
         ]
       },
       "fileAgent": false
@@ -399,32 +410,6 @@
         ],
         "systems": [
           "glm"
-        ]
-      },
-      "fileAgent": false
-    },
-    "review": {
-      "mode": "committee",
-      "prompts": {
-        "synth": "You are reviewing a proposed change. Report defects with severity, file:line anchors, and reproduction steps. Do not emit revised code. Under 1,500 tokens."
-      },
-      "candidates": {
-        "technical": [
-          "kimi",
-          "qwen-max"
-        ],
-        "skeptic": [
-          "deepseek-pro"
-        ],
-        "systems": [
-          "glm"
-        ],
-        "judge": [
-          "deepseek-pro"
-        ],
-        "synth": [
-          "kimi",
-          "qwen-max"
         ]
       },
       "fileAgent": false
@@ -483,44 +468,6 @@
           }
         }
       ]
-    },
-    "review-routed": {
-      "mode": "committee",
-      "route": {
-        "instructions": "How much deliberation does this request need?",
-        "criteria": {
-          "trivial": {
-            "description": "A direct factual or mechanical question",
-            "then": "quick"
-          },
-          "single_concern": {
-            "description": "One design decision with limited blast radius",
-            "then": "quick"
-          },
-          "multi_concern": "Several interacting decisions or cross-cutting change",
-          "architectural": "System-level tradeoffs with long-lived consequences"
-        }
-      },
-      "candidates": {
-        "technical": [
-          "kimi",
-          "qwen-max"
-        ],
-        "skeptic": [
-          "deepseek-pro"
-        ],
-        "systems": [
-          "glm"
-        ],
-        "judge": [
-          "deepseek-pro"
-        ],
-        "synth": [
-          "kimi",
-          "qwen-max"
-        ]
-      },
-      "fileAgent": false
     }
   },
   "decide": {

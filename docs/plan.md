@@ -318,11 +318,11 @@ Validation runs on every load and throws `pi-fusion-matrix: <problem>`; never fa
 - alias with an empty `providers` list → `alias "glm" has no providers`.
 - alias with no `model` → `alias "glm" has no model; set the vendor id sent upstream`.
 - a fusion id containing `:` or `/` → error, because pi parses `provider/id:thinking` and the id would
-  be unaddressable (`fusion id "deep:cheap" may not contain ":" or "/"`).
+  be unaddressable (`fusion id "best:cheap" may not contain ":" or "/"`).
 - `defaultFusion` naming an unknown fusion → error.
 - `fusions.<id>.mode` naming an unknown mode → error, listing the known modes.
 - a fusion's `candidates` keys not matching the personas its mode uses → error naming both sides
-  (`fusion "deep" is missing candidates for: synth; unknown: synthesis`). The roster and the shape must
+  (`fusion "best" is missing candidates for: synth; unknown: synthesis`). The roster and the shape must
   agree, which is what keeps a mode rename from silently orphaning a model.
 - a candidate entry naming an unknown alias → error, listing `aliases` keys; an empty candidate list →
   error naming the persona.
@@ -369,27 +369,29 @@ piece of configuration registers, and a stale name must fail at use, not at star
 ### Step 2 — The packaged config and the matching `models.json`
 
 `matrix.json` in this repository is the single copy of the packaged config — the plan does not
-duplicate it. Only the vocabulary is illustrated here; read the file for the twelve fusions it ships.
+duplicate it. Only the vocabulary is illustrated here; read the file for the eight fusions it ships.
 
 ```jsonc
 {
   "providerId": "fusion-matrix",
-  "defaultFusion": "standard",
+  "defaultFusion": "default-smrt",
 
   "personas": {                                   // seats: told once, reused everywhere
-    "technical": { "prompt": "prompts/technical.md", "temperature": 0.5, "thinking": "medium" },
-    "judge":     { "prompt": "prompts/judge.md", "temperature": 0.2, "output": "json" },
-    "synth":     { "prompt": "prompts/synth.md", "temperature": 0.5 },
-    "merge":     { "prompt": "prompts/merge.md", "temperature": 0.4 }
+    "technical":  { "prompt": "prompts/technical.md", "temperature": 0.5, "thinking": "medium" },
+    "skeptic":    { "prompt": "prompts/skeptic.md", "temperature": 0.8 },
+    "systems":    { "prompt": "prompts/systems.md", "temperature": 0.6 },
+    "judge":      { "prompt": "prompts/judge.md", "temperature": 0.2, "output": "json" },
+    "synth":      { "prompt": "prompts/synth.md", "temperature": 0.5 },
+    "synth-lean": { "prompt": "prompts/synth-lean.md", "temperature": 0.5, "thinking": "medium" }
   },
 
   "modes": {                                      // shapes: stage lists, no code
-    "pair": { "stages": [
+    "lean": { "stages": [
       { "parallel": ["technical", "skeptic"], "input": "prompt" },
-      { "single": "merge", "input": "panel" }
+      { "single": "synth-lean", "input": "panel" }
     ] },
-    "committee": { "stages": [
-      { "parallel": ["technical", "skeptic", "systems"], "input": "prompt" },
+    "pair-judged": { "stages": [
+      { "parallel": ["technical", "skeptic"], "input": "prompt" },
       { "single": "judge", "input": "panel" },
       { "single": "synth", "input": "panel+judge" }
     ] },
@@ -401,28 +403,41 @@ duplicate it. Only the vocabulary is illustrated here; read the file for the twe
   },
 
   "fusions": {                                    // a mode plus the roster that fills its seats
-    "workhorse": { "mode": "pair", "fileAgent": { "alias": "deepseek-flash" },
-      "candidates": { "technical": ["deepseek-flash"], "skeptic": ["glm-flash"], "merge": ["glm"] } },
-    "deep": { "mode": "committee", "thinking": { "judge": "high" },
-      "candidates": { "technical": ["kimi", "qwen-max"], "skeptic": ["deepseek-pro"],
-                      "systems": ["glm"], "judge": ["deepseek-pro"], "synth": ["kimi", "qwen-max"] } }
+    "good": { "mode": "lean", "fileAgent": false,
+      "candidates": { "technical": ["deepseek-flash"], "skeptic": ["glm-flash"],
+                      "synth-lean": ["qwen-flash"] } },
+    "best": { "mode": "pair-judged", "thinking": { "judge": "high", "synth": "high" },
+      "candidates": { "technical": ["deepseek-pro"], "skeptic": ["glm"],
+                      "judge": ["deepseek-flash"], "synth": ["glm-flash"] } }
   }
 }
 ```
 
-Twelve fusions ship: `standard`, `quick` and `solo` (lean and single-seat shapes), `workhorse` and
-`sota` (a cheap pair and a frontier pair on one shape), `deep`, `brief` and `opinions` (the committee,
-its merged-judge variant, and the panel-only grid), `debate` (three rounds against peers' opinions),
-`review` (the committee with a critique synthesis prompt), `review-check` (the cascaded committee plus
-a three-question verification), and `review-routed` (the committee behind a complexity route).
+Eight fusions ship, and the call count is the cost contract. `cheap` (one seat on `qwen-flash`) and
+`quick` (one seat on `deepseek-flash`) are the rungs the ladder starts on, one call each. `good` is
+the pair shape — two flash seats and a merge — at three calls. `best` is that pair extended with a
+judge and a synthesis at four calls, and it is the ceiling of the ladder. `default-smrt` is one seat
+behind a complexity `route` that sends the request to `cheap`, `quick`, `good`, or `best` (`unsure`
+falls to `quick`), is the `defaultFusion`, and costs one call plus one route decision. `opinions` is
+the panel-only grid (three calls, no generation). `debate` is three rounds against peers' opinions
+(nine calls). `review-check` is the cascaded committee plus a three-question verification (five calls
+plus one stage decision). The ladder defaults cheap — `default-smrt` budgets the cheapest rung that can
+carry the request — and `best` is its ceiling.
 
-Where each shape comes from:
+Where each fusion's shape comes from:
 
-| shapes | from | which surfaces |
+| fusion (shape) | from | which surfaces |
 |---|---|---|
-| `single`, `pair` (`workhorse`, `sota`) | [`disler/fusion-harness`](https://github.com/disler/fusion-harness) | `/fh-only` (one model) and the cheap/frontier pair commands |
-| `opinions`, `debate` | the same | `/fh-opinion` (N models answer independently, read-only, side by side, no merge) and `/fh-debate` (each round every surviving agent receives every other agent's labelled prior opinion; failed agents are dropped; no judge and no hidden merge) |
-| `committee`, `committee-merged`, `committee-cascaded`, and the seat assembly | [`@quarkos/pi-fusion`](https://github.com/QuarkOS/Pi-Fusion) | its panel → judge → synthesis pipelines, and the seat algorithm of Step 6 |
+| `cheap`, `quick` (`single`) | [`disler/fusion-harness`](https://github.com/disler/fusion-harness) | `/fh-only` (one model) |
+| `good` (the pair shape: two seats and a merge, packaged as `lean`) | the same | its cheap/frontier pair commands |
+| `best` (that pair plus a judge → synthesis, packaged as `pair-judged`) | both | the pair shape above, extended with [`@quarkos/pi-fusion`](https://github.com/QuarkOS/Pi-Fusion)'s panel → judge → synthesis stages |
+| `default-smrt` (one seat behind a `route` gate) | this repository | its own routing gate; no upstream shape |
+| `opinions`, `debate` | [`disler/fusion-harness`](https://github.com/disler/fusion-harness) | `/fh-opinion` (N models answer independently, read-only, side by side, no merge) and `/fh-debate` (each round every surviving agent receives every other agent's labelled prior opinion; failed agents are dropped; no judge and no hidden merge) |
+| `review-check` (the committee, as `committee-cascaded`, and the seat assembly) | [`@quarkos/pi-fusion`](https://github.com/QuarkOS/Pi-Fusion) | its panel → judge → synthesis pipelines, and the seat algorithm of Step 6 |
+
+`pair`, `committee`, and `committee-merged` ship as vocabulary with no fusion on them; the eight
+fusions sit on `single`, `lean`, `pair-judged`, `opinion`, `debate`, and `committee-cascaded` (the
+`review-check` shape).
 
 fusion-harness's three other shapes are deliberately absent — see the boundary note under Assumptions
 (its disk-writing FUSION agent, its gate-first loop, and its plan-then-DAG collaboration).
@@ -431,7 +446,7 @@ Persona prompts live in `prompts/*.md` and are referenced by path, so editing wh
 an edit to a text file, not to code. A `prompt` may also be inline, and `fusions.<id>.prompts` overrides
 one persona for one fusion only. An override is resolved by existence rather than by shape — a file
 beside the config that declared the fusion wins, and its own text is used when there is no such file —
-because the packaged `review` override is a single line and would otherwise read as a filename.
+because an override that is one line of prose would otherwise read as a filename.
 
 The provider ids in `aliases.*.providers` are **pi's own** — `opencode-go`, `zai`, `kimi-coding`,
 `openai`, and whatever a repository adds — and each provider's endpoint, api flavour, and catalogue come
@@ -640,7 +655,7 @@ async function runSeat(
 
 Sampling belongs to the persona: `temperature` (default 0.7) and `thinking` (passed to pi as the
 request's `reasoning` level). `fusions.<id>.thinking` overrides one persona for one fusion, which is
-how `deep` runs its judge at `high` while its panel stays at the persona default. The reference
+how `best` runs its judge and synthesis at `high` while its panel is held at `low`. The reference
 implementation's temperatures survive as persona defaults (`technical` 0.5, `skeptic` 0.8, `systems`
 0.6, `judge` 0.2, `synth` 0.5). The `kimi` special case stays: `temperature: 1.0` when the vendor id
 contains `kimi`, because that family rejects other values. Keep the models-reject-temperature memory
@@ -680,7 +695,7 @@ pi.registerTool({
   promptSnippet: "Run a multi-model deliberation on a design question",
   parameters: Type.Object({
     prompt: Type.String({ description: "The query or design task to analyze." }),
-    fusion: Type.Optional(Type.String({ description: 'Fusion id from matrix.json (e.g. "deep"). Omit for "default".' })),
+    fusion: Type.Optional(Type.String({ description: 'Fusion id from matrix.json (e.g. "best"). Omit for "default".' })),
   }),
   execute: async (_toolCallId, params) => { /* content: synthesis text,
     details: { fusion, models, substitutions, slotErrors, panelResponses, judgeAnalysis, usage } */ },
@@ -716,7 +731,7 @@ makes a shape's cost contract checkable.
 
 `/matrix` parses the first whitespace-delimited token as a fusion id when it matches a key in
 `fusions`; otherwise the whole argument string is the prompt and `defaultFusion` is used. Unknown id →
-`ctx.ui.notify('unknown fusion "x"; known: standard, deep, ...', "error")` and no run.
+`ctx.ui.notify('unknown fusion "x"; known: cheap, quick, ...', "error")` and no run.
 A decision entry reports as before; a `gate` entry runs a command and records its exit status.
 
 **`route` runs before the first stage** (Step 3 step 1). The clause is one choice question built from
@@ -752,7 +767,8 @@ skipped, not as a run failure.
 ### Step 4 — Decision backends (TypeSafe default, SemIf local)
 
 `decide.ts` is the client for both kinds; `decide.models` and `scripts/*` belong to the SemIf server.
-Nothing here is optional or deferred behind a flag — `review-check` and `review-routed` in Step 2 use it.
+Nothing here is optional or deferred behind a flag — `review-check`'s stage cascade and `default-smrt`'s
+`route` in Step 2 both use it.
 
 ```ts
 export type DecideAnswer =
@@ -1016,17 +1032,18 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
 (create, remove at the end), and the pi config repo symlink from Step 1 in place.
 
 1. **Credential seam (do this first)** — with `opencode-go` connected, run
-   `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/quick --no-session`. `quick`'s panel is the
-   `glm-flash` alias, so the seats are `glm-5.3-flash`, which pi does not catalogue; success is the
-   ` technical: opencode-go/glm-5.3-flash` line with no substitution after it, which proves the seat
-   built a model object for an uncatalogued id and pi resolved the provider credential. (`--model
-   fusion-matrix/glm-flash` is not a thing: an alias id is never registered as a pi model, so the id to
-   pass is always a fusion. The final text is not the signal — a panel of two bare `ZQX1` tokens is
-   correctly reported as unprocessable by the synthesis.) Confirm `details.seats[0]` shows
-   `model: glm-5.3-flash`, `provider: opencode-go`, and a `template` id that pi *does* catalogue. Then
-   point the same alias at a provider pi does not know (`{"aliases": {"glm-flash": {"providers":
+   `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/quick --no-session`. `quick` is one seat on
+   the `deepseek-flash` alias, so the seat is `deepseek-v4.1-flash`, which pi does not catalogue; success
+   is the ` technical: opencode-go/deepseek-v4.1-flash` line with no substitution after it, which proves
+   the seat built a model object for an uncatalogued id and pi resolved the provider credential.
+   (`--model fusion-matrix/<alias-id>` is not a thing: an alias id is never registered as a pi model, so
+   the id to pass is always a fusion. The final text is not the signal — one bare token is a degenerate
+   run, not a deliberation.) Confirm `details.seats[0]` shows `model: deepseek-v4.1-flash`,
+   `provider: opencode-go`, and a `template` id that pi *does* catalogue. Then point the same alias at a
+   provider pi does not know (`{"aliases": {"deepseek-flash": {"providers":
    ["nope", "opencode-go"]}}}`) and confirm the `missing provider` substitution appears and the run
-   still answers. **Verified live 2026-09-18**: both halves pass against `opencode-go`, with the
+   still answers. **Verified live 2026-09-18**, driven then through the `glm-flash` alias (the seat is
+   `deepseek-flash` now): both halves pass against `opencode-go`, with the
    substitution reading `technical glm-flash@nope → glm-flash@opencode-go (missing provider)`. Earlier the
    same day, **probed** with a synthesized model against `opencode-go`: `ctx.modelRegistry`
    is present in the extension context; `find("opencode-go", "glm-5.3")` returns a template with
@@ -1038,30 +1055,31 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    and E1 must know before it writes the resolver.
 
 2. **Model registration** — `cd /tmp/fusion-matrix-check && pi --list-models fusion` prints all
-   twelve: `standard`, `quick`, `solo`, `workhorse`, `sota`, `deep`, `brief`, `opinions`, `debate`,
-   `review`, `review-check`, `review-routed`, each under the `fusion-matrix` provider. Failure here
-   means the api id, manifest, or symlink is wrong.
+   eight: `cheap`, `quick`, `good`, `best`, `default-smrt`, `opinions`, `debate`, `review-check`,
+   each under the `fusion-matrix` provider. Failure here means the api id, manifest, or symlink is
+   wrong.
 3. **Config validation** — three separate project files, each run expected to fail at load with the
    named message: an unknown alias in a candidate list
-   (`{"fusions": {"deep": {"candidates": {"judge": ["no-such-alias"]}}}}` →
-   `unknown alias "no-such-alias"; known: …`); a mode whose roster does not match its shape
-   (`{"modes": {"committee": {"stages": [{"parallel": ["technical"], "input": "prompt"},
+   (`{"fusions": {"best": {"candidates": {"judge": ["no-such-alias"]}}}}` →
+   `unknown alias "no-such-alias"; known: …`); a mode whose roster does not match its shape (`best`'s
+   own `{"modes": {"pair-judged": {"stages": [{"parallel": ["technical"], "input": "prompt"},
    {"render": "panel"}]}}}` → names the missing candidate key); and a stage reading something nobody
    produced (`{"modes": {"lean": {"stages": [{"single": "synth-lean", "input": "panel+judge"}]}}}` →
    `stage 0 input "panel+judge" has no preceding single stage`). Remove each file afterwards.
 4. **Provider-layer fallback (same alias, new billing route)** — in
    `/tmp/fusion-matrix-check/.pi/pi-fusion-matrix.json` set
-   `{"aliases": {"deepseek-pro": {"providers": ["nope", "tp"]}}}`. A `fusion-matrix/deep` run must print
+   `{"aliases": {"deepseek-pro": {"providers": ["nope", "tp"]}}}`. A `review-check` run must print
    ` ├─ ↩ skeptic deepseek-pro@nope → deepseek-pro@tp (missing provider)`, complete, and —
-   driven through the `matrix` tool — report exactly one substitution whose `from` and `to` share
-   the same alias name. Remove the override afterwards. This verifies both the native-provider lookup
-   and that a stale provider name degrades per seat instead of aborting.
-   **Verified live 2026-09-18** with `["nope", "opencode-go"]` (the operator's second route had no
-   credential that day): the run printed ` ├─ ↩ skeptic deepseek-pro@nope → deepseek-pro@opencode-go
+   driven through the `matrix` tool with `fusion: "review-check"` — report exactly one substitution
+   whose `from` and `to` share the same alias name. Remove the override afterwards. This verifies both
+   the native-provider lookup and that a stale provider name degrades per seat instead of aborting.
+   **Verified live 2026-09-18** on the five-seat committee shipped then (`deep`; `review-check` ships
+   the same roster now), with `["nope", "opencode-go"]` (the operator's second route had no credential
+   that day): the run printed ` ├─ ↩ skeptic deepseek-pro@nope → deepseek-pro@opencode-go
    (missing provider)`, plus the same per-seat line for the judge, and every seat then answered on
    `opencode-go`.
 5. **Slot-layer fallback (new alias)** — in the same project file set
-   `{"fusions": {"deep": {"candidates": {"systems": ["kimi", "glm"]}}},
+   `{"fusions": {"review-check": {"candidates": {"systems": ["kimi", "glm"]}}},
    "aliases": {"kimi": {"providers": ["nope"]}}}`. The run must print
    ` ├─ ↩ systems kimi@nope → glm@go (missing provider)` and
    `details.substitutions[0].from`/`.to` must carry the two different alias names. This is the check
@@ -1069,14 +1087,13 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    **Verified live 2026-09-18**: ` ├─ ↩ systems kimi@nope → glm@opencode-go (missing provider)`, and the
    seat then answered on `opencode-go/glm-5.3`.
 6. **Empirical quota advance** — with the Go 5-hour window exhausted (observed 2026-09-18:
-   HTTP 429 `5-hour usage limit reached`), `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/deep
-   --no-session` must fall through to each alias's next provider and still answer, instead of the
-   121 s retry loop the reference implementation exhibits. **Observed 2026-09-18** while the Go weekly
-   window was exhausted: every seat advanced through its provider list on `quota` and the run still
-   completed, with no retry loop. The account is healthy again as of this writing, so the item cannot be
-   re-triggered on demand.
+   HTTP 429 `5-hour usage limit reached`), `/matrix review-check "Reply with exactly: ZQX1"` must fall
+   through to each alias's next provider and still answer, instead of the 121 s retry loop the
+   reference implementation exhibits. **Observed 2026-09-18** while the Go weekly window was exhausted:
+   every seat advanced through its provider list on `quota` and the run still completed, with no retry
+   loop. The account is healthy again as of this writing, so the item cannot be re-triggered on demand.
 7. **Prompt correctness under injected preludes** — with the full extension set loaded (context-mode
-   active), `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/standard --no-session` must return `ZQX1`, not a
+   active), `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/good --no-session` must return `ZQX1`, not a
    deliberation about context-mode's tool hierarchy. **Verified live 2026-09-18** with the full
    extension set loaded: the seats deliberated on the user's own question. The bare-token prompt is a
    degenerate deliberation, though — a panel of two identical `ZQX1` answers is reported as unprocessable
@@ -1086,12 +1103,13 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    `node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone` and
    `node scripts/semif-probe.mjs --backend http://127.0.0.1:8792/score` must both exit 0. Point
    `decide.defaultBackend` at `typesafe-stub` and run
-   `pi -p "Summarize the tradeoffs of optimistic locking" --model fusion-matrix/review-check --no-session`:
-   the judge element must resolve in place and `details.cascades[].answer` must carry the winner
-   (`choice`) and the full `probabilities` map. Kill the stubs afterwards.
+   `/matrix review-check "Summarize the tradeoffs of optimistic locking"`: the judge element must
+   resolve in place and `details.cascades[].answer` must carry the winner (`choice`) and the full
+   `probabilities` map. Kill the stubs afterwards.
 9. **TypeSafe live** — export `TYPESAFE_API_KEY`, set `decide.defaultBackend` to `typesafe`, and run
    `node scripts/typesafe-probe.mjs --backend https://api.typesafe.ai/v1/systemone`; it must exit 0 and
-   print the answering `model` (`jev-1.13.0`). Then run `fusion-matrix/review-check` live and confirm
+   print the answering `model` (`jev-1.13.0`). Then run `review-check` live
+   (`/matrix review-check "…"`) and confirm
    `details.verification[].result` carries three typed answers (`noul`, `noul`, `choice`) and that each
    `choice`/`score` answer has `confidence`. A `401` here means the key is absent or wrong, not that
    the wiring is broken. **Verified live 2026-09-18**: the probe exits 0 printing `jev-1.13.0`, and a
@@ -1102,20 +1120,21 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    satisfy (for example `noul` "the answer contains the exact phrase BANANA") and confirm the run
    still completes with one `⚠️ verify:` delta and an unchanged synthesis — verification must never
    rewrite or block; (b) point `route` at a `semif` backend and confirm the load error
-   `routing requires a backend that reports confidence; "semif" does not`; (c) run
-   `fusion-matrix/review-routed` on a genuinely complex prompt and confirm it does *not* route away (the
-   decision reports a non-trivial option), then on `"Reply with exactly: ZQX1"` and confirm it does,
-   with the ` routed` line and `details.routing` both present; (d) set `route.sufficientWhen.minConfidence`
-   to 1.0 and confirm the run proceeds as `fusion-matrix/review-routed` with `details.routing` recording
-   the declined route — the gate must be able to decline, and must say so. **Verified live 2026-09-18**:
-   (a) the live cascade run warned twice and kept its synthesis; (b) is a load error, asserted by the
-   validator; (c) `"Reply with exactly: ZQX1"` printed ` ├─ ↪ routed to quick (trivial, conf 1.00)` and
-   `quick`'s roster ran, while an architectural prompt printed
-   ` ├─ ↪ route declined (architectural); running review-routed`; (d) with `minConfidence: 1.0` the same
-   trivial answer declined — `conf 0.51 < 1` — and the run proceeded as `review-routed`.
-11. **Judge cascade** — with the decision stub returning a decisive high-confidence answer,
-    `fusion-matrix/review-check` must report ` ├─ ️ judge via decision (agrees, conf 0.9x) — skipping
-    deepseek-pro`, must *not* call the generative judge, and must record
+   `routing requires a backend that reports confidence; "semif" does not`; (c) run `default-smrt` on a
+   genuinely complex prompt and confirm it does *not* route away (the decision reports a non-trivial
+   option), then on `"Reply with exactly: ZQX1"` and confirm it does, with the ` routed` line and
+   `details.routing` both present; (d) set `route.sufficientWhen.minConfidence` to 1.0 and confirm the
+   run proceeds as `default-smrt` with `details.routing` recording the declined route — the gate must
+   be able to decline, and must say so. **Verified live 2026-09-18** on the router shipped then
+   (`review-routed`; `default-smrt` has since replaced it): (a) the live cascade run warned twice and
+   kept its synthesis; (b) is a load error, asserted by the validator; (c) `"Reply with exactly: ZQX1"`
+   printed ` ├─ ↪ routed to quick (trivial, conf 1.00)` and `quick`'s roster ran, while an
+   architectural prompt printed ` ├─ ↪ route declined (architectural); running review-routed`; (d) with
+   `minConfidence: 1.0` the same trivial answer declined — `conf 0.51 < 1` — and the run proceeded as
+   `default-smrt` rather than routing away.
+11. **Judge cascade** — with the decision stub returning a decisive high-confidence answer, a
+    `review-check` run (`/matrix review-check …`) must report ` ├─ ️ judge via decision (agrees,
+    conf 0.9x) — skipping deepseek-pro`, must *not* call the generative judge, and must record
     `details.cascades[0].sufficient === true`. With the stub returning `unclear` at 0.51, the same run
     must emit ` ├─ ↳ judge decision insufficient (…) → deepseek-pro`, call the generative judge, and
     record `details.cascades[0].sufficient === false` plus a `prior` string containing the decision's
@@ -1126,9 +1145,10 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     2` with no judge line at all, and ambiguous printed ` decision insufficient (agrees, conf 0.51, needs
     >= 0.85) — running stage 2` followed by the judge's own ` ├─ ⏳ judge: opencode-go/deepseek-v4-pro` line. The recorded
     `sufficient`/prior fields are asserted offline by `scripts/interp-check.mjs`.
-12. **Oversized state** — put a ~150 KB `{{panel}}` through `fusion-matrix/review-check` against the live
-    backend: the run must emit one `⚠️ decision state truncated` delta, still complete, and report the
-    decision. A `4xx` from the backend instead means truncation did not engage. The truncation path is
+12. **Oversized state** — put a ~150 KB `{{panel}}` through `review-check` (`/matrix review-check …`)
+    against the live backend: the run must emit one `⚠️ decision state truncated` delta, still
+    complete, and report the decision. A `4xx` from the backend instead means truncation did not
+    engage. The truncation path is
     verified offline against the real client — `truncateState` emits one `⚠️ decision state truncated for
     the backend (N tokens > 32768)` notice and the call still returns an answer, and a small state emits
     none. The live half needs a panel above the 32k budget, which no packaged fusion produces from a short
@@ -1137,39 +1157,42 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     the built-in `opencode-go` shape as `opencode-go-work`, with that account's key) and set
     `/tmp/fusion-matrix-check/.pi/pi-fusion-matrix.json` to
     `{"aliases": {"glm": {"providers": ["opencode-go-work", "opencode-go", "zai"]}}}`. A
-    `--model fusion-matrix/standard` run must execute on `opencode-go-work` (banner and
+    `--model fusion-matrix/best` run must execute on `opencode-go-work` (banner and
     `details.seats[].provider` show it) with no edit to any fusion and no credential in the project
     file. Remove the override afterwards. This is the check that per-repo billing needs no profile
     system — only a provider id, which is pi's vocabulary, not ours. The second-account half needs a
     credential this machine does not have; the mechanism it tests was exercised live 2026-09-18 with the
-    providers that do exist: a project file re-pointed `glm-flash` and `deepseek-pro` (items 1 and 4) and
-    re-ordered a slot (items 5 and 10), each time with no edit to any fusion and no credential in the
-    project file, and the banner plus the seat line named the route that answered.
+    providers that do exist: a project file re-pointed `glm-flash` and `deepseek-pro` (the aliases
+    items 1 and 4 named then) and re-ordered a slot (items 5 and 10), each time with no edit to any
+    fusion and no credential in the project file, and the banner plus the seat line named the route
+    that answered.
 14. **Independence from the fork** — `grep -rn "pi-fusion\|/Users/\|~/" extensions/ scripts/ matrix.json
     package.json` must return no import or path reference (only doc/comment mentions of the reference
     directory are allowed). `scripts/` is included because a harness importing by absolute path publishes
     the developer's layout. Then move the vendored reference fork out of the pi extensions directory, run
-    `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/deep --no-session`, and confirm it still works —
+    `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/best --no-session`, and confirm it still works —
     this is the check that the package runs with no developer checkout present. Restore the directory
     afterwards. **Verified live 2026-09-18** by disabling extension discovery outright and loading this
-    package by path — `pi -ne -e <repo>/extensions/pi-fusion-matrix -p "Reply with exactly: ZQX1" --model
-    fusion-matrix/solo --no-session` answered `ZQX1` — so nothing outside this repository is needed.
+    package by path — `pi -ne -e <repo>/extensions/pi-fusion-matrix -p "Reply with exactly: ZQX1"` against
+    the one-seat fusion shipped then (`solo`, since replaced by `cheap` and `quick`) — it answered `ZQX1`,
+    so nothing outside this repository is needed.
 15. **Alias is version-free** — `grep -rn "glm-5\|qwen3\.8\|deepseek-v4\|kimi-k3"` across
     `extensions/pi-fusion-matrix/` and `matrix.json` must match only `aliases.*.model`, fixtures, and
     comments — never `fusions`, `candidates`, or code. A `models.json` version bump (for example `deepseek-v4.1-flash` →
     `deepseek-v4-flash` on `go`) must change behavior with no edit to this repo; confirm by bumping it
-    and running `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/standard`: the run succeeds and
+    and running `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/quick`: the run succeeds and
     `details.models` shows the new vendor id behind the unchanged alias.
 
-16. **Mode shapes are cost contracts** — run each and count the calls. `fusion-matrix/solo` is one
-    seat and no judge; `fusion-matrix/workhorse` is two seats plus a merge, and the merged text must
-    differ from both seat texts (a merge that echoes a panel response is not a merge);
-    `fusion-matrix/sota` is the same shape with its frontier roster named in the banner;
-    `fusion-matrix/brief` is four calls instead of five, with the judge's single message carrying both
-    its analysis and the answer; `fusion-matrix/opinions` makes three calls, ends with labelled sections
-    and no generation, and records `render` in `details.stages`; `fusion-matrix/debate` makes nine
-    (3 seats x 3 rounds). A shape that quietly adds or drops a call is a bug: the call count is the
-    feature.
+16. **Mode shapes are cost contracts** — run each fusion in Step 2 and count the calls. `cheap` and
+    `quick` are one seat and no judge (1 call each); `good` is two seats plus a merge (3 calls), and
+    the merged text must differ from both seat texts (a merge that echoes a panel response is not a
+    merge); `best` is that pair plus a judge and a synthesis (4 calls), the judge's message carrying
+    its analysis and the synthesis answering from `panel+judge`; `default-smrt` is one seat plus its
+    route decision (1 + 1); `opinions` makes three calls, ends with labelled sections and no
+    generation, and records `render` in `details.stages`; `debate` makes nine (3 seats x 3 rounds);
+    and `review-check` makes five plus one stage decision (5 + 1), where a sufficient decision skips
+    the judge it gates, so both counts must appear in `details.stages`. A shape that quietly adds or
+    drops a call is a bug: the call count is the feature.
 17. **Debate envelopes** — in `fusion-matrix/debate`, every round after the first carries each *other*
     seat's previous-round output and never its own; `details.rounds[].inputs` records the envelope per
     seat per round. Then point one seat's only provider at `nope`: that seat is labelled and dropped,
@@ -1183,8 +1206,9 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     issue **one** backend request for the three seats (the stub records request count), and the stage
     that follows must render sorted `persona: score (confidence)` lines from `panel+weights`. Separately,
     a persona with `thinking: "off"` must show as omitted or off in `details.seats[].thinking`, while
-    `deep`'s judge (persona default `medium`, fusion override `high`) shows `high` — sampling is
-    configuration, and the run record must show what was actually requested.
+    `best`'s judge and synthesis show `high` (their fusion override) and `cheap`'s `technical` seat
+    shows `low` against its persona default `medium` — sampling is configuration, and the run record
+    must show what was actually requested.
 
 19. **Doctor** — `node scripts/doctor.mjs` and `/matrix-doctor` over the packaged config: exit 0 clean
     (offline), exit 1 with a named alias when a `model` is removed from `matrix.json` (config error),
@@ -1325,9 +1349,10 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
   (omp injects `pi.zod`; pi expects the extension to bring `typebox`). Peers are tried in order and each
   candidate is held to the same rule — realpath-verified to live inside the directory it was found in,
   with the ancestor walk bounded so a planted `$HOME/node_modules/…` is unreachable. **Verified
-  2026-09-18 on omp 18.2.6**: `omp --no-extensions -e …/index.js -p … --model fusion-matrix/solo`
-  answers `ZQX1`, and `standard` runs the file agent through the injected `pi.zod` schema, writing a
-  file via omp's own tool call.
+  2026-09-18 on omp 18.2.6**, against the set shipped then (the one-seat rung `solo`, now `cheap` and
+  `quick`): `omp --no-extensions -e …/index.js -p …` answers `ZQX1` for that fusion, and the fusion
+  that enabled the file agent then (`standard`; replaced in the trimmed set, and no shipped fusion
+  enables it now) wrote a file through omp's own `pi.zod` tool call.
 - **A provider can mix api flavours, so the template for an uncatalogued id decides the wire protocol.**
   pi's `opencode-go` serves glm-* over `openai-completions`, minimax/qwen3.8-max over
   `anthropic-messages`, and luna/grok over `openai-responses`; picking "the first sibling" sent a tool
