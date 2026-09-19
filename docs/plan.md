@@ -2,8 +2,8 @@
 
 ## Context
 
-`@quarkos/pi-fusion` ([upstream](https://github.com/QuarkOS/Pi-Fusion); a local vendored copy serves
-as the reference implementation) hardcodes one
+`@quarkos/pi-fusion` ([upstream](https://github.com/QuarkOS/Pi-Fusion) by Antigravity Pair, MIT;
+a local vendored copy serves as the reference implementation) hardcodes one
 provider per fusion: `applyProfile` sets `config.provider` and a single
 `providers[provider].defaultModels` map of five bare model ids, and `lib/api.js` builds one
 `ApiClient` with one baseUrl and one key. Its shape is also fixed in code — `mode` selects one of two
@@ -975,7 +975,10 @@ It is never imported, and that copy may be deleted once this plan's verification
 - `<vendored-fork>/lib/api.js` — the quota/credential/missing-model/transient taxonomy and the
   temperature-rejection memory that Step 3's table encodes.
 - `<vendored-fork>/pi-harness.config.json` — source of the persona prompts now in `prompts/*.md`
-  (transcribed already; keep the checkout until verification passes).
+  (transcribed verbatim; keep the checkout until verification passes). Upstream
+  [`@quarkos/pi-fusion`](https://github.com/QuarkOS/Pi-Fusion) by **Antigravity Pair** is **MIT, © 2026
+  Quark**, so the transcribed prompt files carry its notice: see
+  [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md).
 - `<vendored-fork>/index.js:485-506` — `extractPrompt`: the trailing-user-run prompt selection to
   reuse verbatim.
 

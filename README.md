@@ -3,7 +3,7 @@
 Several models deliberate; one answer comes back — and every step of how that happened, including
 **who got routed to what**, is configuration you can read and a run record you can audit.
 
-A [pi](https://pi.dev) extension — and one for [omp](https://github.com/oh-my-pi), the fork of the same
+A [pi](https://pi.dev) extension — and one for [omp](https://github.com/can1357/oh-my-pi), the fork of the same
 stack — for multi-model deliberation. One codebase, both harnesses. It owns resolution, routing, and
 execution: which model chain answers each seat, whether a cheap decision can answer instead of a model
 call, which shape a run takes, and which fusion a request should even use in the first place. It
@@ -566,6 +566,32 @@ blocking, and a confident route redirects while an unconfident one declines.
   once and reports. Plan-then-DAG execution is a scheduler, not a deliberation pipeline.
 - **No silent model substitution, ever.** An alias's `model` is exactly what runs; a finding about an
   id that moved is a doctor report, not an automatic repair.
+
+## Credits
+
+This project exists because someone else worked out how to make several models deliberate inside an
+agent, and published it.
+
+- **[pi-fusion](https://github.com/QuarkOS/Pi-Fusion)** (`@quarkos/pi-fusion`) by **Antigravity Pair** —
+  the multi-model deliberation harness the whole design is derived from: its pipeline order,
+  prompt-assembly headers, failure taxonomy, temperature-rejection memory, and `streamSimple` event
+  sequence are what this repository re-derives in its own code. The persona prompts in `prompts/*.md`
+  are transcribed verbatim from its `pi-harness.config.json`, so its **MIT licence (© 2026 Quark)** and
+  notice travel with them — see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). It is a reference,
+  never a dependency: nothing here imports it, and the locally-patched vendored copy that served as the
+  working reference is archived and can be deleted.
+- **[SemIf](https://github.com/TheoLeeCJ/SemIf)** (formerly OpenJev) by
+  [TheoLeeCJ](https://github.com/TheoLeeCJ), MIT — the local, zero-marginal-cost decision backend.
+  `tools/semif-server/` wraps it as published, importing `semif_phase1` rather than reimplementing the
+  model loading or the logit readout; no SemIf changes are made by this repository. SemIf is an
+  independent project, unaffiliated with TypeSafe, and nothing here implies otherwise.
+- **[TypeSafe](https://api.typesafe.ai)** ([docs](https://docs.typesafe.ai)) — the hosted decision
+  backend behind `route`, `verify`, and every cascade by default. `decide.js` is an original client for
+  its published `/v1/systemone` shapes.
+- **[pi](https://github.com/earendil-works/pi)** by Mario Zechner, and
+  **[omp](https://github.com/can1357/oh-my-pi)** by Stencil Labs, Inc. — the two harnesses this runs
+  inside, each of which owns the providers, credentials, transport, and accounting this file keeps
+  pointing at.
 
 ## Reference
 
