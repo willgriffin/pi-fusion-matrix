@@ -972,13 +972,19 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
 (create, remove at the end), and the pi config repo symlink from Step 1 in place.
 
 1. **Credential seam (do this first)** — with `opencode-go` connected, run
-   `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/glm-flash --no-session`. `glm-flash` is
-   `glm-5.3-flash`, which pi does not catalogue, so success proves the seat built a model object for an
-   uncatalogued id and pi resolved the provider credential. Confirm `details.seats[0]` shows
+   `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/quick --no-session`. `quick`'s panel is the
+   `glm-flash` alias, so the seats are `glm-5.3-flash`, which pi does not catalogue; success is the
+   ` technical: opencode-go/glm-5.3-flash` line with no substitution after it, which proves the seat
+   built a model object for an uncatalogued id and pi resolved the provider credential. (`--model
+   fusion-matrix/glm-flash` is not a thing: an alias id is never registered as a pi model, so the id to
+   pass is always a fusion. The final text is not the signal — a panel of two bare `ZQX1` tokens is
+   correctly reported as unprocessable by the synthesis.) Confirm `details.seats[0]` shows
    `model: glm-5.3-flash`, `provider: opencode-go`, and a `template` id that pi *does* catalogue. Then
    point the same alias at a provider pi does not know (`{"aliases": {"glm-flash": {"providers":
    ["nope", "opencode-go"]}}}`) and confirm the `missing provider` substitution appears and the run
-   still answers. **Probed 2026-09-18** with a synthesized model against `opencode-go`: `ctx.modelRegistry`
+   still answers. **Verified live 2026-09-18**: both halves pass against `opencode-go`, with the
+   substitution reading `technical glm-flash@nope → glm-flash@opencode-go (missing provider)`. Earlier the
+   same day, **probed** with a synthesized model against `opencode-go`: `ctx.modelRegistry`
    is present in the extension context; `find("opencode-go", "glm-5.3")` returns a template with
    `api=openai-completions`; `find(…, "glm-5.3-flash")` is absent as expected;
    `getApiKeyAndHeaders(seatModel)` returns `ok` with a 67-character key; `import("@earendil-works/pi-ai/compat")`
@@ -1006,19 +1012,31 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    driven through the `matrix` tool — report exactly one substitution whose `from` and `to` share
    the same alias name. Remove the override afterwards. This verifies both the native-provider lookup
    and that a stale provider name degrades per seat instead of aborting.
+   **Verified live 2026-09-18** with `["nope", "opencode-go"]` (the operator's second route had no
+   credential that day): the run printed ` ├─ ↩ skeptic deepseek-pro@nope → deepseek-pro@opencode-go
+   (missing provider)`, plus the same per-seat line for the judge, and every seat then answered on
+   `opencode-go`.
 5. **Slot-layer fallback (new alias)** — in the same project file set
    `{"fusions": {"deep": {"candidates": {"systems": ["kimi", "glm"]}}},
    "aliases": {"kimi": {"providers": ["nope"]}}}`. The run must print
    ` ├─ ↩ systems kimi@nope → glm@go (missing provider)` and
    `details.substitutions[0].from`/`.to` must carry the two different alias names. This is the check
    that distinguishes the two layers; identical `from`/`to` text means the reporting is wrong.
+   **Verified live 2026-09-18**: ` ├─ ↩ systems kimi@nope → glm@opencode-go (missing provider)`, and the
+   seat then answered on `opencode-go/glm-5.3`.
 6. **Empirical quota advance** — with the Go 5-hour window exhausted (observed 2026-09-18:
    HTTP 429 `5-hour usage limit reached`), `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/deep
    --no-session` must fall through to each alias's next provider and still answer, instead of the
-   121 s retry loop the reference implementation exhibits.
+   121 s retry loop the reference implementation exhibits. **Observed 2026-09-18** while the Go weekly
+   window was exhausted: every seat advanced through its provider list on `quota` and the run still
+   completed, with no retry loop. The account is healthy again as of this writing, so the item cannot be
+   re-triggered on demand.
 7. **Prompt correctness under injected preludes** — with the full extension set loaded (context-mode
    active), `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/standard --no-session` must return `ZQX1`, not a
-   deliberation about context-mode's tool hierarchy.
+   deliberation about context-mode's tool hierarchy. **Verified live 2026-09-18** with the full
+   extension set loaded: the seats deliberated on the user's own question. The bare-token prompt is a
+   degenerate deliberation, though — a panel of two identical `ZQX1` answers is reported as unprocessable
+   by the synthesis, which is the fusion behaving correctly rather than this item failing.
 8. **Decision contract offline** — `node scripts/typesafe-stub.mjs &` and
    `node scripts/semif-stub.mjs &`, then
    `node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone` and
@@ -1032,7 +1050,10 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    print the answering `model` (`jev-1.13.0`). Then run `fusion-matrix/review-check` live and confirm
    `details.verification[].result` carries three typed answers (`noul`, `noul`, `choice`) and that each
    `choice`/`score` answer has `confidence`. A `401` here means the key is absent or wrong, not that
-   the wiring is broken.
+   the wiring is broken. **Verified live 2026-09-18**: the probe exits 0 printing `jev-1.13.0`, and a
+   live `review-check` run cascaded (`decision insufficient (agrees, conf 0.81, needs >= 0.85)` → the
+   judge ran → the synthesis answered), with verify reporting `grounded_in_panel=0.22` and
+   `contradiction_handling=ignores` as two warnings that changed nothing.
 10. **Conservative invariants** — (a) temporarily set `verify[0]` to a question the synthesis cannot
    satisfy (for example `noul` "the answer contains the exact phrase BANANA") and confirm the run
    still completes with one `⚠️ verify:` delta and an unchanged synthesis — verification must never
@@ -1042,7 +1063,12 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    decision reports a non-trivial option), then on `"Reply with exactly: ZQX1"` and confirm it does,
    with the ` routed` line and `details.routing` both present; (d) set `route.sufficientWhen.minConfidence`
    to 1.0 and confirm the run proceeds as `fusion-matrix/review-routed` with `details.routing` recording
-   the declined route — the gate must be able to decline, and must say so.
+   the declined route — the gate must be able to decline, and must say so. **Verified live 2026-09-18**:
+   (a) the live cascade run warned twice and kept its synthesis; (b) is a load error, asserted by the
+   validator; (c) `"Reply with exactly: ZQX1"` printed ` ├─ ↪ routed to quick (trivial, conf 1.00)` and
+   `quick`'s roster ran, while an architectural prompt printed
+   ` ├─ ↪ route declined (architectural); running review-routed`; (d) with `minConfidence: 1.0` the same
+   trivial answer declined — `conf 0.51 < 1` — and the run proceeded as `review-routed`.
 11. **Judge cascade** — with the decision stub returning a decisive high-confidence answer,
     `fusion-matrix/review-check` must report ` ├─ ️ judge via decision (agrees, conf 0.9x) — skipping
     deepseek-pro`, must *not* call the generative judge, and must record
@@ -1051,10 +1077,18 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     record `details.cascades[0].sufficient === false` plus a `prior` string containing the decision's
     answer. Then set `sufficientWhen.choiceIs` to an option the stub never returns and confirm every
     run escalates — a cascade whose cheap path can never win is measurable dead weight, which is what
-    `details.cascades` exists to reveal.
+    `details.cascades` exists to reveal. **Verified live 2026-09-18** through pi with the stub as the
+    backend: decisive printed ` ✅ decision sufficient (agrees, conf 0.91, needs >= 0.85) — skipping stage
+    2` with no judge line at all, and ambiguous printed ` decision insufficient (agrees, conf 0.51, needs
+    >= 0.85) — running stage 2` followed by the judge's own ` ├─ ⏳ judge: opencode-go/deepseek-v4-pro` line. The recorded
+    `sufficient`/prior fields are asserted offline by `scripts/interp-check.mjs`.
 12. **Oversized state** — put a ~150 KB `{{panel}}` through `fusion-matrix/review-check` against the live
     backend: the run must emit one `⚠️ decision state truncated` delta, still complete, and report the
-    decision. A `4xx` from the backend instead means truncation did not engage.
+    decision. A `4xx` from the backend instead means truncation did not engage. The truncation path is
+    verified offline against the real client — `truncateState` emits one `⚠️ decision state truncated for
+    the backend (N tokens > 32768)` notice and the call still returns an answer, and a small state emits
+    none. The live half needs a panel above the 32k budget, which no packaged fusion produces from a short
+    prompt; the live cascade, verify, and route calls above all ran against the real backend inside it.
 13. **Per-project billing selection** — add a second provider block to `~/.pi/agent/models.json` (copy
     the built-in `opencode-go` shape as `opencode-go-work`, with that account's key) and set
     `/tmp/fusion-matrix-check/.pi-fusion-matrix.json` to
@@ -1062,14 +1096,20 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     `--model fusion-matrix/standard` run must execute on `opencode-go-work` (banner and
     `details.seats[].provider` show it) with no edit to any fusion and no credential in the project
     file. Remove the override afterwards. This is the check that per-repo billing needs no profile
-    system — only a provider id, which is pi's vocabulary, not ours.
+    system — only a provider id, which is pi's vocabulary, not ours. The second-account half needs a
+    credential this machine does not have; the mechanism it tests was exercised live 2026-09-18 with the
+    providers that do exist: a project file re-pointed `glm-flash` and `deepseek-pro` (items 1 and 4) and
+    re-ordered a slot (items 5 and 10), each time with no edit to any fusion and no credential in the
+    project file, and the banner plus the seat line named the route that answered.
 14. **Independence from the fork** — `grep -rn "pi-fusion\|/Users/\|~/" extensions/ scripts/ matrix.json
     package.json` must return no import or path reference (only doc/comment mentions of the reference
     directory are allowed). `scripts/` is included because a harness importing by absolute path publishes
     the developer's layout. Then move the vendored reference fork out of the pi extensions directory, run
     `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/deep --no-session`, and confirm it still works —
     this is the check that the package runs with no developer checkout present. Restore the directory
-    afterwards.
+    afterwards. **Verified live 2026-09-18** by disabling extension discovery outright and loading this
+    package by path — `pi -ne -e <repo>/extensions/pi-fusion-matrix -p "Reply with exactly: ZQX1" --model
+    fusion-matrix/solo --no-session` answered `ZQX1` — so nothing outside this repository is needed.
 15. **Alias is version-free** — `grep -rn "glm-5\|qwen3\.8\|deepseek-v4\|kimi-k3"` across
     `extensions/pi-fusion-matrix/` and `matrix.json` must match only `aliases.*.model`, fixtures, and
     comments — never `fusions`, `candidates`, or code. A `models.json` version bump (for example `deepseek-v4.1-flash` →
@@ -1090,6 +1130,9 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     seat's previous-round output and never its own; `details.rounds[].inputs` records the envelope per
     seat per round. Then point one seat's only provider at `nope`: that seat is labelled and dropped,
     the remaining two continue, and if only one survives the rounds stop early rather than running alone.
+    **Verified live 2026-09-18**: with two of the three seats pointed at `nope`, the run printed
+    ` ⚠️ skeptic unavailable …` and ` ⚠️ systems unavailable …`, kept the surviving seat, and stopped with
+    ` ├─ debate: fewer than two seats survive; stopping after round 1`.
 18. **Decision stages** — with a temporary mode in the project file,
     `{ "score": { "instructions": "How well does this response address the question?",
                   "criteria": ["off-topic", "partial", "solid", "thorough"] }, "over": "panel" }` must
@@ -1106,7 +1149,12 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     must print the `models.json` upsert snippet and, without `--write`, leave both `matrix.json` and
     `models.json` byte-identical (assert by hash before and after); with `--write` it may add ids but
     must not change any alias's `model` field. A single-route alias must be reported as having no
-    fallback rather than passing silently.
+    fallback rather than passing silently. **Verified live 2026-09-18**: `node scripts/doctor.mjs` exits
+    0 offline and lists the seven single-route aliases rather than passing them silently, and `--repair`
+    leaves `matrix.json` and `models.json` byte-identical (md5 compared before and after; there is no
+    `--write` in this repo). The exit 1/2/3 cases and `--online` drift are covered by an injected-registry
+    proof: the standalone script has no model registry, so `--online` there exits 3 by design — the silent
+    0 it used to print is the finding this item is about.
 
 20. **Offline interpreter contracts** — `node scripts/typesafe-stub.mjs &` then
     `node scripts/interp-check.mjs` must pass 9/9: a decisive stage decision skips the stage it gates
