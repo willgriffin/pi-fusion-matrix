@@ -1103,11 +1103,13 @@ Three shapes of failure, and each is handled where its facts are known:
   failed. A terminal event after a partial is forwarded verbatim instead — the harness owns the turn from
   there, and its own retry and auth-recovery machinery is what acts on it.
 - **The level was refused** — a level the target does not support is our request rather than its failure,
-  so the route is retried once without one, on the same per-model memory the seat path uses. It can
-  surface where the stream is created or where it is first pulled (pi-ai providers open the request
-  lazily), and the attempt is recorded either way: measured 2026-09-19, omp's
+  so the route is retried once without one. It can surface where the stream is created, where it is first
+  pulled, or as a first-event `error`, and the attempt is recorded either way: measured 2026-09-19, omp's
   `alibaba-token-plan/deepseek-v4.1-flash` answers *"Thinking effort low is not supported … Supported
-  efforts: high, max"* — five words of config, one refused route, and a turn that would otherwise die.
+  efforts: high, max"* — five words of config, one refused route, and a turn that would otherwise die. The
+  retry is the proxy's own and is *not* recorded in the seat path's per-model memory, because that memory
+  is a seat's reason to skip its own no-level retry: sharing it turned one recovered proxied turn into a
+  degraded `/matrix` on the same rung.
 - **Something already reached the caller** — the turn is the harness's from then on, because pi pushes
   the partial into its conversation on `start`; a second provider's `start` would append a second
   assistant message. The turn ends with the failure.
@@ -1384,7 +1386,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     0 it used to print is the finding this item is about.
 
 20. **Offline interpreter contracts** — `node scripts/typesafe-stub.mjs &` then
-    `node scripts/interp-check.mjs` must pass 32/32. The original nine: a decisive stage decision skips
+    `node scripts/interp-check.mjs` must pass 33/33. The original nine: a decisive stage decision skips
     the stage it gates with no judge call; an ambiguous one calls the judge and records a prior containing
     the cheap read's answer; debate makes 3 seats × 3 rounds with peers' opinions; a `score` stage issues
     **one** batched request for three seats; `verify` warns without blocking; a confident route redirects
