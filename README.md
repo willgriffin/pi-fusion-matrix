@@ -580,6 +580,14 @@ agent, and published it.
   notice travel with them — see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). It is a reference,
   never a dependency: nothing here imports it, and the locally-patched vendored copy that served as the
   working reference is archived and can be deleted.
+- **[fusion-harness](https://github.com/disler/fusion-harness)** by **IndyDevDan** (MIT, © 2026) — the
+  other reference, and the source of this project's deliberation surface: N-way independent opinions,
+  and debate rounds where each seat receives every other seat's labelled prior opinion, a failed seat is
+  dropped from later rounds, and no judge arbitrates. Its single-writer rule is why the file agent is
+  one seat and not many. Three of its shapes are deliberately *not* here, and that boundary is stated in
+  the spec: its sole-writer FUSION agent writes to disk, its gate-first loop iterates until green, and
+  its plan-then-DAG collaboration is a task scheduler. No text is copied from it; the patterns are
+  re-derived, as the notices file records.
 - **[SemIf](https://github.com/TheoLeeCJ/SemIf)** (formerly OpenJev) by
   [TheoLeeCJ](https://github.com/TheoLeeCJ), MIT — the local, zero-marginal-cost decision backend.
   `tools/semif-server/` wraps it as published, importing `semif_phase1` rather than reimplementing the

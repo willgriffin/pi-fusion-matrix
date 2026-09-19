@@ -23,8 +23,9 @@ fork stays installed and untouched, and is read as a *reference* for behaviors r
 nothing imports it at runtime.
 
 Required outcomes: (1) pipeline shapes defined in config — a stage list per mode, seats defined once
-as personas and filled by ordered candidate chains — including the two-model pair heart of one
-reference harness and the committee shape of the other; (2) version-free aliases so a vendor model
+as personas and filled by ordered candidate chains — including the pair-and-pick-one heart of
+[`disler/fusion-harness`](https://github.com/disler/fusion-harness) and the committee shape of
+[`@quarkos/pi-fusion`](https://github.com/QuarkOS/Pi-Fusion); (2) version-free aliases so a vendor model
 bump edits one field and no fusion; (3) a pluggable decision backend usable as a pipeline stage (a
 question, a scored fan-out, a cascade that escalates when its answer is not actionable), a
 post-synthesis check, or a routing gate — TypeSafe (`https://api.typesafe.ai/v1/systemone`, calibrated
@@ -414,6 +415,17 @@ Twelve fusions ship: `standard`, `quick` and `solo` (lean and single-seat shapes
 its merged-judge variant, and the panel-only grid), `debate` (three rounds against peers' opinions),
 `review` (the committee with a critique synthesis prompt), `review-check` (the cascaded committee plus
 a three-question verification), and `review-routed` (the committee behind a complexity route).
+
+Where each shape comes from:
+
+| shapes | from | which surfaces |
+|---|---|---|
+| `single`, `pair` (`workhorse`, `sota`) | [`disler/fusion-harness`](https://github.com/disler/fusion-harness) | `/fh-only` (one model) and the cheap/frontier pair commands |
+| `opinions`, `debate` | the same | `/fh-opinion` (N models answer independently, read-only, side by side, no merge) and `/fh-debate` (each round every surviving agent receives every other agent's labelled prior opinion; failed agents are dropped; no judge and no hidden merge) |
+| `committee`, `committee-merged`, `committee-cascaded`, and the seat assembly | [`@quarkos/pi-fusion`](https://github.com/QuarkOS/Pi-Fusion) | its panel → judge → synthesis pipelines, and the seat algorithm of Step 6 |
+
+fusion-harness's three other shapes are deliberately absent — see the boundary note under Assumptions
+(its disk-writing FUSION agent, its gate-first loop, and its plan-then-DAG collaboration).
 
 Persona prompts live in `prompts/*.md` and are referenced by path, so editing what a seat is told is
 an edit to a text file, not to code. A `prompt` may also be inline, and `fusions.<id>.prompts` overrides
@@ -1285,12 +1297,16 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
   stage *kinds* (`parallel`, `single`, `decide`, `score`, `render`), the connector set, and the assembly
   rules. That line is deliberate: a config language expressive enough to need interpreter branches of its
   own is a language whose validity nobody can check.
-- **Three shapes from the reference harness are out of scope, and that absence is a boundary rather than
-  a gap.** A stage that writes to disk needs a subprocess with tools, which is a different execution
-  model from a seat that is one model call; a gate *loop* that iterates until green needs loop constructs
-  and a feedback channel; and their plan-then-DAG-then-execute collaboration is a task scheduler, not a
-  deliberation pipeline. The `gate` entry under `verify` is deliberately report-only — it runs a command
-  once and records the result, and never feeds back into a stage.
+- **Three shapes from [`disler/fusion-harness`](https://github.com/disler/fusion-harness) are out of
+  scope, and that absence is a boundary rather than a gap.** Its sole-writer FUSION agent
+  (`/fh-fusion`) writes to disk and needs a subprocess with tools, which is a different execution
+  model from a seat that is one model call; its gate-first loop (`/fh-auto-validate`) iterates until
+  green and needs loop constructs and a feedback channel; and its plan-then-DAG-then-execute
+  collaboration (`/fh-collaborate`) is a task scheduler, not a deliberation pipeline. What *is* taken
+  from it is the deliberation surface — N-way independent opinions, and debate rounds where every seat
+  receives each other seat's labelled prior opinion while a failed seat is dropped and no judge
+  arbitrates. The `gate` entry under `verify` stays deliberately report-only: it runs a command once
+  and records the result, and never feeds back into a stage.
 - **pi-ai's `Context.systemPrompt` is the only place a system instruction goes.** Measured 2026-09-18: a
   system-*role message* alongside `tools` makes the call fail with
   `Cannot read properties of undefined (reading 'length')` on the same model that works without it. Seats

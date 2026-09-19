@@ -42,13 +42,58 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## fusion-harness
+
+- Upstream: <https://github.com/disler/fusion-harness>
+- Author: IndyDevDan · Licence: MIT · Copyright (c) 2026 IndyDevDan
+
+**What came from it.** Patterns, not text. Its deliberation surface was re-derived into this
+repository's own code: N-way independent opinions (`/fh-opinion`), debate rounds in which every seat
+receives every other seat's labelled prior opinion while a failed seat is dropped and no judge
+arbitrates (`/fh-debate`), and the single-writer rule that keeps one writer over a working directory.
+No source file, prompt file, or fixture from it is copied here — the suite of prompts in `prompts/*.md`
+comes from pi-fusion (above), and every probe row is this repository's own. Three of its shapes are
+deliberately out of scope, which `docs/plan.md` records as a boundary: the disk-writing sole-writer
+FUSION agent (`/fh-fusion`), the gate-first loop (`/fh-auto-validate`), and the plan-then-DAG
+collaboration (`/fh-collaborate`). This notice is included for attribution; the MIT text is reproduced
+below for completeness.
+
+```
+MIT License
+
+Copyright (c) 2026 IndyDevDan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## SemIf
 
 - Upstream: <https://github.com/TheoLeeCJ/SemIf> — formerly OpenJev, by TheoLeeCJ, **MIT**, an
   independent project unaffiliated with TypeSafe.
-- Used by `tools/semif-server/`, which wraps it unmodified: the server imports `semif_phase1` from a
-  SemIf checkout and reimplements neither the model loading nor the logit readout. SemIf is not
-  vendored into this repository.
+- **What came from it: the interface, not the implementation.** `tools/semif-server/` imports
+  `semif_phase1` from a SemIf checkout (`direct.score`, `core.load_causal_model`) rather than
+  reimplementing the model loading or the logit readout, and `decide.js` is an original client for the
+  row schema that `src/semif_phase1/core.py` validates. No SemIf source, fixture, or model weight is
+  copied or vendored here: the three rows in `scripts/semif-probe.mjs` are this repository's own, and
+  `--fixture` exists so an operator can run upstream's `examples/decisions.jsonl` against their own
+  deployment. The pinned sources and revisions in `matrix.json`'s `decide.models` name upstream's
+  models, which is configuration rather than copied material.
 
 ## TypeSafe
 
