@@ -6,7 +6,9 @@
  *     `toolcall_*` pairs so pi executes the file agent's writes, `done` carrying the tool blocks);
  *   - `route` before the pipeline and `verify` after it (both report-only);
  *   - the `callModel` seam the pipeline injects, so pipeline.js stays free of pi imports;
- *   - usage accumulation across every seat and decision.
+ *   - usage accumulation across every seat and decision;
+ *   - the proxy branch: a tool-bearing turn on a fusion that declares an executor goes to that model
+ *     with the harness's own context, and its events come back unaltered.
  *
  * Seats are pi-ai calls made with a model object built from pi's registry (resolve.js). The pi-ai
  * stream is consumed directly, which is also how the final answer streams token-by-token.
@@ -17,8 +19,8 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { resolveCandidates, seatRequest, label, isObject } from "./resolve.js";
-import { runPipeline, freshUsage, accumulateUsage, isSufficient } from "./pipeline.js";
-import { harnessName } from "./config.js";
+import { runPipeline, freshUsage, accumulateUsage, isSufficient, isThinkingRefusal } from "./pipeline.js";
+import { harnessName, executorOf, executorThinking } from "./config.js";
 
 /**
  * pi-ai's `Tool` shape. `parameters` arrives ready-made from the caller, because the schema builder is
@@ -322,6 +324,168 @@ export async function fileAgentStep({ config, fusion, prompt, synthesis, registr
 
 const FIXED_SYSTEM = "You are a file-saving agent. You receive a deliberation synthesis that may contain code, files, or project structure. Use the write tool to save every file the user would expect from the original request. Choose sensible filenames inferred from the request and the code's language. If the synthesis contains no files to save (e.g. it is a conceptual answer), do NOT call any tool — just reply with a brief one-line acknowledgment. Never explain at length; either call write tool(s) or give a one-line confirmation.";
 
+/* ------------------------------------------------------------------- proxy */
+
+/**
+ * The proxied turn: one model call that *is* the turn.
+ *
+ * `context.messages`, `context.tools`, and `context.systemPrompt` go to the writing alias's route
+ * untouched, and its events — tool calls included — come straight back. Nothing of this extension is
+ * added to the message: in a coding turn a status line lands in the conversation and corrupts the
+ * agent loop, so an unreachable target is an error message rather than a substitute answer, and every
+ * route the alias walked is recorded in `details.proxied.attempts` instead of written into the stream.
+ *
+ * The one rewrite is identity: a forwarded event is re-labelled as the fusion's registered model, which
+ * is what the harness matches on to decide whether an overflow or a truncated response is its own to
+ * recover from (`pi` 0.85.1 `dist/core/agent-session.js`, `_checkCompaction`'s `sameModel`). Everything
+ * else — content blocks, signed thinking, `responseId`, usage, provider session state — passes through,
+ * because prompt caching and response chaining are built on it.
+ */
+export async function proxyTurn({ config, fusion, executor, context, options, registry, getPi, model, push, end, message }) {
+  const attempts = [];
+  const fail = (reason, proxied = {}) => {
+    const text = `Fusion proxy error: ${reason}`;
+    const failed = message(text, { stopReason: "error", errorMessage: text, details: { proxied: { alias: executor.alias, ...proxied, attempts } } });
+    push({ type: "error", reason: "error", error: failed });
+    end(failed);
+  };
+
+  let streamSimple;
+  try {
+    ({ streamSimple } = await getPi());
+  } catch (error) {
+    return fail(error?.message ?? String(error));
+  }
+
+  // Per fusion, for the writing seat only. `undefined` means "whatever the harness sent", which is also
+  // what an unset level means: the harness resolves `auto` before we see it, so there is nothing to read.
+  const level = executorThinking(config, fusion);
+
+  // `executor.route` is the writer's *candidate* — whose object form carries the seat's own provider
+  // order and `modelOverride`, so the turn walks the route that seat's deliberation walks — unless
+  // `proxy.alias` names a different model outright, whose providers are then its own.
+  for (const resolved of resolveCandidates(config, executor.route)) {
+    const seat = await seatRequest(registry, resolved);
+    if (!seat.ok) {
+      attempts.push({ alias: resolved.alias, seat: label(resolved), reason: seat.reason, detail: seat.detail });
+      continue;
+    }
+
+    // The harness's own options, with the target's credential and headers: `signal`, `temperature`,
+    // `sessionId`, `metadata`, `thinkingBudgets`, and `providerSessionState` are all cache and
+    // attribution facts, and re-inventing them would pay full input price on every turn.
+    const targetOptions = { ...options, apiKey: seat.apiKey, headers: seat.headers };
+    if (level !== undefined) targetOptions.reasoning = level;
+
+    const identified = (part) => (part && (part.provider !== model.provider || part.model !== model.id)
+      ? { ...part, api: model.api, provider: model.provider, model: model.id }
+      : part);
+    const forwarded = (event) => {
+      if (!event.partial && !event.message && !event.error) return event;
+      const copy = { ...event };
+      if (event.partial) copy.partial = identified(event.partial);
+      if (event.message) copy.message = identified(event.message);
+      if (event.error) copy.error = identified(event.error);
+      return copy;
+    };
+
+    // The run record rides the terminal message, not `result()`: a consumer takes the turn from the
+    // `done`/`error` event's message (`agent-loop.js` replaces `context.messages[last]` with each
+    // partial and ends on the terminal event), so details attached only to the result would never be
+    // seen — measured 2026-09-19: pi persisted the pipeline's `details` and nothing for a proxied turn.
+    // `thinking` follows `targetOptions`, so a level this route had to drop is recorded as dropped
+    // rather than as the level the turn did not run at; `attempts` carries the refusal itself.
+    const proxied = { alias: resolved.alias, provider: resolved.provider, model: resolved.model, template: seat.template, thinking: targetOptions.reasoning ?? null, attempts };
+    const dressed = (part) => (part ? { ...identified(part), details: { ...(part.details ?? {}), proxied } } : part);
+
+    // A thinking level the target refuses is our request rather than its failure, and it can surface
+    // either where the stream is created or where it is first pulled — pi-ai providers open the request
+    // lazily, measured 2026-09-19 on omp's `Thinking effort low is not supported by
+    // alibaba-token-plan/deepseek-v4.1-flash`. Either way it is retried once without a level, on the
+    // same memory the seat path uses, and recorded in `attempts` rather than dropped quietly.
+    let retriedLevel = false;
+    const dropLevel = (detail) => {
+      if (retriedLevel || !targetOptions.reasoning || !isThinkingRefusal(detail)) return false;
+      retriedLevel = true;
+      // Deliberately *not* recorded in the seat path's per-model memory: that memory exists so a seat does
+      // not retry a level twice, and a suppressed retry in a proxied turn is a failed turn. A refusal here
+      // costs one extra call on the next turn rather than turning `/matrix` on the same rung into a
+      // degradation.
+      delete targetOptions.reasoning;
+      proxied.thinking = null;
+      return true;
+    };
+
+    // One route attempt is three things that can fail: creating the stream, pulling its first event, and
+    // the rest of the stream. The first two are recoverable — nothing has reached the harness, so the next
+    // provider, or this one without a refused level, still gets the turn — and the third is not, because pi
+    // pushes the partial into its conversation on `start` and a second provider's `start` would append a
+    // second assistant message.
+    const record = (detail) => {
+      attempts.push({ alias: resolved.alias, seat: label(resolved), reason: classifyFailure(detail), detail });
+    };
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let target;
+      try {
+        target = streamSimple(seat.model, context, targetOptions);
+      } catch (error) {
+        const detail = error?.message ?? String(error);
+        record(detail);
+        if (dropLevel(detail)) continue;
+        break;
+      }
+
+      let terminal = null;
+      let sent = 0;
+      // An `error` event *before* anything else is a route that never began rather than a turn that
+      // failed: pi has not seen a partial, so the same recovery as a throw applies and the failure is
+      // recorded. Past the first event nothing is recoverable, so it is forwarded verbatim.
+      let beforeStart = null;
+      try {
+        for await (const event of target) {
+          const copy = forwarded(event);
+          if (copy.type === "error" && sent === 0) {
+            beforeStart = copy.error?.errorMessage ?? "target reported an error before any event";
+            break;
+          }
+          if (copy.type === "done") { copy.message = dressed(copy.message); terminal = "done"; }
+          if (copy.type === "error") { copy.error = dressed(copy.error); terminal = "error"; }
+          push(copy);
+          sent += 1;
+        }
+      } catch (error) {
+        const detail = error?.message ?? String(error);
+        record(detail);
+        if (sent === 0 && dropLevel(detail)) continue;
+        if (sent === 0) break;
+        return fail(`target stream failed after ${sent} events: ${detail}`, { alias: resolved.alias, provider: resolved.provider, model: resolved.model, template: seat.template, thinking: proxied.thinking });
+      }
+      if (beforeStart !== null) {
+        record(beforeStart);
+        if (dropLevel(beforeStart)) continue;
+        break;
+      }
+
+      const final = dressed(await target.result());
+      // A target that ended without a terminal event leaves the harness's loop waiting on a stream that
+      // never completes. The result is the same message, so it becomes the terminal event itself.
+      if (terminal === null) {
+        push(final.stopReason === "stop" || final.stopReason === "length" || final.stopReason === "toolUse"
+          ? { type: "done", reason: final.stopReason, message: final }
+          : { type: "error", reason: final.stopReason === "aborted" ? "aborted" : "error", error: final });
+      }
+      end(final);
+      return;
+    }
+    // Every attempt on this route failed without reaching the caller, so the alias's next provider gets
+    // the turn.
+  }
+
+  const detail = attempts.map((a) => `${a.seat} (${a.reason}: ${String(a.detail ?? "").slice(0, 140)})`).join("; ") || `alias "${executor.alias}" has no providers`;
+  fail(`no route for "${executor.alias}" could be reached — ${detail}`);
+}
+
 /* ------------------------------------------------------------------ stream */
 
 /**
@@ -387,6 +551,15 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
         if (!fusion.mode) throw new Error(`unknown fusion "${fusionId}"`);
         const messages = context.messages ?? [];
         const prompt = extractPrompt(messages);
+
+        // The proxy branch, selected by invocation rather than by guessing: a fusion that declares an
+        // executor, reached with the harness's tools in the context, answers the turn itself. A context
+        // with no tools means no agent loop to serve, so the deliberation runs exactly as it always has.
+        const executor = executorOf(config, fusion);
+        if (executor && Array.isArray(context.tools) && context.tools.length > 0) {
+          await proxyTurn({ config, fusion, executor, context, options, registry, getPi, model, push, end: (final) => outer.end(final), message });
+          return;
+        }
 
         push({ type: "start", partial: { ...base, content: [] } });
         push({ type: "text_start", contentIndex: 0, partial: message("") });

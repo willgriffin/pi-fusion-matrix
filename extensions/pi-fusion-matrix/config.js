@@ -69,6 +69,12 @@ export function configPaths({ cwd = process.cwd() } = {}) {
 }
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+/**
+ * The literal a fusion writes for its writing seat to run a proxied turn at whatever level the harness
+ * sent. It lives here rather than in `THINKING_LEVELS` because it means nothing to a seat: a pipeline
+ * call is made by us, with a level we chose, and has no harness level to inherit.
+ */
+export const HARNESS_THINKING = "harness";
 export const STAGE_KINDS = ["parallel", "single", "decide", "score", "render"];
 const SLOT_KINDS = ["alias", "decide"];
 
@@ -206,6 +212,75 @@ export function interpolate(value, vars, where) {
   return value;
 }
 
+/* ------------------------------------------------------------------ executor */
+
+/**
+ * The first candidate that names an alias — a decision candidate names no model to proxy to. The candidate
+ * itself is kept, not just its alias name, because the object form carries the seat's own provider order,
+ * `modelOverride`, and thinking level, and the proxied turn has to walk the same route the seat's
+ * deliberation does.
+ */
+function firstCandidate(candidates) {
+  for (const candidate of candidates ?? []) {
+    if (typeof candidate === "string") return candidate;
+    if (isObject(candidate) && typeof candidate.alias === "string" && candidate.alias) return candidate;
+  }
+  return null;
+}
+
+/**
+ * The fusion's execute face: the writing seat — a pipeline's synthesis, or the single seat — and the
+ * alias it runs on. One definition declares both faces, so re-pointing the writer re-points what codes
+ * under that rung.
+ *
+ * `proxy.alias` re-points which model that seat runs on — on that alias's own provider chain — which is
+ * the case where the writer is a fine merge and a thin coder. A mode that ends in `render` (or a bare
+ * `decide`) writes nothing, so it declares no executor and always deliberates; the loader rejects a
+ * `proxy` on one, because its executor would have no persona and the thinking rule would have no row to
+ * read.
+ *
+ * @returns `{ persona, alias, candidate, declared, route }` or `null` when the fusion has no
+ * execute face. `route` is what the proxied turn resolves: the override's alias when one is declared, else
+ * the writing seat's candidate.
+ */
+export function executorOf(config, fusion) {
+  const stages = config?.modes?.[fusion?.mode]?.stages ?? [];
+  const persona = stages[stages.length - 1]?.single ?? null;
+  const declared = typeof fusion?.proxy?.alias === "string" && fusion.proxy.alias ? fusion.proxy.alias : null;
+  // A mode that writes nothing has no writing seat, so it declares no executor at all: `proxy.alias`
+  // overrides which model the *writer* runs on, and the loader rejects it where there is no writer —
+  // otherwise the executor would have no persona, and the thinking table would have no row for it.
+  if (persona === null) return null;
+  const candidate = firstCandidate(fusion?.candidates?.[persona]);
+  const alias = declared ?? (typeof candidate === "string" ? candidate : candidate?.alias);
+  if (!alias) return null;
+  // `route` is what the proxied turn resolves, and `candidate` is what the *writing seat* declared —
+  // they differ exactly when `proxy.alias` names a different model, whose providers are its own rather
+  // than the writer's, while the seat's thinking level still governs the turn.
+  return { persona, alias, candidate, declared, route: declared ?? candidate };
+}
+
+/**
+ * The thinking level a proxied turn runs at, or `undefined` for "the level the harness sent".
+ *
+ * The rule lives here because the harness resolves `auto` before we see it — a fused model receives
+ * `reasoning: "low"`, indistinguishable from a user-chosen `low` — so "was this auto?" is not a signal
+ * we have. Per fusion, for the writing seat: a concrete level runs exactly there, `"harness"` runs at
+ * whatever the harness sent, and saying nothing runs at the writing seat's own persona level if it
+ * declares one, else the harness's. Total, deterministic, and no config language to interpret.
+ */
+export function executorThinking(config, fusion) {
+  const writer = executorOf(config, fusion);
+  if (!writer) return undefined;
+  const declared = fusion?.thinking?.[writer.persona];
+  if (declared === HARNESS_THINKING) return undefined;
+  // The fusion's own override first, then the level the writing seat's candidate declares for itself,
+  // then the persona's — the same three the pipeline reads for that seat, so the two faces sample alike.
+  // A `proxy.alias` override changes which model acts, never which seat's thinking governs.
+  const candidate = isObject(writer.candidate) ? writer.candidate.thinking : undefined;
+  return declared ?? candidate ?? config?.personas?.[writer.persona]?.thinking;
+}
+
 /* ------------------------------------------------------------------ validation */
 
 /**
@@ -234,6 +309,14 @@ export function validateConfig(config, { sources } = {}) {
     }
     if (alias.temperature !== undefined && (alias.temperature < 0 || alias.temperature > 2)) {
       err(`alias "${name}" temperature ${alias.temperature} outside 0..2`);
+    }
+    // Declared metadata wins over pi's catalogue template for that provider, and for a fusion whose
+    // executor is this alias it is also what the registered model advertises — so a nonsense value is a
+    // load error rather than a truncation or a wrong context budget discovered mid-turn.
+    for (const field of ["maxTokens", "contextWindow"]) {
+      if (alias[field] !== undefined && (!Number.isInteger(alias[field]) || alias[field] < 1)) {
+        err(`alias "${name}" ${field} must be a positive integer`);
+      }
     }
   }
 
@@ -376,9 +459,37 @@ export function validateConfig(config, { sources } = {}) {
       });
     }
 
+    const executor = executorOf(config, fusion);
     for (const [persona, level] of Object.entries(fusion.thinking ?? {})) {
       if (!used.has(persona)) err(`fusion "${id}": thinking override for unused persona "${persona}"`);
-      if (!THINKING_LEVELS.includes(level)) err(`fusion "${id}": thinking "${level}" unknown`);
+      // `"harness"` is a proxied turn's rule and only the writing seat has one, so anywhere else it can
+      // mean nothing: a pipeline seat is called by us, at a level we choose.
+      if (level === HARNESS_THINKING) {
+        if (persona !== executor?.persona) {
+          err(`fusion "${id}": thinking "${HARNESS_THINKING}" is only legal for the writing seat${executor?.persona ? ` "${executor.persona}"` : ", and this mode has none"}`);
+        }
+      } else if (!THINKING_LEVELS.includes(level)) {
+        err(`fusion "${id}": thinking "${level}" unknown`);
+      }
+    }
+    if (fusion.proxy !== undefined) {
+      const declared = isObject(fusion.proxy) ? fusion.proxy.alias : undefined;
+      if (!isObject(fusion.proxy)) {
+        err(`fusion "${id}": proxy is not an object`);
+      } else if (typeof declared !== "string" || !declared) {
+        err(`fusion "${id}": proxy needs an alias; the writing seat already is the default`);
+      } else if (!aliases[declared]) {
+        err(`fusion "${id}": proxy alias "${declared}" is not an alias`);
+      } else if (!executorOf(config, fusion)) {
+        // `proxy.alias` re-points which model the writing seat runs on; it is not a way to give a mode
+        // that writes nothing an executor. Such a fusion has no persona, so the thinking table's "the
+        // writing seat's persona level" row would have nothing to read and a configured level would be
+        // dropped in silence — this load error is the loud version of that.
+        err(`fusion "${id}": proxy needs a writing seat (a mode whose last stage is a single seat); mode "${fusion.mode}" writes nothing, so the executor would have no persona to take a thinking level from`);
+      }
+      // A proxied turn runs no pipeline, so a route on the same fusion could never fire — two
+      // contradictory declarations rather than a preference between them.
+      if (fusion.route) err(`fusion "${id}": proxy and route cannot both be declared; a proxied turn has no deliberation to size`);
     }
     for (const persona of Object.keys(fusion.prompts ?? {})) {
       if (!used.has(persona)) err(`fusion "${id}": prompt override for unused persona "${persona}"`);

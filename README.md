@@ -6,14 +6,16 @@ Several models deliberate; one answer comes back — and every step of how that 
 A [pi](https://pi.dev) extension — and one for [omp](https://github.com/can1357/oh-my-pi), the fork of the same
 stack — for multi-model deliberation. One codebase, both harnesses. It owns resolution, routing, and
 execution: which model chain answers each seat, whether a cheap decision can answer instead of a model
-call, which shape a run takes, and which fusion a request should even use in the first place. It
+call, which shape a run takes, which fusion a request should even use in the first place, and whether a
+coding turn deliberates at all or goes to one model. It
 registers one model per fusion (`fusion-matrix/best`, `fusion-matrix/cheap`, …), runs each seat
 through the harness's own provider runtime and credential store, and returns a normal
 assistant-message stream. Providers, endpoints, credentials, transport, and accounting stay the
 harness's.
 
 Status: implemented and verified on both harnesses — eight fusions register and run on pi
-0.84.2/0.85.1 and on omp 18.2.6, from one codebase. The twenty-one verification items in
+0.84.2/0.85.1 and on omp 18.2.6, from one codebase, and a pinned rung answers agent turns with the
+harness's own tools. The twenty-five verification items in
 [`docs/plan.md`](docs/plan.md) carry their evidence inline, and the repository's own offline contracts
 (`scripts/interp-check.mjs`, `scripts/doctor.mjs`, both probes) pass with no keys and no network.
 
@@ -134,7 +136,57 @@ A fusion is reachable three ways:
 | command | `/matrix <id> <prompt>`, with `/matrix` alone using `defaultFusion` |
 
 `pi --list-models fusion` lists all eight, and `/matrix-info` prints the resolvable aliases with
-their routes, the modes, the fusions with their rosters, and the config layers loaded.
+their routes, the modes, the fusions with their rosters and their execute faces, and the config layers
+loaded.
+
+### A fusion as your session's model
+
+Every fusion is also a model id, so one can be pinned as the session's model
+(`modelRoles.default: fusion-matrix/quick`) — and then it gets *agent* turns: tools, the harness's own
+system prompt, and a conversation that grows. Those go to one model, not through the panel:
+
+```
+turn arrives (messages + tools + system prompt)
+  ├─ PROXY     forwarded verbatim to the fusion's executor; its events, tool calls included, come back
+  └─ PIPELINE  the panel above, when deliberating is what you asked for
+```
+
+The branch is decided by invocation, never guessed: a tool-bearing turn on a fusion that declares an
+executor proxies; `matrix`, `/matrix`, a rung whose mode writes nothing (`opinions`, `debate`), and any
+turn that arrives with no tools run the pipeline exactly as before. (With this extension loaded, the
+tool list is never empty — the `matrix` tool is in it — so a pinned rung proxies in practice; the
+tool-less turns are the harness's side-channel calls, a title or a compaction, and those keep the
+pipeline in phase 1.) Nothing is added to a proxied turn's message — no banner, no seat line, no
+substitutions — because in a coding turn that text lands in the conversation and corrupts the agent
+loop. A target that cannot be reached is an error message rather than a quiet deliberation; a level it
+does not support is dropped once and the turn continues; an error that arrives before anything else is a
+route that never began, so the next provider still gets the turn; and every route the alias walked is
+recorded in `details.proxied.attempts`.
+
+The executor is the fusion's **writing seat** — a pipeline's synthesis, or the single seat — so
+re-pointing that one seat re-points what codes under the rung:
+
+| rung | deliberate face | execute face |
+|---|---|---|
+| `cheap` | one `qwen-flash` seat @low | `qwen-flash` @low |
+| `quick` | one `deepseek-flash` seat @low | `deepseek-flash` @low |
+| `good` | two flash seats + a `qwen-flash` merge | `qwen-flash` @low |
+| `best` | `deepseek-pro` + `glm`, judge @high, synthesis @high | `glm-flash` @high |
+| `default-smrt` | one `deepseek-flash` seat, routed by a decision | `deepseek-flash` @low |
+| `review-check` | five-seat committee, cascaded | `kimi` @harness |
+| `opinions`, `debate` | three seats, rendered | — every turn deliberates |
+
+`proxy: { "alias": "gpt" }` re-points which model the writing seat acts as, for when the writer is a
+fine merge and a thin coder — it is not a way to give a `render`-ended mode an execute face, and the
+loader rejects a `proxy` on one, because its executor would have no persona for the level rule to read.
+The proxied turn walks that seat's *candidate*, so a per-seat provider order, `modelOverride`, or
+thinking level applies to executing exactly as it does to deliberating; with `proxy.alias` set, that
+alias's own provider chain answers instead, at the thinking level the writing seat declares. The writing
+seat's
+`thinking` takes a concrete level, `"harness"` (run at whatever level the harness sent — it resolves
+`auto` before the extension ever sees it), or nothing (the writing seat's persona level, else the
+harness's). A proxying fusion registers its executor's context window and max output rather than a
+facade, so a session's own context budget is the model's real one.
 
 ## The primitives
 
@@ -155,7 +207,7 @@ level, never a silent swap of one seat inside a run. `route` picks a fusion, not
 synthesis model; a per-seat choice is a candidate list, which is ordered, validated, and reported.
 Nothing swaps a model mid-run to make something fit.
 
-The line the design draws: **shapes and seats are configuration, the executor is code.** Adding a
+The line the design draws: **shapes and seats are configuration, the interpreter is code.** Adding a
 pipeline shape or re-pointing a seat is a `matrix.json` edit. The stage *kinds*, the connector set, and
 the assembly rules are code, because a config language expressive enough to need interpreter branches
 of its own is one whose validity nobody can check. Everything below is validated at load: a config that
@@ -182,9 +234,12 @@ account's outage. The name is what every fusion mentions, so a vendor release th
 `deepseek-v4.1-flash` to `deepseek-v4-flash` is a one-field edit that no fusion, seat, or mode sees.
 
 The object form (`{ "id": ..., "modelOverride": ... }`) is for when two providers name the same model
-differently. `maxTokens` and `reasoning` are optional per alias, and a declared value wins over pi's
-catalogue template for that provider — an undeclared one leaves the template alone, because those
-fields feed the request's output envelope and pi's thinking-budget maths.
+differently. `maxTokens`, `contextWindow`, and `reasoning` are optional per alias, and a declared value
+wins over pi's catalogue template for that provider — an undeclared one leaves the template alone,
+because those fields feed the request's output envelope and pi's thinking-budget maths. They also decide
+what a fusion whose executor is that alias registers to the harness, so declaring them is how a re-pointed
+writer keeps a real context window instead of the package default (see
+[A fusion as your session's model](#a-fusion-as-your-sessions-model)).
 
 ### `persona` — a seat: what it is told, how it samples
 
@@ -271,6 +326,26 @@ must appear in the roster and nothing may appear that the mode does not use — 
 mismatch rather than orphaning a model silently. Optional keys: `thinking` and `prompts` (per-persona
 overrides), `fileAgent`, `maxAdvance` (how many candidates one seat may walk, default 3), `verify`, and
 `route`.
+
+That roster is one face of the definition; the other is what answers an *agent* turn. The writing seat
+— the persona of the mode's final `single` stage — is the fusion's executor, unless `proxy.alias` names
+another one:
+
+```json
+{
+  "fusions": {
+    "best": {
+      "mode": "pair-judged",
+      "proxy": { "alias": "gpt" },
+      "candidates": { "technical": ["deepseek-pro"], "skeptic": ["glm"], "judge": ["deepseek-flash"], "synth": ["glm-flash"] }
+    }
+  }
+}
+```
+
+`proxy` and `route` on one fusion is a load error — a proxied turn runs no pipeline, so the route could
+never fire — and `thinking: { "synth": "harness" }` is legal for the writing seat alone, since no other
+seat has a harness level to inherit.
 
 ### `candidate` — one slot in a roster, three forms
 
@@ -473,6 +548,12 @@ The run record is the audit trail: `details.stages` (kind and calls per stage �
 `details.verification`, `details.rounds`, and `details.usage` — with `seatErrors` and `substitutions`
 always present, empty arrays included.
 
+A proxied turn is one model call, so it records `details.proxied` instead: the `alias`, `provider`,
+vendor `model`, and `template` that answered, the `thinking` level it ran at (`null` when the target
+refused the declared level and the turn ran without one), and `attempts` — every route the alias walked
+before one answered. Nothing about it is in the message, which is the point; the record is where a
+proxied turn's routing is auditable.
+
 ## What leaves your machine
 
 Two things, and both are worth knowing before the first run:
@@ -532,7 +613,7 @@ and the bare `/matrix`.
 ## Commands, the tool, and the doctor
 
 - `/matrix <id> <prompt>` — run a named fusion; `/matrix` alone uses `defaultFusion`.
-- `/matrix-info` — resolvable aliases with their routes, modes, fusions with rosters, backends, layers.
+- `/matrix-info` — resolvable aliases with their routes, modes, fusions with rosters and execute faces, backends, layers.
 - `/matrix-doctor` (`--online`, `--repair`) — validate the config, check provider connectivity, and
   report catalogue drift. `node scripts/doctor.mjs` runs the same checks outside a session:
 
@@ -555,7 +636,7 @@ quota blocks a live one:
 
 ```bash
 node scripts/typesafe-stub.mjs & node scripts/semif-stub.mjs &      # local backends
-node scripts/interp-check.mjs                                       # 9 interpreter contracts
+node scripts/interp-check.mjs                                       # 33 interpreter contracts
 node scripts/doctor.mjs                                             # config + connectivity
 node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone
 node scripts/semif-probe.mjs    --backend http://127.0.0.1:8792/score
@@ -568,7 +649,17 @@ the pinned model in `matrix.json`).
 `interp-check` covers the contracts a refactor breaks first: a sufficient stage decision skips the
 stage it gates with no judge call, an ambiguous one escalates with a prior, debate makes 3 seats × 3
 rounds with peers' opinions, a `score` stage issues **one** batched request, `verify` warns without
-blocking, and a confident route redirects while an unconfident one declines.
+blocking, and a confident route redirects while an unconfident one declines. Its proxy cases drive the
+real stream against a stub peer: the harness's `messages`, `tools`, and `systemPrompt` forwarded
+byte-identical, the target's tool call reaching the caller, the message holding the model's output and
+nothing else, no seat call, `details.proxied` on the terminal event's message, a render-ended rung still
+deliberating with tools present, the thinking table's cases, an unresolvable route advancing with the
+attempt recorded, a refused level dropped once, a route that dies mid-stream ending the turn, and an
+unreachable executor ending as an error instead of a deliberation, the writing seat's candidate object
+pinning the proxied route and level, and the execute face's `"harness"` literal never reaching a seat.
+The same file asserts what the extension *registers* — the executor's numbers and thinking capability per
+rung — what `/matrix-info` prints for each fusion's execute face, and each of the loader's seven proxy
+rules by name.
 
 ## What it does not do
 
@@ -578,6 +669,9 @@ blocking, and a confident route redirects while an unconfident one declines.
   every other extension disabled.
 - **No stages that write to disk, no gate loops, no task DAG.** A seat is one model call; a gate runs
   once and reports. Plan-then-DAG execution is a scheduler, not a deliberation pipeline.
+- **No panel inside the agent loop.** A proxied turn is one model call. Deliberation stays behind
+  `matrix`, `/matrix`, or an explicitly invoked rung — four calls per agent turn is exactly what proxy
+  mode exists to avoid — and pi/omp keep the loop, the tools, and the approval gates either way.
 - **No silent model substitution, ever.** An alias's `model` is exactly what runs; a finding about an
   id that moved is a doctor report, not an automatic repair.
 
@@ -602,9 +696,10 @@ agent, and published it.
   and debate rounds where each seat receives every other seat's labelled prior opinion, a failed seat is
   dropped from later rounds, and no judge arbitrates. Its single-writer rule is why the file agent is
   one seat and not many. Three of its shapes are deliberately *not* here, and that boundary is stated in
-  the spec: its sole-writer FUSION agent writes to disk, its gate-first loop iterates until green, and
-  its plan-then-DAG collaboration is a task scheduler. No text is copied from it; the patterns are
-  re-derived, as the notices file records.
+  the spec: its sole-writer FUSION agent writes to disk through a subprocess with tools — served here by
+  proxy mode, where the harness holds the tools and the write, rather than by a stage — its gate-first
+  loop iterates until green, and its plan-then-DAG collaboration is a task scheduler. No text is copied
+  from it; the patterns are re-derived, as the notices file records.
 - **[SemIf](https://github.com/TheoLeeCJ/SemIf)** (formerly OpenJev) by
   [TheoLeeCJ](https://github.com/TheoLeeCJ), MIT — the local, zero-marginal-cost decision backend.
   `tools/semif-server/` wraps it as published, importing `semif_phase1` rather than reimplementing the

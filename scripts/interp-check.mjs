@@ -14,10 +14,13 @@
  * It caught a real gap on first run: stage-level `sufficientWhen` was unimplemented, so a converged
  * panel still paid for the judge.
  */
-import { loadMatrixConfig } from "../extensions/pi-fusion-matrix/config.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { loadMatrixConfig, mergeConfig, validateConfig } from "../extensions/pi-fusion-matrix/config.js";
 import { runPipeline } from "../extensions/pi-fusion-matrix/pipeline.js";
 import { createDecide } from "../extensions/pi-fusion-matrix/decide.js";
-import { routeFusion, verifyRun } from "../extensions/pi-fusion-matrix/run.js";
+import { routeFusion, verifyRun, createFusionStream } from "../extensions/pi-fusion-matrix/run.js";
 
 // The packaged layer only: a developer's machine-wide layer and a project layer would otherwise decide
 // what "N/N" means, and this check has to be the same number on every machine.
@@ -134,6 +137,383 @@ check("route: confident match routes to the target",
 await setMode("ambiguous");
 routed = await routeFusion({ config, fusion: config.fusions.router, prompt: "x", decide, emit: silent });
 check("route: low confidence declines and says so", Boolean(routed.routing?.declined), routed.routing?.declined ?? "no decline recorded");
+
+/* --------------------------------------------------------------------- proxy */
+
+// The peer the proxy branch streams through: pi's own `streamSimple` shape — an async-iterable of
+// events plus `result()` — recording its arguments, so the check asserts the forwarding rather than
+// trusting it. `model.id` is what the target reports back, and the fusion's own id is what must reach
+// the harness, because that is the identity pi matches on for overflow and truncation recovery.
+const makeProxyPeer = (seen, { text = "read it back", tool = null, streamModel = null } = {}) => ({
+  streamSimple: (model, context, options) => {
+    seen.push({ model, context, options });
+    const reported = streamModel ? { ...model, ...streamModel } : model;
+    const usage = { input: 5, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 10, reasoning: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+    const blocks = [{ type: "text", text }, ...(tool ? [{ type: "toolCall", id: tool.id, name: tool.name, arguments: tool.arguments }] : [])];
+    const partial = () => ({ role: "assistant", api: reported.api, provider: reported.provider, model: reported.id,
+      content: blocks, usage, stopReason: tool ? "toolUse" : "stop", timestamp: Date.now() });
+    const final = partial();
+    const events = [
+      { type: "start", partial: { ...partial(), content: [] } },
+      { type: "text_start", contentIndex: 0, partial: partial() },
+      { type: "text_delta", contentIndex: 0, delta: text, partial: partial() },
+      { type: "text_end", contentIndex: 0, content: text, partial: partial() },
+      ...(tool ? [{ type: "toolcall_start", contentIndex: 1, partial: partial() }, { type: "toolcall_end", contentIndex: 1, toolCall: blocks[1], partial: partial() }] : []),
+      { type: "done", reason: final.stopReason, message: final },
+    ];
+    return {
+      async *[Symbol.asyncIterator]() { yield* events; },
+      result: async () => final,
+    };
+  },
+});
+
+const registryWith = (over) => ({ ...registry, ...over });
+const fusionStream = (peer, sessionRegistry = registry) => createFusionStream({
+  config, sources, getRegistry: () => sessionRegistry, decide, callModel,
+  getPi: async () => ({ streamSimple: peer.streamSimple, from: "stub", harness: "stub" }),
+  getWriteParameters: async () => ({}),
+});
+const fusionModel = (id) => ({ ...fakeModel("fusion-matrix", id), api: "fusion-matrix" });
+const driveStream = async (stream) => {
+  const events = [];
+  for await (const event of stream) events.push(event);
+  return { events, final: await stream.result() };
+};
+const textOfEvents = (events) => events.filter((e) => e.type === "text_delta").map((e) => e.delta).join("");
+// The harness's own turn: a coding prompt, a tool set, and a level it already resolved.
+const harnessContext = {
+  systemPrompt: "You are the harness's coding agent. Read files before editing them.",
+  messages: [{ role: "user", content: "what does package.json call this project?" }],
+  tools: [{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } } } }],
+};
+const harnessOptions = { sessionId: "session-1", reasoning: "high", temperature: 0.3, metadata: { user_id: "u1" }, thinkingBudgets: { high: 4096 } };
+
+// 7. proxy: the harness's context goes to the writing seat's alias verbatim, and its events come back
+const seen = [];
+calls.length = 0;
+const proxied = await driveStream(fusionStream(makeProxyPeer(seen, { text: "pi-fusion-matrix.", tool: { id: "call_1", name: "read", arguments: { path: "package.json" } } }))(fusionModel("quick"), harnessContext, harnessOptions));
+const forwarded = seen[0];
+check("proxy: messages, tools, and systemPrompt forwarded verbatim",
+  seen.length === 1 && JSON.stringify(forwarded.context) === JSON.stringify(harnessContext),
+  `calls=${seen.length}, context=${JSON.stringify(forwarded.context).slice(0, 80)}`);
+// The writer defines the executor: `quick`'s writing seat is `technical` on `deepseek-flash`, and its
+// declared level is `low` — not the harness's `high`.
+check("proxy: the writing alias answers at the fusion's declared level",
+  forwarded.model.id === "deepseek-v4.1-flash" && forwarded.options.reasoning === "low" && forwarded.options.sessionId === "session-1" && forwarded.options.temperature === 0.3,
+  `model=${forwarded.model.id} @${forwarded.options.reasoning} session=${forwarded.options.sessionId}`);
+check("proxy: the target's tool call reaches the caller",
+  proxied.events.some((e) => e.type === "toolcall_end" && e.toolCall?.name === "read")
+    && proxied.final.content.some((b) => b.type === "toolCall" && b.arguments?.path === "package.json"),
+  `events=${proxied.events.map((e) => e.type).join(",")}`);
+// No decoration: the message is the model's own output, and no seat ran.
+check("proxy: the message is the model's output and nothing else",
+  textOfEvents(proxied.events) === "pi-fusion-matrix." && calls.length === 0 && !/[├└│]/.test(textOfEvents(proxied.events)),
+  `text=${JSON.stringify(textOfEvents(proxied.events).slice(0, 60))}, seat calls=${calls.length}`);
+check("proxy: reported as the fusion's model, with the executor in details",
+  proxied.final.provider === "fusion-matrix" && proxied.final.model === "quick" && proxied.final.stopReason === "toolUse"
+    && proxied.final.details?.proxied?.alias === "deepseek-flash" && proxied.final.details?.proxied?.provider === "opencode-go"
+    && proxied.final.details?.proxied?.model === "deepseek-v4.1-flash" && Array.isArray(proxied.final.details?.proxied?.attempts),
+  JSON.stringify(proxied.final.details?.proxied));
+// The harness takes the turn from the terminal event's message, so the record has to be there and not
+// only on `result()` — that is the difference between a readable transcript and an empty one.
+check("proxy: the terminal event carries the run record",
+  proxied.events.find((e) => e.type === "done")?.message?.details?.proxied?.alias === "deepseek-flash"
+    && proxied.events.find((e) => e.type === "done")?.message?.provider === "fusion-matrix",
+  JSON.stringify(proxied.events.find((e) => e.type === "done")?.message?.details?.proxied));
+
+// 8. thinking precedence: `"harness"` runs at the level the harness sent, and an absent declaration
+// falls to the writing seat's persona level (`technical` declares `medium` in the packaged config).
+config.fusions["proxy-harness"] = { mode: "single", thinking: { technical: "harness" }, candidates: { technical: ["glm"] } };
+config.fusions["proxy-bare"] = { mode: "single", candidates: { technical: ["glm"] } };
+const harnessSeen = [];
+await driveStream(fusionStream(makeProxyPeer(harnessSeen))(fusionModel("proxy-harness"), harnessContext, harnessOptions));
+const bareSeen = [];
+await driveStream(fusionStream(makeProxyPeer(bareSeen))(fusionModel("proxy-bare"), harnessContext, harnessOptions));
+check("thinking: `harness` forwards the level the harness sent",
+  harnessSeen[0].options.reasoning === "high", `level=${harnessSeen[0].options.reasoning}`);
+check("thinking: nothing declared falls to the writing seat's persona level",
+  bareSeen[0].options.reasoning === "medium", `level=${bareSeen[0].options.reasoning}`);
+
+// 9. branch selection: a rung with no writing seat still deliberates when tools are present, and the
+// `matrix` tool path (`runOnce`) never proxies because it calls the pipeline directly.
+calls.length = 0;
+const deliberate = await driveStream(fusionStream(makeProxyPeer([]))(fusionModel("opinions"), harnessContext, harnessOptions));
+check("branch: a fusion with no writing seat still deliberates with tools present",
+  calls.length === 3 && deliberate.events.every((e) => e.type !== "toolcall_end") && /├─/.test(textOfEvents(deliberate.events))
+    && deliberate.final.details?.proxied === undefined,
+  `seat calls=${calls.length}, decorated=${/├─/.test(textOfEvents(deliberate.events))}`);
+
+// 10. an alias route that cannot resolve advances quietly to the next, reported in `details` only —
+// and a target that cannot be reached at all is an error message, never a substitute deliberation.
+config.aliases["proxy-partial"] = { model: "glm-5.3", providers: ["nope", "opencode-go"], contextWindow: 1000, maxTokens: 100 };
+config.fusions["proxy-partial"] = { mode: "single", candidates: { technical: ["proxy-partial"] } };
+config.fusions["proxy-dead"] = { mode: "single", candidates: { technical: ["proxy-partial"] } };
+const partialSeen = [];
+calls.length = 0;
+const partial = await driveStream(fusionStream(makeProxyPeer(partialSeen), registryWith({ find: (provider, id) => (provider === "nope" ? undefined : fakeModel(provider, id)) }))(fusionModel("proxy-partial"), harnessContext, harnessOptions));
+const partialDetails = partial.final.details?.proxied;
+check("proxy: an unresolvable route advances without decorating the message",
+  partialSeen.length === 1 && partialDetails?.attempts?.length === 1
+    && partialDetails.attempts[0].reason === "missing provider" && !/[├└│]/.test(textOfEvents(partial.events))
+    && calls.length === 0,
+  `attempts=${JSON.stringify(partialDetails?.attempts)}, text=${JSON.stringify(textOfEvents(partial.events).slice(0, 40))}`);
+calls.length = 0;
+const dead = await driveStream(fusionStream(makeProxyPeer([]), registryWith({ getApiKeyAndHeaders: async () => ({ ok: false, error: "no credential for opencode-go" }) }))(fusionModel("proxy-dead"), harnessContext, harnessOptions));
+check("proxy: an unreachable executor is an error, not a deliberation",
+  dead.final.stopReason === "error" && /no credential/.test(dead.final.errorMessage ?? "")
+    && dead.final.details?.proxied?.attempts?.length === 2 && calls.length === 0,
+  `stop=${dead.final.stopReason}, ${dead.final.details?.proxied?.attempts?.map((a) => a.reason).join(",")}`);
+
+// 11. a level the target does not support is our request, not the target's failure: retried once
+// without one, recorded, and the turn still runs. `quick`'s writing seat declares `low`, which
+// alibaba-token-plan's deepseek lane refuses ("Supported efforts: high, max", measured live).
+const refusalSeen = [];
+const refusingPeer = {
+  streamSimple: (model, context, options) => {
+    refusalSeen.push(options.reasoning);
+    if (options.reasoning) throw new Error(`Thinking effort ${options.reasoning} is not supported by ${model.provider}/${model.id}. Supported efforts: high, max`);
+    return makeProxyPeer([]).streamSimple(model, context, options);
+  },
+};
+const refusedLevel = await driveStream(fusionStream(refusingPeer)(fusionModel("quick"), harnessContext, harnessOptions));
+check("proxy: an unsupported thinking level is dropped once and recorded",
+  refusalSeen.join(",") === "low," && refusedLevel.final.stopReason === "stop"
+    && refusedLevel.final.details?.proxied?.thinking === null
+    && /not supported/.test(refusedLevel.final.details?.proxied?.attempts?.[0]?.detail ?? "")
+    && textOfEvents(refusedLevel.events) === "read it back",
+  `levels=${JSON.stringify(refusalSeen)}, recorded=${JSON.stringify(refusedLevel.final.details?.proxied?.thinking)}, attempts=${JSON.stringify(refusedLevel.final.details?.proxied?.attempts?.map((a) => a.reason))}`);
+
+// 12. a route that fails before anything reached the caller advances to the next provider, exactly as
+// a seat does; 13. one that fails after `start` cannot, because pi has already pushed that partial into
+// its conversation — the turn ends with the failure instead of a second provider's second start.
+config.aliases["proxy-flaky"] = { model: "glm-5.3", providers: ["opencode-go", "zai"], contextWindow: 1000, maxTokens: 100 };
+config.fusions["proxy-flaky"] = { mode: "single", candidates: { technical: ["proxy-flaky"] } };
+const flakySeen = [];
+const flakyPeer = {
+  streamSimple: (model, context, options) => {
+    flakySeen.push(model.provider);
+    if (model.provider === "opencode-go") throw new Error("socket hang up");
+    return makeProxyPeer([]).streamSimple(model, context, options);
+  },
+};
+const flaky = await driveStream(fusionStream(flakyPeer)(fusionModel("proxy-flaky"), harnessContext, harnessOptions));
+check("proxy: a route that fails before any event advances to the next provider",
+  flakySeen.join(",") === "opencode-go,zai" && flaky.final.details?.proxied?.provider === "zai"
+    && flaky.final.details?.proxied?.attempts?.length === 1 && textOfEvents(flaky.events) === "read it back",
+  `routes=${flakySeen.join(",")}, answer=${flaky.final.details?.proxied?.provider}`);
+
+const brokenSeen = [];
+const brokenPeer = {
+  streamSimple: (model, context, options) => {
+    brokenSeen.push(model.provider);
+    const partial = { role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [{ type: "text", text: "half a sentence" }],
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() };
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield { type: "start", partial: { ...partial, content: [] } };
+        yield { type: "text_delta", contentIndex: 0, delta: "half a sentence", partial };
+        throw new Error("connection reset");
+      },
+      result: async () => partial,
+    };
+  },
+};
+const broken = await driveStream(fusionStream(brokenPeer)(fusionModel("proxy-flaky"), harnessContext, harnessOptions));
+check("proxy: a stream that fails after it started ends the turn instead of starting over",
+  brokenSeen.join(",") === "opencode-go" && broken.final.stopReason === "error"
+    && /after 2 events/.test(broken.final.errorMessage ?? "") && broken.final.details?.proxied?.alias === "proxy-flaky",
+  `routes=${brokenSeen.join(",")}, ${broken.final.errorMessage?.slice(0, 70)}`);
+
+// 14. the seat path keeps its side of the same rule: a level the harness enforces is retried once without
+// one, reported by a status line, and the seat still answers.
+const seatLevels = [];
+const refusingSeatCallModel = async ({ persona, reasoning }) => {
+  seatLevels.push(reasoning ?? null);
+  const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+  if (reasoning) {
+    return { text: "", usage, stopReason: "error", errorMessage: `Thinking effort ${reasoning} is not supported by opencode-go/glm-5.3. Supported efforts: high, max`, toolCalls: [] };
+  }
+  return { text: "answered without a level", usage, stopReason: "stop", toolCalls: [] };
+};
+const seatRun = await runPipeline({
+  config, sources, fusion: { mode: "single", thinking: { technical: "low" }, candidates: { technical: ["glm"] }, id: "seat-refusal" },
+  prompt: "x", callModel: refusingSeatCallModel, decide, emit: silent, registry,
+});
+// A proxied refusal must not poison the seat path: the proxy retries once unconditionally and records
+// nothing in the seat's per-model memory, because a seat that "knows" the level is refused skips its own
+// retry — one recovered coding turn would then make `/matrix` on the same rung degrade instead of
+// answering without reasoning. (Found by review; this case runs after the proxy refusal above, on the same
+// `opencode-go/deepseek-v4.1-flash@low`.)
+const afterProxySeatLevels = [];
+const afterProxySeatRun = await runPipeline({
+  config, sources, fusion: { mode: "single", thinking: { technical: "low" }, candidates: { technical: ["deepseek-flash"] }, id: "seat-after-proxy" },
+  prompt: "x", registry, decide, emit: silent,
+  callModel: async ({ persona, reasoning }) => {
+    afterProxySeatLevels.push(reasoning ?? null);
+    const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+    if (reasoning) return { text: "", usage, stopReason: "error", errorMessage: `Thinking effort ${reasoning} is not supported by opencode-go/deepseek-v4.1-flash. Supported efforts: high, max`, toolCalls: [] };
+    return { text: `answered as ${persona?.name}`, usage, stopReason: "stop", toolCalls: [] };
+  },
+});
+check("seat: a proxied refusal does not suppress the seat's own retry",
+  afterProxySeatLevels.join(",") === "low," && afterProxySeatRun.text === "answered as technical",
+  `levels=${JSON.stringify(afterProxySeatLevels)}, text=${JSON.stringify(afterProxySeatRun.text)}`);
+
+check("seat: a refused thinking level is retried once without one",
+  seatLevels.join(",") === "low," && seatRun.text === "answered without a level",
+  `levels=${JSON.stringify(seatLevels)}, text=${JSON.stringify(seatRun.text)}`);
+
+/* -------------------------------------------------------------- registration */
+
+// The entry point itself, driven through a stub API: what pi registers and what `/matrix-info` prints
+// are the two surfaces a user sees before any run, and both follow from the executor rule.
+const registered = new Map();
+const commands = new Map();
+const stubApi = {
+  on: () => {},
+  registerProvider: (id, definition) => registered.set(id, definition),
+  registerTool: () => {},
+  registerCommand: (name, definition) => commands.set(name, definition),
+};
+const { default: extensionFactory } = await import("../extensions/pi-fusion-matrix/index.js");
+// A scratch cwd so the entry point's own load (packaged + machine + a project layer here) can carry a
+// `proxy.alias` override: what pi registers and what `/matrix-info` prints are the two surfaces a user
+// sees before any run, and both must follow the model that will actually answer.
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "pfm-intercept-"));
+fs.mkdirSync(path.join(scratch, ".pi"), { recursive: true });
+fs.writeFileSync(path.join(scratch, ".pi", "pi-fusion-matrix.json"), JSON.stringify({ fusions: { quick: { proxy: { alias: "glm-flash" } } } }));
+const originalCwd = process.cwd();
+process.chdir(scratch);
+try {
+  await extensionFactory(stubApi);
+} finally {
+  process.chdir(originalCwd);
+}
+const registeredModels = new Map(registered.get("fusion-matrix").models.map((m) => [m.id, m]));
+// `quick` carries a project-layer `proxy.alias` here, so its advertised numbers are the override's, not
+// its writer's — the harness budgets for the model that will answer.
+check("registration: the advertised numbers follow the model that answers",
+  registeredModels.get("quick").contextWindow === 1000000 && registeredModels.get("quick").maxTokens === 131072
+    && registeredModels.get("quick").reasoning === true
+    && registeredModels.get("best").contextWindow === 1000000 && registeredModels.get("best").maxTokens === 131072,
+  `quick(proxy→glm-flash)=${registeredModels.get("quick").contextWindow}/${registeredModels.get("quick").maxTokens}, best=${registeredModels.get("best").contextWindow}/${registeredModels.get("best").maxTokens}`);
+check("registration: a rung with no execute face keeps the package default",
+  registeredModels.get("opinions").contextWindow === 128000 && registeredModels.get("opinions").maxTokens === 8192
+    && registeredModels.get("opinions").reasoning === false,
+  `opinions=${registeredModels.get("opinions").contextWindow}/${registeredModels.get("opinions").maxTokens}/reasoning=${registeredModels.get("opinions").reasoning}`);
+
+
+let info = "";
+await commands.get("matrix-info").handler(undefined, { ui: { notify: (text) => { info = text; } } });
+check("matrix-info: every fusion prints its execute face",
+  / {2}quick: single\n[\s\S]*? {4}executes: glm-flash @low \(proxy alias\)/.test(info)
+    && / {2}best: pair-judged\n[\s\S]*? {4}executes: glm-flash @high \(writing seat synth\)/.test(info)
+    && / {2}review-check: committee-cascaded[^\n]*\n[\s\S]*? {4}executes: kimi @harness \(writing seat synth\)/.test(info)
+    && /executes: — \(no writing seat/.test(info),
+  info.split("\n").filter((line) => line.includes("executes:")).slice(0, 3).join(" | "));
+
+/* ------------------------------------------------------------ review findings */
+
+// The two faces must not read `thinking` differently: the execute face's `"harness"` literal is the
+// harness's level for a proxied turn and means nothing to a seat — a seat that inherited it would ask its
+// provider for a level called "harness".
+const harnessSeatLevels = [];
+const levelRecordingCallModel = async ({ persona, reasoning }) => {
+  harnessSeatLevels.push(reasoning ?? null);
+  return { text: `canned ${persona?.name}`, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", toolCalls: [] };
+};
+const harnessSeatRun = await runPipeline({
+  config, sources, fusion: { mode: "single", thinking: { technical: "harness" }, candidates: { technical: ["glm"] }, id: "seat-harness" },
+  prompt: "x", callModel: levelRecordingCallModel, decide, emit: silent, registry,
+});
+check("seat: the `harness` literal never reaches a seat",
+  harnessSeatLevels.join(",") === "medium" && harnessSeatRun.text === "canned technical",
+  `levels=${JSON.stringify(harnessSeatLevels)}`);
+
+// A writer in the object form pins the proxied turn to that seat's own route and level, because the two
+// faces have to walk the same candidates.
+config.fusions["proxy-object"] = {
+  mode: "single",
+  candidates: { technical: [{ alias: "kimi", providers: ["kimi-coding"], thinking: "high" }] },
+};
+const objectSeen = [];
+await driveStream(fusionStream(makeProxyPeer(objectSeen))(fusionModel("proxy-object"), harnessContext, harnessOptions));
+check("proxy: a writer's candidate object pins the route and the level",
+  objectSeen[0]?.model.provider === "kimi-coding" && objectSeen[0]?.options.reasoning === "high",
+  `provider=${objectSeen[0]?.model.provider} @${objectSeen[0]?.options.reasoning}`);
+
+// `proxy.alias` names the executor outright: the override's own provider chain answers, while the writing
+// seat's declared level still governs the turn. (It was ignored on the wire until a review found that the
+// route resolved the writer's candidate even when the override was set — registration and `/matrix-info`
+// said one thing and the stream did another.)
+config.fusions["proxy-override"] = {
+  mode: "pair-judged",
+  thinking: { technical: "low", skeptic: "low", judge: "high", synth: "high" },
+  proxy: { alias: "glm-flash" },
+  candidates: {
+    technical: [{ alias: "kimi", providers: ["kimi-coding"], thinking: "high" }],
+    skeptic: ["glm"],
+    judge: ["deepseek-flash"],
+    synth: [{ alias: "kimi", providers: ["kimi-coding"], thinking: "low" }],
+  },
+};
+const overrideSeen = [];
+await driveStream(fusionStream(makeProxyPeer(overrideSeen))(fusionModel("proxy-override"), harnessContext, harnessOptions));
+check("proxy: `proxy.alias` answers on the override's own route, at the writer's level",
+  overrideSeen[0]?.model.id === "glm-5.3-flash" && overrideSeen[0]?.model.provider === "opencode-go"
+    && overrideSeen[0]?.options.reasoning === "high",
+  `model=${overrideSeen[0]?.model.id}@${overrideSeen[0]?.model.provider} @${overrideSeen[0]?.options.reasoning}`);
+
+// An `error` event with nothing before it never reached the harness, so it recovers like a throw: the
+// same route without a refused level, or the next provider. (Found by review: the first version treated
+// any forwarded event as a committed turn, so a provider reporting its refusal as an event bypassed both
+// the retry and the fallback while `details.proxied.thinking` still named the level it never ran at.)
+config.aliases["proxy-eventful"] = { model: "glm-5.3", providers: ["opencode-go", "zai"], contextWindow: 1000, maxTokens: 100 };
+config.fusions["proxy-eventful"] = { mode: "single", thinking: { technical: "low" }, candidates: { technical: ["proxy-eventful"] } };
+const eventAttempts = [];
+const errorEventPeer = {
+  streamSimple: (model, context, options) => {
+    eventAttempts.push(`${model.provider}@${options.reasoning ?? "-"}`);
+    const failed = { role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [],
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "error", errorMessage: options.reasoning ? `Thinking effort ${options.reasoning} is not supported by ${model.provider}/${model.id}. Supported efforts: high, max` : "upstream refused" };
+    const ok = { ...failed, content: [{ type: "text", text: "answered anyway" }], stopReason: "stop", errorMessage: undefined };
+    return {
+      async *[Symbol.asyncIterator]() {
+        if (options.reasoning) { yield { type: "error", reason: "error", error: failed }; return; }
+        if (model.provider === "opencode-go") { yield { type: "error", reason: "error", error: { ...failed, errorMessage: "upstream refused" } }; return; }
+        yield { type: "text_delta", contentIndex: 0, delta: "answered anyway", partial: ok };
+        yield { type: "done", reason: "stop", message: ok };
+      },
+      result: async () => ok,
+    };
+  },
+};
+const eventRecovered = await driveStream(fusionStream(errorEventPeer)(fusionModel("proxy-eventful"), harnessContext, harnessOptions));
+check("proxy: an error event before any event recovers like a throw",
+  eventAttempts.join(" ") === "opencode-go@low opencode-go@- zai@low zai@-"
+    && textOfEvents(eventRecovered.events) === "answered anyway"
+    && eventRecovered.final.details?.proxied?.provider === "zai"
+    && eventRecovered.final.details?.proxied?.attempts?.length === 3,
+  `attempts=${JSON.stringify(eventAttempts)}, provider=${eventRecovered.final.details?.proxied?.provider}, recorded=${eventRecovered.final.details?.proxied?.attempts?.length}`);
+
+// Every proxy rule the loader enforces, asserted where it is enforced rather than only through a harness.
+const { config: fresh } = loadMatrixConfig({ cwd: process.cwd(), layers: ["packaged"] });
+const errorsFor = (patch) => validateConfig(mergeConfig(JSON.parse(JSON.stringify(fresh)), patch), {});
+const proxyRules = [
+  ["an unknown alias", { fusions: { best: { proxy: { alias: "no-such-alias" } } } }, /proxy alias "no-such-alias" is not an alias/],
+  ["an empty proxy block", { fusions: { best: { proxy: {} } } }, /proxy needs an alias/],
+  ["a null proxy block", { fusions: { best: { proxy: null } } }, /proxy is not an object/],
+  ["proxy with route", { fusions: { "default-smrt": { proxy: { alias: "qwen-flash" } } } }, /proxy and route cannot both be declared/],
+  ["a writing seat that is not the writer", { fusions: { best: { thinking: { judge: "harness" } } } }, /"harness" is only legal for the writing seat "synth"/],
+  ["proxy on a mode that writes nothing", { fusions: { opinions: { proxy: { alias: "kimi" } } } }, /proxy needs a writing seat/],
+  ["a non-integer alias contextWindow", { aliases: { "glm-flash": { contextWindow: 0 } } }, /contextWindow must be a positive integer/],
+];
+const ruleResults = proxyRules.map(([, patch, re]) => re.test(errorsFor(patch).join("\n")));
+check("config: every proxy rule is a named load error",
+  ruleResults.every(Boolean) && errorsFor({}).length === 0,
+  proxyRules.filter((_, i) => !ruleResults[i]).map(([name]) => name).join(", ") || `${proxyRules.length} rules, packaged config clean`);
 
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
