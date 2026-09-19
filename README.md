@@ -493,6 +493,10 @@ did not record (pi records none, omp records `duration`/`ttft`) and a price a pr
 subscription plan reports $0) — because "we did not record it" and "it cost nothing" are different facts.
 Anything shaped like a run record it cannot attribute, and any line it cannot parse, is printed rather
 than skipped: a reader that silently dropped either would make a missing record look like a clean run.
+`--cwd` and `--since` select which sessions are totalled, never what is accounted for — the files read, the
+lines that did not parse, and any session a filter could not attribute (a truncated header has no `cwd` to
+compare) are reported either way, and the exit status is non-zero when something could not be accounted
+for, so a filtered report cannot pass a short total off as a fact about the fusions.
 
 ## What leaves your machine
 

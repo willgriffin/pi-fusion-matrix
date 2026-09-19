@@ -22,8 +22,13 @@
  *
  * It reads files and does nothing else: no network, no keys, no model calls, no writes.
  *
- * Exit status: 0 report produced, 1 the store could not be read as asked (missing or empty `--dir`,
- * unreadable `--session`), 2 `--check` failed.
+ * Exit status: 0 report produced, 1 the store could not be accounted for — a missing or empty `--dir`, an
+ * unreadable `--session`, a file or directory that cannot be read, or a session a filter could not
+ * attribute — 2 `--check` failed.
+ *
+ * Filters select the *rows*, never the accounting: the files read, the lines that did not parse, and the
+ * sessions a filter could not attribute are reported whatever `--cwd`/`--since` selected, because a filter
+ * that hid them would let a store containing a run record report zero records and zero unparsed lines.
  *
  * Two numbers are deliberately reported as *absent* rather than as zero: a message whose harness records
  * no duration, and a message whose provider reports no price. Reading either as 0 would turn "we did not
@@ -220,6 +225,7 @@ export function aggregate(sessions) {
     tools: new Map(),
     toolCalls: new Map(),
     gaps: { noDuration: 0, unpriced: 0, sessionsWithoutHeader: 0, unreadable: [], toolAttribution: "most recent assistant turn" },
+    store: undefined,
   };
 
   const turn = (map, key, seed) => {
@@ -348,7 +354,9 @@ export function render(report, { limit = 12 } = {}) {
   const lines = [];
   lines.push("session report — what the two faces recorded");
   lines.push(...report.roots.map((r) => `  ${r.harness}  ${r.root.replace(os.homedir(), "~")}  ${r.missing ? "MISSING" : `${r.files} file(s)`}`));
-  lines.push(`  sessions ${report.sessions} · entries ${num(report.entries)} · unparsed lines ${report.unparsed}`);
+  const store = report.store;
+  const excluded = store ? ` of ${store.read} read (${store.excludedByCwd} by --cwd, ${store.excludedBySince} by --since)` : "";
+  lines.push(`  sessions ${report.sessions}${excluded} · entries ${num(report.entries)} · unparsed lines ${store ? store.unparsed : report.unparsed}`);
   if (report.problems.length) lines.push(`  sessions without a header: ${report.gaps.sessionsWithoutHeader}`);
   lines.push("");
   lines.push(...renderTurns("turns by model", report.turns, { limit }));
@@ -384,6 +392,9 @@ export function render(report, { limit = 12 } = {}) {
   lines.push(`  messages carrying no price: ${report.gaps.unpriced}`);
   lines.push(`  records shaped like ours but not recognised: ${report.unknownShapes.length}`);
   lines.push(`  files or directories that could not be read: ${report.gaps.unreadable.length}`);
+  const unattributable = report.store?.unattributable ?? [];
+  lines.push(`  sessions a filter could not attribute (no header, or nothing to compare): ${unattributable.length}`);
+  for (const entry of unattributable.slice(0, 10)) lines.push(`    ${entry.path}: ${entry.reason}`);
   for (const unreadable of report.gaps.unreadable.slice(0, 10)) lines.push(`    ${unreadable.path}: ${unreadable.reason}`);
   lines.push(`  tool calls are attributed by ${report.gaps.toolAttribution} — the format carries no caller`);
   for (const unknown of report.unknownShapes.slice(0, 10)) {
@@ -416,6 +427,7 @@ function renderJson(report) {
     gaps: report.gaps,
     unknownShapes: report.unknownShapes,
     problems: report.problems,
+    store: report.store,
   }, null, 2);
 }
 
@@ -524,6 +536,29 @@ function check() {
   }
   fs.rmSync(storeDir, { recursive: true, force: true });
 
+  // A filter must not take the accounting with it: a store whose header line is truncated, read with
+  // `--cwd`, must still report the unparsed line and name the session it could not attribute.
+  const truncatedDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-report-filter-"));
+  const truncatedSlug = path.join(truncatedDir, "--private-tmp-project-alpha--");
+  fs.mkdirSync(truncatedSlug, { recursive: true });
+  const truncated = path.join(truncatedSlug, "truncated.jsonl");
+  fs.writeFileSync(truncated, `{"type":"sess\n${lines(goodEntries.slice(1))}\n`);
+  const otherSlug = path.join(truncatedDir, "--private-tmp-project-beta--");
+  fs.mkdirSync(otherSlug, { recursive: true });
+  fs.writeFileSync(path.join(otherSlug, "other.jsonl"), lines([{ ...sessionMeta, cwd: "/tmp/project-beta" }, ...goodEntries.slice(1)]));
+  const roots2 = [{ harness: "pi", root: truncatedDir }];
+  const filteredStore = readStore({ roots: roots2, cwdFilter: "project-alpha" });
+  ok("a filtered read still counts the store's unparsed lines", filteredStore.store.read === 2 && filteredStore.store.unparsed === 1 && filteredStore.sessions.length === 0, JSON.stringify({ ...filteredStore.store, sessions: filteredStore.sessions.length }));
+  ok("a filter names the session it could not attribute", filteredStore.store.unattributable.length === 1 && filteredStore.store.unattributable[0].path === truncated, JSON.stringify(filteredStore.store.unattributable));
+  ok("a session merely outside the filter is counted, not named", filteredStore.store.excludedByCwd === 1, JSON.stringify(filteredStore.store));
+  const unfilteredStore = readStore({ roots: roots2 });
+  ok("without a filter nothing is excluded or unattributable", unfilteredStore.store.read === 2 && unfilteredStore.store.unattributable.length === 0 && unfilteredStore.sessions.length === 2);
+  if (process.getuid?.() !== 0) {
+    const child = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--dir", truncatedDir, "--cwd", "project-alpha"], { encoding: "utf8" });
+    ok("an unattributable session under a filter exits non-zero", child.status === 1 && /could not attribute/.test(child.stdout), `status=${child.status}`);
+  }
+  fs.rmSync(truncatedDir, { recursive: true, force: true });
+
   const failures = results.filter((r) => !r.pass);
   for (const r of results) console.log(`  ${r.pass ? "ok  " : "FAIL"} ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);
   console.log(`\nsession-report: ${results.length - failures.length}/${results.length} checks passed`);
@@ -551,12 +586,16 @@ export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceM
     }
   }
 
+  // Store facts, as opposed to the rows a filter selects: a filter must never take the accounting with it,
+  // or `--cwd` on a store whose header lines are truncated reports zero records and zero unparsed lines.
+  const store = { read: 0, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, unattributable: [] };
+
   for (const { harness, file } of files) {
     let text;
     try {
       text = readFile(file, "utf8");
     } catch (error) {
-      if (sessionFile) return { sessions, roots: reportRoots, unreadable, fatal: `${file}: ${error?.message ?? String(error)}` };
+      if (sessionFile) return { sessions, roots: reportRoots, unreadable, store, fatal: `${file}: ${error?.message ?? String(error)}` };
       // Never skip quietly: a file that cannot be read takes its turns and its records out of every total
       // below, and an absent total is exactly what this report exists to tell apart from a clean one.
       unreadable.push({ harness, path: file, reason: error?.message ?? String(error) });
@@ -564,12 +603,26 @@ export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceM
     }
     const { entries, unparsed } = parseLines(text);
     const session = extractSession(entries, { file, harness, unparsed });
-    if (cwdFilter && !String(session.cwd ?? "").includes(cwdFilter)) continue;
-    if (sinceMs !== undefined && Date.parse(session.startedAt ?? "") < sinceMs) continue;
+    store.read += 1;
+    store.unparsed += unparsed;
+    if (session.problems.length) store.withoutHeader += 1;
+    const lacks = (field) => (field === "cwd" ? !session.cwd : Number.isNaN(Date.parse(session.startedAt ?? "")));
+    if (cwdFilter && !String(session.cwd ?? "").includes(cwdFilter)) {
+      // Excluded, but not silently: an exclusion the filter cannot justify (no cwd to compare, no header at
+      // all) may be a session that *would* have matched, so it is named instead of counted as a clean miss.
+      if (lacks("cwd")) store.unattributable.push({ harness, path: file, reason: "no cwd in the session header, so --cwd cannot tell whether it matches" });
+      else store.excludedByCwd += 1;
+      continue;
+    }
+    if (sinceMs !== undefined && Date.parse(session.startedAt ?? "") < sinceMs) {
+      if (lacks("startedAt")) store.unattributable.push({ harness, path: file, reason: "no parseable timestamp, so --since cannot place it" });
+      else store.excludedBySince += 1;
+      continue;
+    }
     sessions.push(session);
   }
 
-  return { sessions, roots: reportRoots, unreadable, fatal: undefined };
+  return { sessions, roots: reportRoots, unreadable, store, fatal: undefined };
 }
 
 function main() {
@@ -589,7 +642,7 @@ function main() {
     process.exit(1);
   }
 
-  const { sessions, roots: reportRoots, unreadable: unreadablePaths, fatal } = readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceMs });
+  const { sessions, roots: reportRoots, unreadable: unreadablePaths, store, fatal } = readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceMs });
   if (fatal) {
     console.error(`session report: cannot read ${fatal}`);
     process.exit(1);
@@ -602,6 +655,7 @@ function main() {
   const report = aggregate(sessions);
   report.roots = sessionFile ? [{ harness: "session", root: path.dirname(path.resolve(sessionFile)), files: 1, missing: false }] : reportRoots;
   report.gaps.unreadable = unreadablePaths;
+  report.store = store;
 
   if (has("json")) console.log(renderJson(report));
   else {
@@ -619,8 +673,9 @@ function main() {
     }
   }
   // A partial ledger is not a report: say so with the exit status too, so a hook cannot read a short total
-  // as a fact about the fusions.
-  process.exit(unreadablePaths.length === 0 ? 0 : 1);
+  // as a fact about the fusions. Same for a filter that could not be applied to part of the store — the
+  // sessions it skipped may be the ones the filter was looking for.
+  process.exit(unreadablePaths.length === 0 && store.unattributable.length === 0 ? 0 : 1);
 }
 
 main();

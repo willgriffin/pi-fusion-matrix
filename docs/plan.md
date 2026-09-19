@@ -1021,11 +1021,17 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
   cost nothing" are different facts, and only one of them is true;
 - **it names what it does not recognise.** A `details` shape carrying a record key but no fusion id is
   printed with its keys and carrier and never counted as a run; a line that does not parse is counted. A
-  reader that silently skipped either would make a missing record look like a clean run.
+  reader that silently skipped either would make a missing record look like a clean run;
+- **filters select rows, never the accounting.** `--cwd`/`--since` decide which sessions are totalled; the
+  files read, the unparsed lines and any session a filter could not attribute (a truncated header has no
+  `cwd` to compare, and a malformed timestamp cannot be placed) are reported either way, and the exit
+  status is non-zero whenever something could not be accounted for — so a filtered report cannot present a
+  short total as a fact about the fusions, and a file that cannot be read is never a quiet omission.
 
-Exit status: `0` report produced, `1` the store could not be read as asked, `2` `--check` failed.
-`--check` is the reader's own accounting, checked against fixtures (23 checks, each shown to fail under a
-mutation), so the instrument is held to the same standard as the pipeline it reads.
+Exit status: `0` report produced, `1` the store could not be accounted for (missing or empty `--dir`,
+unreadable `--session`, an unreadable file or directory, or a session a filter could not attribute), `2`
+`--check` failed. `--check` is the reader's own accounting, checked against fixtures (34 checks, each shown
+to fail under a mutation), so the instrument is held to the same standard as the pipeline it reads.
 
 ## Critical files & anchors
 
@@ -1275,7 +1281,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     prints its snippet while leaving every tracked file byte-identical (asserted by hash).
 
 22. **The run record survives, and the report reads it** — `node scripts/session-report.mjs --check`
-    passes 23/23 with every check mutation-proved, then in a scratch `cwd` (Step 8's prerequisites):
+    passes 34/34 with every check mutation-proved, then in a scratch `cwd` (Step 8's prerequisites):
     `node scripts/session-report.mjs --cwd <scratch> --json` on the store *before* a `/matrix` run shows
     zero deliberation records, and after `/matrix quick "…"` in **both** pi and omp it shows one, with the
     answer message carrying `details.fusion` — then `--verbose` names that run. A failed run records itself:
