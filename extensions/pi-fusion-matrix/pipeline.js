@@ -38,6 +38,27 @@ const QUOTA = /\b429\b|usage limit|quota|balance/i;
 const CREDENTIAL = /\b40[13]\b|unauthorized|invalid api key/i;
 const MISSING_MODEL = /not found|unknown model|\b404\b/i;
 
+/**
+ * Whether an error refused the thinking level it was given: "Thinking effort low is not supported by
+ * alibaba-token-plan/deepseek-v4.1-flash. Supported efforts: high, max" — measured 2026-09-19 on omp,
+ * which enforces a model's supported levels where pi passes them through. It can surface where the stream
+ * is created or where it is first pulled, so callers ask this of whatever error they got.
+ */
+export function isThinkingRefusal(message) {
+  return THINKING_UNSUPPORTED.test(String(message ?? ""));
+}
+
+/**
+ * Remember that this (provider, model, level) is refused, so a *seat* does not retry one it already knows
+ * is refused while a level that is supported is still requested next time.
+ *
+ * The proxy branch retries once whatever this remembers — it never fails a whole turn to save one call —
+ * but records the fact here too, because the fact is about the model rather than about who asked.
+ */
+export function rememberThinkingRefusal(provider, model, level) {
+  if (level) noThinking.add(`${provider}/${model}@${level}`);
+}
+
 export function loadPersonas(config, sources = { personas: {} }) {
   const personas = {};
   for (const [name, persona] of Object.entries(config.personas ?? {})) {
@@ -313,15 +334,14 @@ export async function runSeat({
         emit.delta(` ├─ ⚠️ ${key} rejects a temperature override; retrying without it.\n`);
         message = await call(false);
       }
-      // A harness may enforce a model's supported thinking efforts instead of passing the level through
-      // (measured 2026-09-18: omp answers `Thinking effort medium is not supported by opencode-go/glm-5.3.
-      // Supported efforts: low, high, max`, while pi sends it and lets the provider ignore it). The seat
-      // is retried once at no reasoning level rather than at a guess — a level the config did not ask for
-      // would be a silent substitution — and the level that failed is remembered per model, so a level
-      // that *is* supported is still requested next time.
+      // A harness may enforce a model's supported thinking efforts instead of passing the level through.
+      // The seat is retried once at no reasoning level rather than at a guess — a level the config did
+      // not ask for would be a silent substitution — and the level that failed is remembered per model, so
+      // a level that *is* supported is still requested next time and one that is refused is not retried
+      // forever.
       const thinkingKey = `${key}@${thinking}`;
-      if (message.stopReason === "error" && thinking && !noThinking.has(thinkingKey) && THINKING_UNSUPPORTED.test(message.errorMessage ?? "")) {
-        noThinking.add(thinkingKey);
+      if (message.stopReason === "error" && !noThinking.has(thinkingKey) && isThinkingRefusal(message.errorMessage)) {
+        rememberThinkingRefusal(resolved.provider, resolved.model, thinking);
         emit.delta(` ├─ ️ ${key} does not support thinking "${thinking}"; retrying that seat without a reasoning level.\n`);
         message = await call(!noTemperature.has(key), false);
       }

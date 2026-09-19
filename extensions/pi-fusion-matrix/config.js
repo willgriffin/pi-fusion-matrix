@@ -69,6 +69,12 @@ export function configPaths({ cwd = process.cwd() } = {}) {
 }
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+/**
+ * The literal a fusion writes for its writing seat to run a proxied turn at whatever level the harness
+ * sent. It lives here rather than in `THINKING_LEVELS` because it means nothing to a seat: a pipeline
+ * call is made by us, with a level we chose, and has no harness level to inherit.
+ */
+export const HARNESS_THINKING = "harness";
 export const STAGE_KINDS = ["parallel", "single", "decide", "score", "render"];
 const SLOT_KINDS = ["alias", "decide"];
 
@@ -206,6 +212,54 @@ export function interpolate(value, vars, where) {
   return value;
 }
 
+/* ------------------------------------------------------------------ executor */
+
+/** The first candidate that names an alias — a decision candidate names no model to proxy to. */
+function firstAlias(candidates) {
+  for (const candidate of candidates ?? []) {
+    if (typeof candidate === "string") return candidate;
+    if (isObject(candidate) && typeof candidate.alias === "string" && candidate.alias) return candidate.alias;
+  }
+  return null;
+}
+
+/**
+ * The fusion's execute face: the writing seat — a pipeline's synthesis, or the single seat — and the
+ * alias it runs on. One definition declares both faces, so re-pointing the writer re-points what codes
+ * under that rung.
+ *
+ * `proxy.alias` names the executor outright, which is the case where the writer is a fine merge and a
+ * thin coder; without it the writer is the persona of the mode's final `single` stage. A mode that ends
+ * in `render` (or a bare `decide`) writes nothing, so it declares no executor and always deliberates —
+ * unless its config names one with `proxy.alias`.
+ *
+ * @returns `{ persona, alias, declared }` or `null` when the fusion has no execute face.
+ */
+export function executorOf(config, fusion) {
+  const stages = config?.modes?.[fusion?.mode]?.stages ?? [];
+  const persona = stages[stages.length - 1]?.single ?? null;
+  const declared = typeof fusion?.proxy?.alias === "string" && fusion.proxy.alias ? fusion.proxy.alias : null;
+  const alias = declared ?? firstAlias(fusion?.candidates?.[persona]);
+  return alias ? { persona, alias, declared } : null;
+}
+
+/**
+ * The thinking level a proxied turn runs at, or `undefined` for "the level the harness sent".
+ *
+ * The rule lives here because the harness resolves `auto` before we see it — a fused model receives
+ * `reasoning: "low"`, indistinguishable from a user-chosen `low` — so "was this auto?" is not a signal
+ * we have. Per fusion, for the writing seat: a concrete level runs exactly there, `"harness"` runs at
+ * whatever the harness sent, and saying nothing runs at the writing seat's own persona level if it
+ * declares one, else the harness's. Total, deterministic, and no config language to interpret.
+ */
+export function executorThinking(config, fusion) {
+  const writer = executorOf(config, fusion);
+  const declared = writer?.persona ? fusion?.thinking?.[writer.persona] : undefined;
+  if (declared === HARNESS_THINKING) return undefined;
+  if (declared !== undefined) return declared;
+  return writer?.persona ? config?.personas?.[writer.persona]?.thinking : undefined;
+}
+
 /* ------------------------------------------------------------------ validation */
 
 /**
@@ -234,6 +288,14 @@ export function validateConfig(config, { sources } = {}) {
     }
     if (alias.temperature !== undefined && (alias.temperature < 0 || alias.temperature > 2)) {
       err(`alias "${name}" temperature ${alias.temperature} outside 0..2`);
+    }
+    // Declared metadata wins over pi's catalogue template for that provider, and for a fusion whose
+    // executor is this alias it is also what the registered model advertises — so a nonsense value is a
+    // load error rather than a truncation or a wrong context budget discovered mid-turn.
+    for (const field of ["maxTokens", "contextWindow"]) {
+      if (alias[field] !== undefined && (!Number.isInteger(alias[field]) || alias[field] < 1)) {
+        err(`alias "${name}" ${field} must be a positive integer`);
+      }
     }
   }
 
@@ -376,9 +438,30 @@ export function validateConfig(config, { sources } = {}) {
       });
     }
 
+    const executor = executorOf(config, fusion);
     for (const [persona, level] of Object.entries(fusion.thinking ?? {})) {
       if (!used.has(persona)) err(`fusion "${id}": thinking override for unused persona "${persona}"`);
-      if (!THINKING_LEVELS.includes(level)) err(`fusion "${id}": thinking "${level}" unknown`);
+      // `"harness"` is a proxied turn's rule and only the writing seat has one, so anywhere else it can
+      // mean nothing: a pipeline seat is called by us, at a level we choose.
+      if (level === HARNESS_THINKING) {
+        if (persona !== executor?.persona) {
+          err(`fusion "${id}": thinking "${HARNESS_THINKING}" is only legal for the writing seat${executor?.persona ? ` "${executor.persona}"` : ", and this mode has none"}`);
+        }
+      } else if (!THINKING_LEVELS.includes(level)) {
+        err(`fusion "${id}": thinking "${level}" unknown`);
+      }
+    }
+    if (fusion.proxy !== undefined) {
+      if (!isObject(fusion.proxy)) {
+        err(`fusion "${id}": proxy is not an object`);
+      } else if (typeof fusion.proxy.alias !== "string" || !fusion.proxy.alias) {
+        err(`fusion "${id}": proxy needs an alias; the writing seat already is the default`);
+      } else if (!aliases[fusion.proxy.alias]) {
+        err(`fusion "${id}": proxy alias "${fusion.proxy.alias}" is not an alias`);
+      }
+      // A proxied turn runs no pipeline, so a route on the same fusion could never fire — two
+      // contradictory declarations rather than a preference between them.
+      if (fusion.route) err(`fusion "${id}": proxy and route cannot both be declared; a proxied turn has no deliberation to size`);
     }
     for (const persona of Object.keys(fusion.prompts ?? {})) {
       if (!used.has(persona)) err(`fusion "${id}": prompt override for unused persona "${persona}"`);
