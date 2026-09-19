@@ -23,16 +23,19 @@
  * It reads files and does nothing else: no network, no keys, no model calls, no writes.
  *
  * Exit status: 0 report produced, 1 the store could not be accounted for — a missing or empty `--dir`, an
- * unreadable `--session`, a file or directory that cannot be read, or a session a filter could not
- * attribute — 2 `--check` failed.
+ * unreadable `--session`, a file or directory that cannot be read, a line that did not parse, or a session a
+ * filter could not attribute — 2 `--check` failed. An incomplete ledger is never a clean exit: every total
+ * below would be short by the part that did not parse.
  *
  * Filters select the *rows*, never the accounting: the files read, the lines that did not parse, and the
  * sessions a filter could not attribute are reported whatever `--cwd`/`--since` selected, because a filter
  * that hid them would let a store containing a run record report zero records and zero unparsed lines.
  *
- * Two numbers are deliberately reported as *absent* rather than as zero: a message whose harness records
- * no duration, and a message whose provider reports no price. Reading either as 0 would turn "we did not
- * record it" into "it cost nothing", which is exactly the mistake this report exists to prevent.
+ * Two numbers are deliberately reported as *absent* rather than as zero: a message whose harness records no
+ * duration, and a message whose provider reports no price. Reading either as 0 would turn "we did not record
+ * it" into "it cost nothing", which is exactly the mistake this report exists to prevent — so money is
+ * printed as `$X reported` with the unpriced messages counted beside it (`costReported` and
+ * `unpricedMessages` in the sums), and never as a single total that silently absorbed both.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -55,8 +58,13 @@ const has = (flag) => args.includes(`--${flag}`);
 const values = (name) => args.flatMap((arg, i) => (arg === `--${name}` ? [args[i + 1]].filter((v) => v !== undefined) : []));
 const value = (name, fallback) => values(name).at(-1) ?? fallback;
 
-const emptySums = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0, cost: 0 });
+const emptySums = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0, costReported: 0, unpricedMessages: 0 });
 
+/**
+ * `cost.reported` is the only money in these sums, and `unpricedMessages` counts the usages that carried
+ * none: a provider that reports no price is not a free message, and a total that silently absorbed the two
+ * would be the kind of number this report exists to refuse to print.
+ */
 function addUsage(sums, usage) {
   if (!usage || typeof usage !== "object") return sums;
   sums.input += usage.input ?? 0;
@@ -65,7 +73,9 @@ function addUsage(sums, usage) {
   sums.cacheWrite += usage.cacheWrite ?? 0;
   sums.reasoning += usage.reasoning ?? 0;
   sums.totalTokens += usage.totalTokens ?? (usage.input ?? 0) + (usage.output ?? 0);
-  sums.cost += usage.cost?.total ?? 0;
+  const reported = usage.cost?.total ?? 0;
+  if (reported > 0) sums.costReported += reported;
+  else sums.unpricedMessages += 1;
   return sums;
 }
 
@@ -104,18 +114,24 @@ export function findSessions(root, { readdir = fs.readdirSync } = {}) {
  * One session file into entries. A line that does not parse is counted, not skipped: a truncated write is
  * a fact about the store, and silently dropping it would understate every total below.
  */
-export function parseLines(text) {
+export function parseLines(text, { maxFailures = 5 } = {}) {
   const entries = [];
+  const failures = [];
   let unparsed = 0;
+  let lineNumber = 0;
   for (const line of text.split("\n")) {
+    lineNumber += 1;
     if (!line.trim()) continue;
     try {
       entries.push(JSON.parse(line));
-    } catch {
+    } catch (error) {
       unparsed += 1;
+      // The first few are kept with their line and reason: "3 unparsed lines" says a ledger is incomplete,
+      // but only the line number says *where*, and a count alone cannot be acted on.
+      if (failures.length < maxFailures) failures.push({ line: lineNumber, message: error?.message ?? String(error) });
     }
   }
-  return { entries, unparsed };
+  return { entries, unparsed, failures };
 }
 
 const isRecordShape = (details) => typeof details === "object" && details !== null && RECORD_KEYS.some((key) => key in details);
@@ -137,6 +153,7 @@ export function extractSession(entries, meta = {}) {
     version: undefined,
     entries: entries.length,
     unparsed: meta.unparsed ?? 0,
+    parseFailures: meta.parseFailures ?? [],
     turns: [],
     toolResults: [],
     records: [],
@@ -171,6 +188,7 @@ export function extractSession(entries, meta = {}) {
       const usage = message.usage ?? {};
       const priced = (usage.cost?.total ?? 0) > 0;
       current = {
+        harness: session.harness,
         api: message.api,
         provider: message.provider,
         model: message.model,
@@ -186,6 +204,11 @@ export function extractSession(entries, meta = {}) {
       if (isRecordShape(details)) {
         if (typeof details.proxied === "object" && details.proxied !== null) {
           session.records.push({ kind: "proxy", carrier: "assistant", fusion: current.model, details: details.proxied, at: current.at });
+        } else if (typeof details.fusion === "string") {
+          // A fusion used as a session's own model streams its answer through the provider path, and that
+          // path records the run on the assistant message (`run.js`'s `createFusionStream`): the same record
+          // the tool and command carriers carry, so it is counted the same way rather than called unknown.
+          session.records.push({ kind: "deliberation", carrier: "assistant", fusion: details.fusion, details, at: current.at });
         } else {
           session.unknown.push({ carrier: "assistant", keys: Object.keys(details).sort(), at: current.at });
         }
@@ -208,7 +231,12 @@ export function extractSession(entries, meta = {}) {
   return session;
 }
 
-const turnKey = (turn) => (turn.api === FUSION_API ? `fusion:${turn.model}` : `${turn.provider ?? "?"}/${turn.model ?? "?"}`);
+/**
+ * Every row is keyed by the store it came from as well as the model: the two harnesses record different
+ * things (omp a duration and ttft, pi neither), and folding them together would average a fact with a
+ * silence.
+ */
+const turnKey = (turn) => `${turn.harness ?? "?"}/${turn.api === FUSION_API ? `fusion:${turn.model}` : `${turn.provider ?? "?"}/${turn.model ?? "?"}`}`;
 
 /** Fold sessions into the report. Pure: the same sessions always give the same numbers. */
 export function aggregate(sessions) {
@@ -229,7 +257,7 @@ export function aggregate(sessions) {
   };
 
   const turn = (map, key, seed) => {
-    if (!map.has(key)) map.set(key, { key, turns: 0, sums: emptySums(), priced: 0, unpriced: 0, timed: 0, missingDuration: 0, durations: [], errors: 0, toolCalls: 0, toolErrors: 0, ...seed });
+    if (!map.has(key)) map.set(key, { key, turns: 0, sums: emptySums(), timed: 0, missingDuration: 0, durations: [], errors: 0, toolCalls: 0, toolErrors: 0, ...seed });
     return map.get(key);
   };
 
@@ -246,18 +274,23 @@ export function aggregate(sessions) {
       const key = turnKey(t);
       const record = turn(report.turns, key, { fusion: t.api === FUSION_API });
       record.turns += 1;
+      // `t.usage` is always an object: `extractSession` normalises a message the harness stored without one,
+      // so a turn priced by nobody still reaches the counter instead of being reported as neither priced nor
+      // unpriced (measured 2026-09-19 on a streamed fusion turn, which stores no `usage` at all).
       addUsage(record.sums, t.usage);
-      if (t.priced) record.priced += 1;
-      else { record.unpriced += 1; report.gaps.unpriced += 1; }
+      if (!t.priced) report.gaps.unpriced += 1;
       if (t.durationMs !== undefined) { record.timed += 1; record.durations.push(t.durationMs); }
       else { record.missingDuration += 1; report.gaps.noDuration += 1; }
       if (t.stopReason === "error" || t.stopReason === "aborted") record.errors += 1;
       record.toolCalls += t.toolCalls.length;
-      for (const name of t.toolCalls) report.toolCalls.set(name, (report.toolCalls.get(name) ?? 0) + 1);
+      for (const name of t.toolCalls) {
+        const key2 = `${session.harness}/${name}`;
+        report.toolCalls.set(key2, (report.toolCalls.get(key2) ?? 0) + 1);
+      }
     }
 
     for (const result of session.toolResults) {
-      const record = turn(report.tools, result.toolName, {});
+      const record = turn(report.tools, `${session.harness}/${result.toolName}`, {});
       record.turns += 1;
       record.errors += result.isError ? 1 : 0;
       const owner = result.after ? turn(report.turns, turnKey(result.after), { fusion: result.after.api === FUSION_API }) : undefined;
@@ -269,7 +302,7 @@ export function aggregate(sessions) {
         report.records.proxy += 1;
         const proxied = entry.details;
         const key = entry.fusion ?? proxied.model ?? "?";
-        const record = turn(report.proxy, key, { aliases: new Map(), levels: new Map(), attempts: new Map(), dropped: 0, failures: 0, sums: emptySums(), blank: 0 });
+        const record = turn(report.proxy, `${session.harness}/${key}`, { aliases: new Map(), levels: new Map(), attempts: new Map(), dropped: 0, failures: 0, sums: emptySums(), blank: 0 });
         record.turns += 1;
         if (typeof proxied.alias === "string") record.aliases.set(proxied.alias, (record.aliases.get(proxied.alias) ?? 0) + 1);
         // `thinking: null` is a turn that ran at no level; an absent key is a record that did not say, and
@@ -288,7 +321,7 @@ export function aggregate(sessions) {
       report.records.deliberation += 1;
       const details = entry.details;
       const key = entry.fusion;
-      const record = turn(report.deliberation, key, {
+      const record = turn(report.deliberation, `${session.harness}/${key}`, {
         carriers: new Map(), sums: emptySums(), decisionUsage: emptySums(), seats: 0, degradedSeats: 0, seatErrors: 0,
         cascades: 0, cascadesSufficient: 0, cascadesAdvanced: 0, cascadeSeats: new Map(), substitutions: 0, rounds: 0,
         verify: 0, route: 0, saved: 0, failedWrites: 0, failures: 0, routed: undefined,
@@ -331,7 +364,9 @@ export function aggregate(sessions) {
 
 const median = (sorted) => (sorted.length === 0 ? undefined : sorted[Math.floor(sorted.length / 2)]);
 const num = (n) => new Intl.NumberFormat("en-US").format(Math.round(n));
-const money = (n) => `$${n.toFixed(n < 1 ? 4 : 2)}`;
+// A real cost must never print as `$0.0000`: a message priced at a fraction of a cent is priced, and the
+// formatter is part of the claim that money states its basis.
+const money = (n) => (n === 0 ? "$0.0000" : n < 0.01 ? `$${n.toFixed(6)}` : `$${n.toFixed(2)}`);
 const ms = (n) => `${(n / 1000).toFixed(1)}s`;
 const pct = (part, whole) => (whole === 0 ? "—" : `${((100 * part) / whole).toFixed(1)}%`);
 
@@ -342,9 +377,10 @@ function renderTurns(title, records, { limit = Infinity } = {}) {
   for (const row of rows.slice(0, limit)) {
     const timing = row.timed > 0 ? ` · median ${ms(median([...row.durations].sort((a, b) => a - b)))}` : "";
     const missing = row.missingDuration > 0 ? ` · ${row.missingDuration} with no duration` : "";
-    const unpriced = row.unpriced > 0 ? ` · ${row.unpriced} unpriced` : "";
+    const unpriced = row.sums.unpricedMessages > 0 ? ` · ${row.sums.unpricedMessages} message(s) unpriced` : "";
+    const reasoning = row.sums.reasoning > 0 ? ` · ${num(row.sums.reasoning)} reasoning` : "";
     const tools = row.toolCalls > 0 ? ` · ${row.toolCalls} tool calls${row.toolErrors ? `, ${row.toolErrors} errored (${pct(row.toolErrors, row.toolCalls)})` : ""}` : "";
-    lines.push(`  ${row.key.padEnd(34)} ${String(row.turns).padStart(4)} turns · ${num(row.sums.input).padStart(12)} in · ${num(row.sums.output).padStart(7)} out · ${money(row.sums.cost).padStart(10)}${timing}${missing}${unpriced}${tools}`);
+    lines.push(`  ${row.key.padEnd(40)} ${String(row.turns).padStart(4)} turns · ${num(row.sums.input).padStart(12)} in · ${num(row.sums.output).padStart(7)} out${reasoning} · ${money(row.sums.costReported).padStart(10)} reported${timing}${missing}${unpriced}${tools}`);
   }
   if (rows.length > limit) lines.push(`  … ${rows.length - limit} more model(s)`);
   return lines;
@@ -373,8 +409,9 @@ export function render(report, { limit = 12 } = {}) {
   for (const row of [...report.deliberation.values()].sort((a, b) => (b.runs ?? 0) - (a.runs ?? 0))) {
     const carriers = [...row.carriers].map(([k, v]) => `${k}×${v}`).join(", ");
     lines.push(`  ${row.key.padEnd(20)} ${String(row.runs ?? 0).padStart(3)} runs (${carriers}) · ${row.seats} seats, ${row.degradedSeats} degraded, ${row.seatErrors} seat error(s)`);
-    lines.push(`  ${"".padEnd(20)} cascades ${row.cascades} (sufficient ${row.cascadesSufficient}, advanced ${row.cascadesAdvanced}) · substitutions ${row.substitutions} · decision tokens ${num(row.decisionUsage.totalTokens)} (${money(row.decisionUsage.cost)})`);
-    lines.push(`  ${"".padEnd(20)} turns cost ${money(row.sums.cost)} · ${num(row.sums.input)} in / ${num(row.sums.output)} out · ${row.failures} failed · routes ${row.route} · verify ${row.verify} check(s) · saved ${row.saved}${row.failedWrites ? `, ${row.failedWrites} write failure(s)` : ""}`);
+    lines.push(`  ${"".padEnd(20)} cascades ${row.cascades} (sufficient ${row.cascadesSufficient}, advanced ${row.cascadesAdvanced}) · substitutions ${row.substitutions} · decision tokens ${num(row.decisionUsage.totalTokens)} (${money(row.decisionUsage.costReported)} reported${row.decisionUsage.unpricedMessages ? `, ${row.decisionUsage.unpricedMessages} unpriced` : ""})`);
+    const unpriced = row.sums.unpricedMessages ? ` (${row.sums.unpricedMessages} unpriced)` : "";
+    lines.push(`  ${"".padEnd(20)} turns ${money(row.sums.costReported)} reported${unpriced} · ${num(row.sums.input)} in / ${num(row.sums.output)} out · ${row.failures} failed · routes ${row.route} · verify ${row.verify} check(s) · saved ${row.saved}${row.failedWrites ? `, ${row.failedWrites} write failure(s)` : ""}`);
   }
   lines.push("");
   lines.push("tools");
@@ -396,14 +433,24 @@ export function render(report, { limit = 12 } = {}) {
   const unattributable = report.store?.unattributable ?? [];
   lines.push(`  sessions a filter could not attribute (no header, or nothing to compare): ${unattributable.length}`);
   for (const entry of unattributable.slice(0, 10)) lines.push(`    ${entry.path}: ${entry.reason}`);
+  if (unattributable.length > 10) lines.push(`    … ${unattributable.length - 10} more, all in the JSON output`);
   for (const unreadable of report.gaps.unreadable.slice(0, 10)) lines.push(`    ${unreadable.path}: ${unreadable.reason}`);
+  if (report.gaps.unreadable.length > 10) lines.push(`    … ${report.gaps.unreadable.length - 10} more, all in the JSON output`);
   lines.push(`  tool calls are attributed by ${report.gaps.toolAttribution} — the format carries no caller`);
   for (const unknown of report.unknownShapes.slice(0, 10)) {
-    lines.push(`    ${path.basename(String(unknown.file ?? "?"))} ${unknown.carrier}: ${unknown.keys.join(", ")}`);
+    lines.push(`    ${unknown.file ?? "?"} (${unknown.harness ?? "?"}) ${unknown.carrier}: ${unknown.keys.join(", ")}${unknown.at ? ` at ${unknown.at}` : ""}`);
   }
+  if (report.unknownShapes.length > 10) lines.push(`    … ${report.unknownShapes.length - 10} more unrecognised shape(s), all in the JSON output`);
+  for (const failure of (report.store?.parseFailures ?? []).slice(0, 10)) {
+    lines.push(`    ${failure.path}:${failure.line} — ${failure.message}`);
+  }
+  const named = report.store?.parseFailuresNamed ?? 0;
+  const unparsed = report.store?.unparsed ?? 0;
+  if (unparsed > named) lines.push(`    … ${unparsed - named} more unparsed line(s) not named here (first ${named} shown)`);
   if (report.records.deliberation === 0) {
-    lines.push("  NO deliberation records: a `matrix` run writes one to its tool result or its answer message;");
-    lines.push("  zero here means every deliberation so far ran on a path that dropped the record, not that none ran.");
+    lines.push("  NO deliberation record was recognised in these sessions. Whether a deliberation ran is not");
+    lines.push("  knowable from this store: a run writes its record to its tool result, its answer message, or the");
+    lines.push("  streamed turn, and a session that used none of those leaves no record either way.");
   }
   return lines.join("\n");
 }
@@ -485,16 +532,16 @@ function check() {
   ok("a fusion-shaped shape without a fusion id is named, not counted as a run", session.unknown.length === 2 && session.records.every((r) => typeof r.fusion === "string" && r.fusion !== "unknown"), JSON.stringify([session.unknown.length, session.records.map((r) => r.fusion)]));
 
   const report = aggregate([{ ...session, entries: session.entries }]);
-  const quick = report.turns.get("fusion:quick");
+  const quick = report.turns.get("pi/fusion:quick");
   ok("turns are keyed by fusion id", quick?.turns === 2, `turns=${quick?.turns}`);
-  ok("usage accumulates per key exactly", quick?.sums.input === 150 && quick?.sums.output === 15 && Math.abs(quick.sums.cost - 0.003) < 1e-9, JSON.stringify(quick?.sums));
-  ok("priced and unpriced turns are told apart", quick?.priced === 2 && report.turns.get("opencode-go/glm-5.3")?.unpriced === 1 && report.gaps.unpriced === 1);
+  ok("usage accumulates per key exactly", quick?.sums.input === 150 && quick?.sums.output === 15 && Math.abs(quick.sums.costReported - 0.003) < 1e-9 && quick.sums.unpricedMessages === 0, JSON.stringify(quick?.sums));
+  ok("priced and unpriced turns are told apart", quick?.sums.unpricedMessages === 0 && report.turns.get("pi/opencode-go/glm-5.3")?.sums.unpricedMessages === 1 && report.gaps.unpriced === 1);
   ok("a missing duration is counted as missing, never as 0", quick?.timed === 1 && quick?.missingDuration === 1 && report.gaps.noDuration === 2, `timed=${quick?.timed} missing=${quick?.missingDuration} total=${report.gaps.noDuration}`);
-  ok("tool results are attributed to the turn before them", quick?.toolErrors === 1 && quick?.toolCalls === 1 && report.tools.get("read").errors === 1 && report.toolCalls.get("read") === 1, JSON.stringify(Object.fromEntries(report.toolCalls)));
-  const proxy = report.proxy.get("quick");
+  ok("tool results are attributed to the turn before them", quick?.toolErrors === 1 && quick?.toolCalls === 1 && report.tools.get("pi/read").errors === 1 && report.toolCalls.get("pi/read") === 1, JSON.stringify(Object.fromEntries(report.toolCalls)));
+  const proxy = report.proxy.get("pi/quick");
   ok("a dropped level counts as a drop", proxy?.dropped === 1 && proxy?.levels.get("none") === 1, JSON.stringify([...proxy.levels]));
   ok("attempt reasons are counted", proxy?.attempts.get("thinking") === 1);
-  const delib = report.deliberation.get("opinions");
+  const delib = report.deliberation.get("pi/opinions");
   ok("deliberation runs counted by carrier", delib?.runs === 4 && delib?.carriers.get("toolResult") === 1 && delib?.carriers.get("custom_message") === 3, JSON.stringify([...(delib?.carriers ?? [])]));
   ok("degraded seats and seat errors counted", delib?.seats === 3 && delib?.degradedSeats === 2 && delib?.seatErrors === 2, JSON.stringify({ seats: delib?.seats, degraded: delib?.degradedSeats, errors: delib?.seatErrors }));
   ok("cascades split sufficient from advanced", delib?.cascades === 3 && delib?.cascadesSufficient === 2 && delib?.cascadesAdvanced === 1, JSON.stringify({ total: delib?.cascades, sufficient: delib?.cascadesSufficient, advanced: delib?.cascadesAdvanced }));
@@ -511,7 +558,7 @@ function check() {
   // An absent `thinking` key is a record that did not say, not a turn that ran at no level.
   const legacy = extractSession([sessionMeta, { type: "message", message: { role: "assistant", api: FUSION_API, model: "quick",
     usage: usage(5, 1, 0.001), content: [], details: { proxied: { alias: "glm-flash", attempts: [{ reason: "transient" }] } } } }], { file: "legacy.jsonl", harness: "pi" });
-  const legacyRow = aggregate([legacy]).proxy.get("quick");
+  const legacyRow = aggregate([legacy]).proxy.get("pi/quick");
   ok("an unrecorded level is not counted as a drop", legacyRow?.dropped === 0 && legacyRow?.levels.get("unrecorded") === 1, JSON.stringify([...(legacyRow?.levels ?? [])]));
 
   // The store reader: a file or directory that cannot be read is counted and printed, never skipped, and the
@@ -601,6 +648,72 @@ function check() {
   ok("--json publishes the store's unparsed count, as the text report does", jsonReport.unparsed === 1 && jsonReport.store.unparsed === 1 && jsonReport.sessions === 1 && jsonReport.sessionsRead === 2, JSON.stringify({ unparsed: jsonReport.unparsed, store: jsonReport.store?.unparsed, sessions: jsonReport.sessions, read: jsonReport.sessionsRead }));
   fs.rmSync(jsonDir, { recursive: true, force: true });
 
+  const unpricedTurn = extractSession([sessionMeta, { type: "message", message: { role: "assistant", api: FUSION_API, model: "quick",
+    usage: { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 11, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    content: [], details: { proxied: { alias: "glm-flash", thinking: "low", attempts: [] } } } }], { file: "unpriced.jsonl", harness: "omp" });
+  const unpricedRow = aggregate([unpricedTurn]).turns.get("omp/fusion:quick");
+  ok("money states its basis: a price nobody reported is not a total", unpricedRow?.sums.costReported === 0 && unpricedRow?.sums.unpricedMessages === 1, JSON.stringify(unpricedRow?.sums));
+
+  // F2: the streamed provider path records its run on the assistant message
+  const streamed = extractSession([sessionMeta, { type: "message", message: { role: "assistant", api: FUSION_API, model: "quick",
+    usage: usage(20, 2, 0.001), content: [], details: { fusion: "quick", mode: "single", seats: [{ persona: "technical", degraded: false, usage: usage(20, 2, 0.001) }],
+    cascades: [], seatErrors: [], verification: [], usage: usage(20, 2, 0.001) } } }], { file: "streamed.jsonl", harness: "pi" });
+  const streamedReport = aggregate([streamed]);
+  ok("a streamed fusion turn is a deliberation record, not an unknown shape", streamedReport.records.deliberation === 1 && streamedReport.unknownShapes.length === 0 && streamedReport.deliberation.get("pi/quick")?.carriers.get("assistant") === 1, JSON.stringify({ records: streamedReport.records, unknown: streamedReport.unknownShapes.length }));
+
+  // F3: the same fusion from two stores is two rows, never an average of a fact and a silence
+  const twoStores = aggregate([
+    extractSession([sessionMeta, { type: "message", message: { role: "assistant", api: FUSION_API, model: "quick", usage: usage(10, 1, 0.001), duration: 1000, content: [], details: { proxied: { alias: "g", thinking: "low", attempts: [] } } } }], { file: "a.jsonl", harness: "omp" }),
+    extractSession([sessionMeta, { type: "message", message: { role: "assistant", api: FUSION_API, model: "quick", usage: usage(10, 1, 0.001), content: [], details: { proxied: { alias: "g", thinking: "low", attempts: [] } } } }], { file: "b.jsonl", harness: "pi" }),
+  ]);
+  const ompRow = twoStores.turns.get("omp/fusion:quick");
+  const piRow = twoStores.turns.get("pi/fusion:quick");
+  ok("each store keeps its own row", ompRow?.timed === 1 && ompRow?.missingDuration === 0 && piRow?.timed === 0 && piRow?.missingDuration === 1, JSON.stringify({ omp: [ompRow?.timed, ompRow?.missingDuration], pi: [piRow?.timed, piRow?.missingDuration] }));
+
+  // F6/F8: a parse failure names its line, and an incomplete ledger is not a clean exit
+  const { unparsed: n, failures: fs2 } = parseLines(`{"type":"sess\n{"ok":1}\nnot json\nalso not\n`);
+  ok("a parse failure keeps its line and reason", n === 3 && fs2.length === 3 && fs2[0].line === 1 && typeof fs2[0].message === "string", JSON.stringify(fs2));
+  const capped = parseLines(Array.from({ length: 9 }, () => "x").join("\n"), { maxFailures: 2 });
+  ok("a parse failure list is capped, with the count kept", capped.unparsed === 9 && capped.failures.length === 2, JSON.stringify({ unparsed: capped.unparsed, named: capped.failures.length }));
+  const incomplete = fs.mkdtempSync(path.join(os.tmpdir(), "session-report-incomplete-"));
+  const incompleteSlug = path.join(incomplete, "--private-tmp-project-alpha--");
+  fs.mkdirSync(incompleteSlug, { recursive: true });
+  fs.writeFileSync(path.join(incompleteSlug, "one.jsonl"), lines([sessionMeta, ...goodEntries.slice(1)]));
+  fs.writeFileSync(path.join(incompleteSlug, "two.jsonl"), `{"type":"sess\n${lines([sessionMeta, ...goodEntries.slice(1)])}\n`);
+  const incompleteStore = readStore({ roots: [{ harness: "pi", root: incomplete }] });
+  ok("an unparsed line is named with its file and line", incompleteStore.store.unparsed === 1 && incompleteStore.store.parseFailures.length === 1 && incompleteStore.store.parseFailures[0].path.endsWith("two.jsonl") && incompleteStore.store.parseFailures[0].line === 1, JSON.stringify(incompleteStore.store.parseFailures));
+  const cleanDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-report-clean-"));
+  const cleanSlug = path.join(cleanDir, "--private-tmp-project-alpha--");
+  fs.mkdirSync(cleanSlug, { recursive: true });
+  fs.writeFileSync(path.join(cleanSlug, "one.jsonl"), lines([sessionMeta, ...goodEntries.slice(1)]));
+  if (process.getuid?.() !== 0) {
+    const dirty = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--dir", incomplete], { encoding: "utf8" });
+    const clean = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--dir", cleanDir], { encoding: "utf8" });
+    ok("an incomplete ledger exits non-zero, a complete one exits 0", dirty.status === 1 && clean.status === 0, `dirty=${dirty.status} clean=${clean.status}`);
+    const lonely = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--dir", path.join(cleanDir, "absent")], { encoding: "utf8" });
+    ok("a store that is not there names the path it wanted", lonely.status === 1 && /no sessions directory at/.test(lonely.stderr), `status=${lonely.status}`);
+  }
+  if (process.getuid?.() !== 0) {
+    // F7: the one path that exits before `render` still has to say what it could not read
+    const blindDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-report-blind-"));
+    const blindSlug = path.join(blindDir, "--private-tmp-project-alpha--");
+    fs.mkdirSync(blindSlug, { recursive: true });
+    fs.writeFileSync(path.join(blindSlug, "one.jsonl"), lines([sessionMeta, ...goodEntries.slice(1)]));
+    fs.chmodSync(blindSlug, 0o000);
+    const blind = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--dir", blindDir], { encoding: "utf8" });
+    fs.chmodSync(blindSlug, 0o700);
+    ok("a store with nothing readable names the path and the reason before exiting", blind.status === 1 && blind.stderr.includes(blindSlug) && /EACCES|permission denied/.test(blind.stderr), `status=${blind.status} stderr=${JSON.stringify(blind.stderr.split("\n")[0])}`);
+    fs.rmSync(blindDir, { recursive: true, force: true });
+  }
+  fs.rmSync(incomplete, { recursive: true, force: true });
+  fs.rmSync(cleanDir, { recursive: true, force: true });
+
+  const noUsage = aggregate([extractSession([sessionMeta, { type: "message", message: { role: "assistant", api: FUSION_API, model: "quick",
+    content: [], details: { proxied: { alias: "glm-flash", thinking: "low", attempts: [] } } } }], { file: "nousage.jsonl", harness: "pi" })]);
+  ok("a message the harness priced not at all counts as unpriced", noUsage.turns.get("pi/fusion:quick")?.sums.unpricedMessages === 1 && noUsage.turns.get("pi/fusion:quick")?.sums.costReported === 0, JSON.stringify(noUsage.turns.get("pi/fusion:quick")?.sums));
+
+  ok("a cost below a cent does not print as zero", money(0.0000203) === "$0.000020" && money(0) === "$0.0000" && money(0.42) === "$0.42", `${money(0.0000203)} ${money(0)} ${money(0.42)}`);
+
   const failures = results.filter((r) => !r.pass);
   for (const r of results) console.log(`  ${r.pass ? "ok  " : "FAIL"} ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);
   console.log(`\nsession-report: ${results.length - failures.length}/${results.length} checks passed`);
@@ -616,7 +729,7 @@ export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceM
   const sessions = [];
   const files = [];
   const unreadable = [];
-  const store = { read: 0, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [] };
+  const store = { read: 0, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 };
   if (sessionFile) {
     files.push({ harness: "session", root: path.dirname(path.resolve(sessionFile)), file: path.resolve(sessionFile) });
   } else {
@@ -647,10 +760,14 @@ export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceM
       unreadable.push({ harness, path: file, reason: error?.message ?? String(error) });
       continue;
     }
-    const { entries, unparsed } = parseLines(text);
-    const session = extractSession(entries, { file, harness, unparsed });
+    const { entries, unparsed, failures } = parseLines(text);
+    const session = extractSession(entries, { file, harness, unparsed, parseFailures: failures });
     store.read += 1;
     store.unparsed += unparsed;
+    for (const failure of failures) {
+      store.parseFailuresNamed += 1;
+      store.parseFailures.push({ harness, path: file, line: failure.line, message: failure.message });
+    }
     if (session.problems.length) store.withoutHeader += 1;
     const lacksCwd = !session.cwd;
     if (cwdFilter && !String(session.cwd ?? "").includes(cwdFilter)) {
@@ -681,11 +798,11 @@ export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceM
   return { sessions, roots: reportRoots, unreadable, store, fatal: undefined };
 }
 
-export function buildReport(store, { sessionFile } = {}) {
-  const report = aggregate(store.sessions);
-  report.roots = sessionFile ? [{ harness: "session", root: path.dirname(path.resolve(sessionFile)), files: 1, missing: false }] : store.roots;
-  report.gaps.unreadable = store.unreadable;
-  report.store = store.store;
+export function buildReport(read, { sessionFile } = {}) {
+  const report = aggregate(read.sessions);
+  report.roots = sessionFile ? [{ harness: "session", root: path.dirname(path.resolve(sessionFile)), files: 1, missing: false }] : read.roots;
+  report.gaps.unreadable = read.unreadable;
+  report.store = read.store;
   return report;
 }
 
@@ -711,8 +828,11 @@ function main() {
     process.exit(1);
   }
 
-  const store = readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceMs });
-  const { sessions, roots: reportRoots, unreadable: unreadablePaths, fatal } = store;
+  const read = readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceMs });
+  const { sessions, roots: reportRoots, unreadable: unreadablePaths, fatal } = read;
+  // `read.store` holds the store-level facts (files read, unparsed lines, exclusions); `unreadablePaths` is
+  // the same list the report's accounting section prints.
+  const accounting = read.store;
   if (fatal) {
     console.error(`session report: cannot read ${fatal}`);
     process.exit(1);
@@ -721,11 +841,14 @@ function main() {
     // Nothing was read, so say why in full: the roots a filter left out are the explanation, and an empty
     // report with a bare exit status is indistinguishable from a crash.
     for (const r of reportRoots) console.error(`session report: ${r.missing ? "no sessions directory at" : "no session files under"} ${r.root}`);
-    for (const skipped of store.store.skippedRoots) console.error(`session report: store left out by --harness ${harnessFilter}: ${skipped.root}`);
+    for (const skipped of accounting.skippedRoots) console.error(`session report: store left out by --harness ${harnessFilter}: ${skipped.root}`);
+    // A store that is present but unreadable is the case where the reason matters most, and this is the one
+    // path that exits before `render` can print it.
+    for (const entry of unreadablePaths) console.error(`session report: cannot read ${entry.path}: ${entry.reason}`);
     process.exit(1);
   }
 
-  const report = buildReport(store, { sessionFile });
+  const report = buildReport(read, { sessionFile });
 
   if (has("json")) console.log(renderJson(report));
   else {
@@ -743,9 +866,9 @@ function main() {
     }
   }
   // A partial ledger is not a report: say so with the exit status too, so a hook cannot read a short total
-  // as a fact about the fusions. Same for a filter that could not be applied to part of the store — the
-  // sessions it skipped may be the ones the filter was looking for.
-  process.exit(unreadablePaths.length === 0 && store.store.unattributable.length === 0 ? 0 : 1);
+  // as a fact about the fusions. That covers a file that could not be read, a session a filter could not
+  // attribute, and a line that did not parse — the last of which is excluded from every total below.
+  process.exit(unreadablePaths.length === 0 && accounting.unattributable.length === 0 && accounting.unparsed === 0 ? 0 : 1);
 }
 
 main();

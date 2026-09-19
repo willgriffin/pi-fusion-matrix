@@ -1018,10 +1018,13 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
 - **it refuses to read an absence as a zero.** A message whose harness records no duration, and one whose
   provider reports no price, are counted as *unrecorded*, not as `0` — pi records no duration at all, omp
   records `duration`/`ttft`, and a subscription provider reports no cost. "We did not record it" and "it
-  cost nothing" are different facts, and only one of them is true;
+  cost nothing" are different facts, and only one of them is true. Money is therefore printed as
+  `$X reported` with its unpriced messages counted beside it, never as one total that absorbed both;
 - **it names what it does not recognise.** A `details` shape carrying a record key but no fusion id is
-  printed with its keys and carrier and never counted as a run; a line that does not parse is counted. A
-  reader that silently skipped either would make a missing record look like a clean run;
+  printed with its full path, carrier and keys — and never counted as a run; a line that does not parse is
+  counted *and* named with its file, line number and reason, and the first ten of every diagnostic list are
+  followed by an omitted-count marker. A reader that silently skipped any of these would make a missing
+  record look like a clean run;
 - **filters select rows, never the accounting.** `--cwd`/`--since` decide which sessions are totalled; the
   files read, the unparsed lines and any session a filter could not attribute (a truncated header has no
   `cwd` to compare, and a malformed timestamp cannot be placed) are reported either way, and the exit
@@ -1029,8 +1032,8 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
   short total as a fact about the fusions, and a file that cannot be read is never a quiet omission.
 
 Exit status: `0` report produced, `1` the store could not be accounted for (missing or empty `--dir`,
-unreadable `--session`, an unreadable file or directory, or a session a filter could not attribute), `2`
-`--check` failed. `--check` is the reader's own accounting, checked against fixtures (40 checks, each shown
+unreadable `--session`, an unreadable file or directory, a line that did not parse, or a session a filter
+could not attribute), `2` `--check` failed. `--check` is the reader's own accounting, checked against fixtures (49 checks, each shown
 to fail under a mutation), so the instrument is held to the same standard as the pipeline it reads.
 
 ## Critical files & anchors
@@ -1281,7 +1284,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     prints its snippet while leaving every tracked file byte-identical (asserted by hash).
 
 22. **The run record survives, and the report reads it** — `node scripts/session-report.mjs --check`
-    passes 40/40 with every check mutation-proved, then in a scratch `cwd` (Step 8's prerequisites):
+    passes 49/49 with every check mutation-proved, then in a scratch `cwd` (Step 8's prerequisites):
     `node scripts/session-report.mjs --cwd <scratch> --json` on the store *before* a `/matrix` run shows
     zero deliberation records, and after `/matrix quick "…"` in **both** pi and omp it shows one, with the
     answer message carrying `details.fusion` — then `--verbose` names that run. A failed run records itself:
