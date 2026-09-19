@@ -1097,8 +1097,11 @@ the failure this mode exists to prevent.
 Three shapes of failure, and each is handled where its facts are known:
 
 - **Nothing forwarded yet** — the alias's next provider gets the turn, exactly as a seat's next route
-  would. A provider that is not configured, has no credential, or whose stream fails before its first
-  event all land here.
+  would. A provider that is not configured, has no credential, whose stream throws before its first
+  event, or whose first event *is* a terminal `error` all land here: an error with nothing before it
+  never reached the harness's conversation, so it is a route that never began rather than a turn that
+  failed. A terminal event after a partial is forwarded verbatim instead — the harness owns the turn from
+  there, and its own retry and auth-recovery machinery is what acts on it.
 - **The level was refused** — a level the target does not support is our request rather than its failure,
   so the route is retried once without one, on the same per-model memory the seat path uses. It can
   surface where the stream is created or where it is first pulled (pi-ai providers open the request
@@ -1381,13 +1384,13 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     0 it used to print is the finding this item is about.
 
 20. **Offline interpreter contracts** — `node scripts/typesafe-stub.mjs &` then
-    `node scripts/interp-check.mjs` must pass 30/30. The original nine: a decisive stage decision skips
+    `node scripts/interp-check.mjs` must pass 32/32. The original nine: a decisive stage decision skips
     the stage it gates with no judge call; an ambiguous one calls the judge and records a prior containing
     the cheap read's answer; debate makes 3 seats × 3 rounds with peers' opinions; a `score` stage issues
     **one** batched request for three seats; `verify` warns without blocking; a confident route redirects
     and an unconfident one declines. The twenty-one added with Step 8: the proxy contracts of item 22, the
     seat's half of the shared thinking-refusal rule, the registration/`matrix-info` surfaces of item 24,
-    and the six loader rules of item 25. This is the check that must run when a provider's quota blocks the live items — and it caught a
+    and the loader rules of item 25. This is the check that must run when a provider's quota blocks the live items — and it caught a
     real gap on first use: stage-level `sufficientWhen` was unimplemented, so a converged panel still paid
     for the judge.
 21. **Doctor exit codes and non-mutation** — with an injected registry and catalogue: clean config exits
@@ -1406,7 +1409,9 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     before any event advances while one that fails after `start` ends the turn; and an unreachable
     executor ends as an error message with no deliberation. The two faces read `thinking` the same way
     too: the writing seat's candidate object pins the proxied turn's route and level, and the execute
-    face's `"harness"` literal never reaches a seat. Each must *fail* when the branch is mutated
+    face's `"harness"` literal never reaches a seat, and an `error` event with nothing before it recovers
+    like a throw (retry without a refused level, else the next provider, both recorded). Each must *fail*
+    when the branch is mutated
     — dropping `tools` from the forwarded context, writing a status line into the stream, falling through
     to the pipeline after the proxy returns, or attaching `details` only to `result()` — which is the
     check's own acceptance.
@@ -1452,8 +1457,8 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     {"judge": "harness"}}}}` → `thinking "harness" is only legal for the writing seat "synth"`; and
     `{"fusions": {"opinions": {"proxy": {"alias": "kimi"}}}}` → `proxy needs a writing seat`. **Verified
     live 2026-09-19**: the first three fail `pi -ne -e <repo>/extensions/pi-fusion-matrix` at load with
-    those messages and exit non-zero, and an empty `proxy: {}` reports `proxy needs an alias`; all six
-    rules are asserted offline in `scripts/interp-check.mjs`. Remove each file afterwards, and confirm the
+    those messages and exit non-zero, and an empty `proxy: {}` reports `proxy needs an alias`; all seven
+    rules (that one, `proxy: null`, and the five above) are asserted offline in `scripts/interp-check.mjs`. Remove each file afterwards, and confirm the
     packaged config alone validates clean (`node scripts/doctor.mjs` exits 0).
 
 ## Assumptions & contingencies

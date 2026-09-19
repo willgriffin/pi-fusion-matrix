@@ -413,52 +413,70 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
       return true;
     };
 
-    let target;
-    let terminal = null;
-    let sent = 0;
-    let answered = false;
-    for (let attempt = 0; attempt < 2 && !answered; attempt += 1) {
+    // One route attempt is three things that can fail: creating the stream, pulling its first event, and
+    // the rest of the stream. The first two are recoverable — nothing has reached the harness, so the next
+    // provider, or this one without a refused level, still gets the turn — and the third is not, because pi
+    // pushes the partial into its conversation on `start` and a second provider's `start` would append a
+    // second assistant message.
+    const record = (detail) => {
+      attempts.push({ alias: resolved.alias, seat: label(resolved), reason: classifyFailure(detail), detail });
+    };
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let target;
       try {
         target = streamSimple(seat.model, context, targetOptions);
       } catch (error) {
         const detail = error?.message ?? String(error);
-        attempts.push({ alias: resolved.alias, seat: label(resolved), reason: classifyFailure(detail), detail });
+        record(detail);
         if (dropLevel(detail)) continue;
         break;
       }
+
+      let terminal = null;
+      let sent = 0;
+      // An `error` event *before* anything else is a route that never began rather than a turn that
+      // failed: pi has not seen a partial, so the same recovery as a throw applies and the failure is
+      // recorded. Past the first event nothing is recoverable, so it is forwarded verbatim.
+      let beforeStart = null;
       try {
         for await (const event of target) {
           const copy = forwarded(event);
+          if (copy.type === "error" && sent === 0) {
+            beforeStart = copy.error?.errorMessage ?? "target reported an error before any event";
+            break;
+          }
           if (copy.type === "done") { copy.message = dressed(copy.message); terminal = "done"; }
           if (copy.type === "error") { copy.error = dressed(copy.error); terminal = "error"; }
           push(copy);
           sent += 1;
         }
-        answered = true;
       } catch (error) {
         const detail = error?.message ?? String(error);
-        attempts.push({ alias: resolved.alias, seat: label(resolved), reason: classifyFailure(detail), detail });
-        // Nothing reached the caller, so this route failed like any other: the next provider — or, for a
-        // level this model refuses, this one without a level — is still worth trying. Past the first
-        // event it is not: pi pushes the partial into its conversation on `start`, so a second provider's
-        // `start` would append a second assistant message.
+        record(detail);
         if (sent === 0 && dropLevel(detail)) continue;
         if (sent === 0) break;
         return fail(`target stream failed after ${sent} events: ${detail}`, { alias: resolved.alias, provider: resolved.provider, model: resolved.model, template: seat.template, thinking: proxied.thinking });
       }
-    }
-    if (!answered) continue;
+      if (beforeStart !== null) {
+        record(beforeStart);
+        if (dropLevel(beforeStart)) continue;
+        break;
+      }
 
-    const final = dressed(await target.result());
-    // A target that ended without a terminal event leaves the harness's loop waiting on a stream that
-    // never completes. The result is the same message, so it becomes the terminal event itself.
-    if (terminal === null) {
-      push(final.stopReason === "stop" || final.stopReason === "length" || final.stopReason === "toolUse"
-        ? { type: "done", reason: final.stopReason, message: final }
-        : { type: "error", reason: final.stopReason === "aborted" ? "aborted" : "error", error: final });
+      const final = dressed(await target.result());
+      // A target that ended without a terminal event leaves the harness's loop waiting on a stream that
+      // never completes. The result is the same message, so it becomes the terminal event itself.
+      if (terminal === null) {
+        push(final.stopReason === "stop" || final.stopReason === "length" || final.stopReason === "toolUse"
+          ? { type: "done", reason: final.stopReason, message: final }
+          : { type: "error", reason: final.stopReason === "aborted" ? "aborted" : "error", error: final });
+      }
+      end(final);
+      return;
     }
-    end(final);
-    return;
+    // Every attempt on this route failed without reaching the caller, so the alias's next provider gets
+    // the turn.
   }
 
   const detail = attempts.map((a) => `${a.seat} (${a.reason}: ${String(a.detail ?? "").slice(0, 140)})`).join("; ") || `alias "${executor.alias}" has no providers`;

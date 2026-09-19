@@ -445,12 +445,46 @@ check("proxy: `proxy.alias` answers on the override's own route, at the writer's
     && overrideSeen[0]?.options.reasoning === "high",
   `model=${overrideSeen[0]?.model.id}@${overrideSeen[0]?.model.provider} @${overrideSeen[0]?.options.reasoning}`);
 
+// An `error` event with nothing before it never reached the harness, so it recovers like a throw: the
+// same route without a refused level, or the next provider. (Found by review: the first version treated
+// any forwarded event as a committed turn, so a provider reporting its refusal as an event bypassed both
+// the retry and the fallback while `details.proxied.thinking` still named the level it never ran at.)
+config.aliases["proxy-eventful"] = { model: "glm-5.3", providers: ["opencode-go", "zai"], contextWindow: 1000, maxTokens: 100 };
+config.fusions["proxy-eventful"] = { mode: "single", thinking: { technical: "low" }, candidates: { technical: ["proxy-eventful"] } };
+const eventAttempts = [];
+const errorEventPeer = {
+  streamSimple: (model, context, options) => {
+    eventAttempts.push(`${model.provider}@${options.reasoning ?? "-"}`);
+    const failed = { role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [],
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "error", errorMessage: options.reasoning ? `Thinking effort ${options.reasoning} is not supported by ${model.provider}/${model.id}. Supported efforts: high, max` : "upstream refused" };
+    const ok = { ...failed, content: [{ type: "text", text: "answered anyway" }], stopReason: "stop", errorMessage: undefined };
+    return {
+      async *[Symbol.asyncIterator]() {
+        if (options.reasoning) { yield { type: "error", reason: "error", error: failed }; return; }
+        if (model.provider === "opencode-go") { yield { type: "error", reason: "error", error: { ...failed, errorMessage: "upstream refused" } }; return; }
+        yield { type: "text_delta", contentIndex: 0, delta: "answered anyway", partial: ok };
+        yield { type: "done", reason: "stop", message: ok };
+      },
+      result: async () => ok,
+    };
+  },
+};
+const eventRecovered = await driveStream(fusionStream(errorEventPeer)(fusionModel("proxy-eventful"), harnessContext, harnessOptions));
+check("proxy: an error event before any event recovers like a throw",
+  eventAttempts.join(" ") === "opencode-go@low opencode-go@- zai@low zai@-"
+    && textOfEvents(eventRecovered.events) === "answered anyway"
+    && eventRecovered.final.details?.proxied?.provider === "zai"
+    && eventRecovered.final.details?.proxied?.attempts?.length === 3,
+  `attempts=${JSON.stringify(eventAttempts)}, provider=${eventRecovered.final.details?.proxied?.provider}, recorded=${eventRecovered.final.details?.proxied?.attempts?.length}`);
+
 // Every proxy rule the loader enforces, asserted where it is enforced rather than only through a harness.
 const { config: fresh } = loadMatrixConfig({ cwd: process.cwd(), layers: ["packaged"] });
 const errorsFor = (patch) => validateConfig(mergeConfig(JSON.parse(JSON.stringify(fresh)), patch), {});
 const proxyRules = [
   ["an unknown alias", { fusions: { best: { proxy: { alias: "no-such-alias" } } } }, /proxy alias "no-such-alias" is not an alias/],
   ["an empty proxy block", { fusions: { best: { proxy: {} } } }, /proxy needs an alias/],
+  ["a null proxy block", { fusions: { best: { proxy: null } } }, /proxy is not an object/],
   ["proxy with route", { fusions: { "default-smrt": { proxy: { alias: "qwen-flash" } } } }, /proxy and route cannot both be declared/],
   ["a writing seat that is not the writer", { fusions: { best: { thinking: { judge: "harness" } } } }, /"harness" is only legal for the writing seat "synth"/],
   ["proxy on a mode that writes nothing", { fusions: { opinions: { proxy: { alias: "kimi" } } } }, /proxy needs a writing seat/],

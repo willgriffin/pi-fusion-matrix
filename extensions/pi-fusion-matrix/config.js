@@ -473,18 +473,18 @@ export function validateConfig(config, { sources } = {}) {
       }
     }
     if (fusion.proxy !== undefined) {
+      const declared = isObject(fusion.proxy) ? fusion.proxy.alias : undefined;
       if (!isObject(fusion.proxy)) {
         err(`fusion "${id}": proxy is not an object`);
-      } else if (typeof fusion.proxy.alias !== "string" || !fusion.proxy.alias) {
+      } else if (typeof declared !== "string" || !declared) {
         err(`fusion "${id}": proxy needs an alias; the writing seat already is the default`);
-      } else if (!aliases[fusion.proxy.alias]) {
-        err(`fusion "${id}": proxy alias "${fusion.proxy.alias}" is not an alias`);
-      }
-      // `proxy.alias` re-points which model the writing seat runs on; it is not a way to give a mode
-      // that writes nothing an executor. Such a fusion has no persona, so the thinking table's "the
-      // writing seat's persona level" row would have nothing to read and a configured level would be
-      // dropped in silence — this load error is the loud version of that.
-      if (typeof fusion.proxy.alias === "string" && fusion.proxy.alias && !executorOf(config, fusion)) {
+      } else if (!aliases[declared]) {
+        err(`fusion "${id}": proxy alias "${declared}" is not an alias`);
+      } else if (!executorOf(config, fusion)) {
+        // `proxy.alias` re-points which model the writing seat runs on; it is not a way to give a mode
+        // that writes nothing an executor. Such a fusion has no persona, so the thinking table's "the
+        // writing seat's persona level" row would have nothing to read and a configured level would be
+        // dropped in silence — this load error is the loud version of that.
         err(`fusion "${id}": proxy needs a writing seat (a mode whose last stage is a single seat); mode "${fusion.mode}" writes nothing, so the executor would have no persona to take a thinking level from`);
       }
       // A proxied turn runs no pipeline, so a route on the same fusion could never fire — two

@@ -159,8 +159,9 @@ tool-less turns are the harness's side-channel calls, a title or a compaction, a
 pipeline in phase 1.) Nothing is added to a proxied turn's message — no banner, no seat line, no
 substitutions — because in a coding turn that text lands in the conversation and corrupts the agent
 loop. A target that cannot be reached is an error message rather than a quiet deliberation; a level it
-does not support is dropped once and the turn continues; and every route the alias walked is recorded
-in `details.proxied.attempts`.
+does not support is dropped once and the turn continues; an error that arrives before anything else is a
+route that never began, so the next provider still gets the turn; and every route the alias walked is
+recorded in `details.proxied.attempts`.
 
 The executor is the fusion's **writing seat** — a pipeline's synthesis, or the single seat — so
 re-pointing that one seat re-points what codes under the rung:
@@ -635,7 +636,7 @@ quota blocks a live one:
 
 ```bash
 node scripts/typesafe-stub.mjs & node scripts/semif-stub.mjs &      # local backends
-node scripts/interp-check.mjs                                       # 30 interpreter contracts
+node scripts/interp-check.mjs                                       # 32 interpreter contracts
 node scripts/doctor.mjs                                             # config + connectivity
 node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone
 node scripts/semif-probe.mjs    --backend http://127.0.0.1:8792/score
@@ -657,7 +658,7 @@ attempt recorded, a refused level dropped once, a route that dies mid-stream end
 unreachable executor ending as an error instead of a deliberation, the writing seat's candidate object
 pinning the proxied route and level, and the execute face's `"harness"` literal never reaching a seat.
 The same file asserts what the extension *registers* — the executor's numbers and thinking capability per
-rung — what `/matrix-info` prints for each fusion's execute face, and each of the loader's six proxy
+rung — what `/matrix-info` prints for each fusion's execute face, and each of the loader's seven proxy
 rules by name.
 
 ## What it does not do
