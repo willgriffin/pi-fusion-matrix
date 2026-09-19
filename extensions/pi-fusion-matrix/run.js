@@ -19,7 +19,7 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { resolveCandidates, seatRequest, label, isObject } from "./resolve.js";
-import { runPipeline, freshUsage, accumulateUsage, isSufficient, isThinkingRefusal, rememberThinkingRefusal } from "./pipeline.js";
+import { runPipeline, freshUsage, accumulateUsage, isSufficient, isThinkingRefusal } from "./pipeline.js";
 import { harnessName, executorOf, executorThinking } from "./config.js";
 
 /**
@@ -407,7 +407,10 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
     const dropLevel = (detail) => {
       if (retriedLevel || !targetOptions.reasoning || !isThinkingRefusal(detail)) return false;
       retriedLevel = true;
-      rememberThinkingRefusal(resolved.provider, resolved.model, targetOptions.reasoning);
+      // Deliberately *not* recorded in the seat path's per-model memory: that memory exists so a seat does
+      // not retry a level twice, and a suppressed retry in a proxied turn is a failed turn. A refusal here
+      // costs one extra call on the next turn rather than turning `/matrix` on the same rung into a
+      // degradation.
       delete targetOptions.reasoning;
       proxied.thinking = null;
       return true;

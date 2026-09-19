@@ -340,6 +340,26 @@ const seatRun = await runPipeline({
   config, sources, fusion: { mode: "single", thinking: { technical: "low" }, candidates: { technical: ["glm"] }, id: "seat-refusal" },
   prompt: "x", callModel: refusingSeatCallModel, decide, emit: silent, registry,
 });
+// A proxied refusal must not poison the seat path: the proxy retries once unconditionally and records
+// nothing in the seat's per-model memory, because a seat that "knows" the level is refused skips its own
+// retry — one recovered coding turn would then make `/matrix` on the same rung degrade instead of
+// answering without reasoning. (Found by review; this case runs after the proxy refusal above, on the same
+// `opencode-go/deepseek-v4.1-flash@low`.)
+const afterProxySeatLevels = [];
+const afterProxySeatRun = await runPipeline({
+  config, sources, fusion: { mode: "single", thinking: { technical: "low" }, candidates: { technical: ["deepseek-flash"] }, id: "seat-after-proxy" },
+  prompt: "x", registry, decide, emit: silent,
+  callModel: async ({ persona, reasoning }) => {
+    afterProxySeatLevels.push(reasoning ?? null);
+    const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+    if (reasoning) return { text: "", usage, stopReason: "error", errorMessage: `Thinking effort ${reasoning} is not supported by opencode-go/deepseek-v4.1-flash. Supported efforts: high, max`, toolCalls: [] };
+    return { text: `answered as ${persona?.name}`, usage, stopReason: "stop", toolCalls: [] };
+  },
+});
+check("seat: a proxied refusal does not suppress the seat's own retry",
+  afterProxySeatLevels.join(",") === "low," && afterProxySeatRun.text === "answered as technical",
+  `levels=${JSON.stringify(afterProxySeatLevels)}, text=${JSON.stringify(afterProxySeatRun.text)}`);
+
 check("seat: a refused thinking level is retried once without one",
   seatLevels.join(",") === "low," && seatRun.text === "answered without a level",
   `levels=${JSON.stringify(seatLevels)}, text=${JSON.stringify(seatRun.text)}`);

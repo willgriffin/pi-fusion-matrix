@@ -50,10 +50,12 @@ export function isThinkingRefusal(message) {
 
 /**
  * Remember that this (provider, model, level) is refused, so a *seat* does not retry one it already knows
- * is refused while a level that is supported is still requested next time.
+ * is refused, while a level that is supported is still requested next time.
  *
- * The proxy branch retries once whatever this remembers — it never fails a whole turn to save one call —
- * but records the fact here too, because the fact is about the model rather than about who asked.
+ * Seats are the only writers. The proxy branch (run.js) retries once unconditionally — it never fails a
+ * whole turn to save one call — so a refusal it has already recovered from must not suppress that retry,
+ * which is what sharing this memory did: one proxied refusal made `/matrix` on the same rung degrade
+ * instead of answering without reasoning.
  */
 export function rememberThinkingRefusal(provider, model, level) {
   if (level) noThinking.add(`${provider}/${model}@${level}`);
