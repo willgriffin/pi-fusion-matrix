@@ -13,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { loadMatrixConfig, validateConfig, REPO_ROOT } from "./config.js";
-import { loadPi, makeCallModel, createFusionStream } from "./run.js";
+import { loadPi, loadTypebox, makeCallModel, createFusionStream } from "./run.js";
 import { createDecide } from "./decide.js";
 import { runDoctor, formatFindings, repairSnippet, EXIT } from "./doctor.js";
 
@@ -50,6 +50,18 @@ export default async function (pi) {
   const callModel = makeCallModel(getPi);
   const decide = createDecide({ config });
 
+  // The file agent's `write` tool needs one schema, and the builder for it is harness-specific. omp
+// injects one on the extension API (`pi.zod`, so `z.object({ path: z.string() })`); pi expects the
+// extension to bring `typebox` (`Type.Object({ path: Type.String() })`) — a bundled peer resolved from
+// pi's own installation. Memoized, and resolved at the first tool call rather than at load, so a
+// harness whose peer cannot be found still registers its models and reports the failure per seat.
+  let writeParametersCache = null;
+  const getWriteParameters = () => (writeParametersCache ??= (async () => {
+    if (pi.zod) return pi.zod.object({ path: pi.zod.string(), content: pi.zod.string() });
+    const { Type } = await loadTypebox();
+    return Type.Object({ path: Type.String(), content: Type.String() });
+  })());
+
   // `createFusionStream` asks for its registry once, when a run starts, so the getter has to know the
   // session by then: one stream function per session (not per run, and not one shared between them).
   const streams = new Map();
@@ -57,7 +69,7 @@ export default async function (pi) {
     const key = sessionId ?? "";
     let stream = streams.get(key);
     if (!stream) {
-      stream = createFusionStream({ config, sources, getRegistry: () => getRegistry(sessionId), decide, callModel, getPi });
+      stream = createFusionStream({ config, sources, getRegistry: () => getRegistry(sessionId), decide, callModel, getPi, getWriteParameters });
       streams.set(key, stream);
     }
     return stream;
@@ -104,7 +116,7 @@ export default async function (pi) {
         return { content: [{ type: "text", text: `unknown fusion "${fusion}"; known: ${fusionIds.join(", ")}` }], details: { fusion } };
       }
       try {
-        const result = await runOnce({ config, sources, fusion, prompt: params.prompt, getRegistry: () => getRegistry(sessionIdOf(ctx)), decide, callModel });
+        const result = await runOnce({ config, sources, fusion, prompt: params.prompt, getRegistry: () => getRegistry(sessionIdOf(ctx)), decide, callModel, getWriteParameters });
         return { content: [{ type: "text", text: result.text }], details: { fusion, ...result.details } };
       } catch (error) {
         const message = error?.message ?? String(error);
@@ -128,7 +140,7 @@ export default async function (pi) {
 
       ctx.ui.setStatus("matrix", `🧠 ${fusion}…`);
       try {
-        const result = await runOnce({ config, sources, fusion, prompt, getRegistry: () => getRegistry(sessionIdOf(ctx)), decide, callModel, onProgress: (line) => ctx.ui.setStatus("matrix", line) });
+        const result = await runOnce({ config, sources, fusion, prompt, getRegistry: () => getRegistry(sessionIdOf(ctx)), decide, callModel, onProgress: (line) => ctx.ui.setStatus("matrix", line), getWriteParameters });
         pi.sendMessage({ customType: "matrix-answer", content: result.text, display: true }, { triggerTurn: false });
       } catch (error) {
         ctx.ui.notify(`fusion failed: ${error?.message ?? String(error)}`, "error");
@@ -185,7 +197,7 @@ export default async function (pi) {
  * tool calls, so nothing else would write them and reporting "saved N files" without writing would be a
  * false claim. Failures are per file and reported as written-or-not.
  */
-async function runOnce({ config, sources, fusion, prompt, getRegistry, decide, callModel, onProgress }) {
+async function runOnce({ config, sources, fusion, prompt, getRegistry, decide, callModel, onProgress, getWriteParameters }) {
   const { runPipeline } = await import("./pipeline.js");
   const { routeFusion, verifyRun, fileAgentStep, makeRunGate } = await import("./run.js");
   const notes = [];
@@ -208,7 +220,7 @@ async function runOnce({ config, sources, fusion, prompt, getRegistry, decide, c
   // answers and `{{judge}}` the judge's, which the final text cannot stand in for.
   const vars = run.vars ?? { prompt, panel: "", judge: run.text, synthesis: run.text, cwd: process.cwd() };
   const verification = await verifyRun({ config, fusion: routed.fusion, vars, decide, emit, runGate: makeRunGate() });
-  const files = await fileAgentStep({ config, fusion: routed.fusion, prompt, synthesis: run.text, registry: getRegistry(), callModel, emit });
+  const files = await fileAgentStep({ config, fusion: routed.fusion, prompt, synthesis: run.text, registry: getRegistry(), callModel, emit, getWriteParameters });
 
   // Confined to the project. The content is model output derived from panel responses, so a path that
   // escapes the workspace — absolute, or `..` — is refused and reported rather than written. (The

@@ -628,6 +628,16 @@ an advance), and emit one `⚠️ <provider>/<model> rejects a temperature overr
 delta. Prevention belongs in `models.json`: a model that always rejects it gets
 `"samplingParams": { "temperature": 1 }`, which pi merges into the request body.
 
+A thinking level can be refused the same way, except that a harness may refuse it *before* the request
+rather than the provider after it. Measured 2026-09-18, the same config and the same vendor model:
+pi sends `reasoning: "medium"` and the provider ignores what it does not support, while omp answers
+`Thinking effort medium is not supported by opencode-go/glm-5.3. Supported efforts: low, high, max` —
+a seat-killing error where pi ran. So the same rule applies one level down: remember the refusal per
+provider/model *and* level, retry that seat once with no reasoning level (never at a level the config
+did not ask for — a silent substitution of a sampling parameter is the thing this spec forbids), emit
+one `⚠️ <provider>/<model> does not support thinking "<level>"; retrying that seat without a reasoning
+level.` delta, and keep requesting levels that *are* supported, because the memory is keyed by level.
+
 Tool path: the `matrix` tool and the `/matrix` command cannot emit a pi stream, so they execute the file
 agent's writes themselves (`mkdir -p`, then write; per-file failures reported) and return the run record
 in `details` — substitutions, cascades, routing, verification, seats, usage, notes. Reporting "N files
@@ -1276,6 +1286,18 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
   produced that gateway-side error. The two peers (`@earendil-works/pi-ai/compat`, `typebox`) are
   resolved by walking up from the *real* entry script, because a bare specifier does not resolve from a
   symlinked extension directory and `process.argv[1]` is the bin shim.
+- **One extension, two harnesses.** omp is a fork of this stack under its own scope (`@oh-my-pi/*`) and
+  exposes the same extension API — `registerProvider` with a `streamSimple`, `registerTool` with the
+  same `execute(toolCallId, params, signal, onUpdate, ctx)`, `registerCommand`, `on("session_start")`,
+  and a `modelRegistry` with `getApiKeyAndHeaders` — so nothing in the pipeline changes. Two things do,
+  and both live where the harness API object is: the streaming peer (`@oh-my-pi/pi-ai` exports
+  `streamSimple` from its TypeScript source entry, which Bun runs directly) and the tool schema builder
+  (omp injects `pi.zod`; pi expects the extension to bring `typebox`). Peers are tried in order and each
+  candidate is held to the same rule — realpath-verified to live inside the directory it was found in,
+  with the ancestor walk bounded so a planted `$HOME/node_modules/…` is unreachable. **Verified
+  2026-09-18 on omp 18.2.6**: `omp --no-extensions -e …/index.js -p … --model fusion-matrix/solo`
+  answers `ZQX1`, and `standard` runs the file agent through the injected `pi.zod` schema, writing a
+  file via omp's own tool call.
 - **A provider can mix api flavours, so the template for an uncatalogued id decides the wire protocol.**
   pi's `opencode-go` serves glm-* over `openai-completions`, minimax/qwen3.8-max over
   `anthropic-messages`, and luna/grok over `openai-responses`; picking "the first sibling" sent a tool

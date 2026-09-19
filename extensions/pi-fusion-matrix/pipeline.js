@@ -26,7 +26,14 @@ import { resolveCandidates, seatRequest, label, isObject } from "./resolve.js";
 /** pi-ai rejects temperature on some models; learned per provider/model and reported once. */
 const noTemperature = new Set();
 
+/**
+ * A harness (or a provider) may refuse a thinking level a model does not support. Learned per
+ * provider/model *and* level, so a supported level is still requested, and reported once.
+ */
+const noThinking = new Set();
+
 const MODELS_REJECT_TEMPERATURE = /temperature/i;
+const THINKING_UNSUPPORTED = /thinking effort .*not supported|unsupported (thinking|reasoning)|thinking .*not supported|reasoning .*not supported/i;
 const QUOTA = /\b429\b|usage limit|quota|balance/i;
 const CREDENTIAL = /\b40[13]\b|unauthorized|invalid api key/i;
 const MISSING_MODEL = /not found|unknown model|\b404\b/i;
@@ -286,13 +293,13 @@ export async function runSeat({
       // A thrown transport error is an attempt like any other: classified, retried once when transient,
       // then a substitution. Only text already streamed to the caller is sacred — if any went out, the
       // run ends with it rather than concatenating a second model's answer onto a partial one.
-      const call = async (withTemperature) => {
+      const call = async (withTemperature, withThinking = true) => {
         calls += 1;
         try {
           return await callModel({
             model: seat.model, apiKey: seat.apiKey, headers: seat.headers, messages,
             temperature: withTemperature ? temperature : undefined,
-            reasoning: thinking, signal, persona: seatPersona,
+            reasoning: withThinking ? thinking : undefined, signal, persona: seatPersona,
             onDelta: onDelta ? (chunk) => { emitted += chunk; onDelta(chunk); } : undefined,
           });
         } catch (error) {
@@ -305,6 +312,18 @@ export async function runSeat({
         noTemperature.add(key);
         emit.delta(` ├─ ⚠️ ${key} rejects a temperature override; retrying without it.\n`);
         message = await call(false);
+      }
+      // A harness may enforce a model's supported thinking efforts instead of passing the level through
+      // (measured 2026-09-18: omp answers `Thinking effort medium is not supported by opencode-go/glm-5.3.
+      // Supported efforts: low, high, max`, while pi sends it and lets the provider ignore it). The seat
+      // is retried once at no reasoning level rather than at a guess — a level the config did not ask for
+      // would be a silent substitution — and the level that failed is remembered per model, so a level
+      // that *is* supported is still requested next time.
+      const thinkingKey = `${key}@${thinking}`;
+      if (message.stopReason === "error" && thinking && !noThinking.has(thinkingKey) && THINKING_UNSUPPORTED.test(message.errorMessage ?? "")) {
+        noThinking.add(thinkingKey);
+        emit.delta(` ├─ ️ ${key} does not support thinking "${thinking}"; retrying that seat without a reasoning level.\n`);
+        message = await call(!noTemperature.has(key), false);
       }
 
       if (message.stopReason === "error") {

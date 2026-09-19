@@ -3,17 +3,19 @@
 Several models deliberate; one answer comes back — and every step of how that happened, including
 **who got routed to what**, is configuration you can read and a run record you can audit.
 
-A [pi](https://pi.dev) extension for multi-model deliberation. It owns resolution, routing, and
+A [pi](https://pi.dev) extension — and one for [omp](https://github.com/oh-my-pi), the fork of the same
+stack — for multi-model deliberation. One codebase, both harnesses. It owns resolution, routing, and
 execution: which model chain answers each seat, whether a cheap decision can answer instead of a model
 call, which shape a run takes, and which fusion a request should even use in the first place. It
 registers one model per fusion (`fusion-matrix/deep`, `fusion-matrix/standard`, …), runs each seat
-through pi's own provider runtime and credential store, and returns a normal pi assistant-message
-stream. Providers, endpoints, credentials, transport, and accounting stay pi's.
+through the harness's own provider runtime and credential store, and returns a normal
+assistant-message stream. Providers, endpoints, credentials, transport, and accounting stay the
+harness's.
 
-Status: implemented and verified. Twelve fusions register and run on pi 0.84.2 and 0.85.1, the
-twenty-one verification items in [`docs/plan.md`](docs/plan.md) are recorded there with their evidence,
-and the repository's own offline contracts (`scripts/interp-check.mjs`, `scripts/doctor.mjs`, both
-probes) pass with no keys and no network. The spec is [`docs/plan.md`](docs/plan.md).
+Status: implemented and verified on both harnesses — twelve fusions register and run on pi
+0.84.2/0.85.1 and on omp 18.2.6, from one codebase. The twenty-one verification items in
+[`docs/plan.md`](docs/plan.md) carry their evidence inline, and the repository's own offline contracts
+(`scripts/interp-check.mjs`, `scripts/doctor.mjs`, both probes) pass with no keys and no network.
 
 ## Why this exists
 
@@ -45,6 +47,33 @@ Then `/reload` in a running session. A git install is pinned to the ref you inst
 explicitly (`…@v1`, `…@<sha>`) if you want a fixed point; `pi update --extensions` reconciles the clone
 to that ref rather than moving it. It declares no runtime dependencies — pi bundles the peers it lists
 — so there is nothing for the installer to fetch.
+
+The same directory loads in **omp**, which reads the same pi-style extension API:
+
+```bash
+ln -s "$PWD/extensions/pi-fusion-matrix" ~/.omp/agent/extensions/pi-fusion-matrix   # omp's own extension dir
+omp --extension "$PWD/extensions/pi-fusion-matrix/index.js" -p "…" --model fusion-matrix/solo   # or for one run
+```
+
+Both were verified end to end: the same commit answers `ZQX1` through `fusion-matrix/solo`, streams a
+panel, runs the file agent (writing a file through the harness's own tool call), and reports the same
+substitutions on pi 0.84.2/0.85.1 and omp 18.2.6.
+
+### One extension, two harnesses
+
+Two things differ between them, and both are resolved at runtime rather than branched in config:
+
+| | pi | omp |
+|---|---|---|
+| streaming peer | `@earendil-works/pi-ai/compat` (`streamSimple`) | `@oh-my-pi/pi-ai` (`streamSimple`) |
+| tool schema builder | the extension brings `typebox` (`Type.Object`) | the harness injects `pi.zod` (`z.object`) |
+| thinking levels | passed through; the provider may ignore an unsupported level | enforced per model — an unsupported level is refused up front |
+
+Each peer is resolved from the running harness's own installation, realpath-verified to live inside it,
+and never from a search path (a module planted in a writable ancestor directory would be executed
+before any check, and would then be handed the harness's resolved credentials). An unsupported thinking
+level is retried once at no reasoning level and reported — never silently lowered to a guess — and the
+refusal is learned per model *and* level, so a level that is supported is still requested next time.
 
 Requirements before the first run:
 

@@ -19,15 +19,18 @@ import { pathToFileURL } from "node:url";
 import { resolveCandidates, seatRequest, label, isObject } from "./resolve.js";
 import { runPipeline, freshUsage, accumulateUsage, isSufficient } from "./pipeline.js";
 
-/** pi-ai's `Tool` shape, with a Typebox schema because that is what its adapters expect. */
-export function writeTool(Type) {
+/**
+ * pi-ai's `Tool` shape. `parameters` arrives ready-made from the caller, because the schema builder is
+ * harness-specific and the two harnesses spell the very same two fields differently: omp injects
+ * `pi.zod` (`z.object({ path: z.string() })`), while pi expects the extension to bring `typebox`
+ * (`Type.Object({ path: Type.String() })`). Building it where the harness API object lives keeps that
+ * one branch in one place instead of teaching this file two dialects.
+ */
+export function writeTool(parameters) {
   return [{
     name: "write",
-    description: "Write content to a file. Create one file per tool call. Use relative paths from the project root.",
-    parameters: Type.Object({
-      path: Type.String({ description: "Path to the file to write (relative or absolute)" }),
-      content: Type.String({ description: "Full content to write to the file" }),
-    }),
+    description: "Write content to a file: `path` (relative to the project root) and `content` (the full file body, not a diff). Create one file per tool call.",
+    parameters,
   }];
 }
 
@@ -43,85 +46,95 @@ export function classifyFailure(text) {
 }
 
 /**
- * pi-ai resolution, in order, because a bare specifier is not enough here.
+ * Peer modules come from the running harness's own installation, and nothing else.
  *
- * Measured 2026-09-18: `import("@earendil-works/pi-ai/compat")` resolves from an extension loaded with
- * `-e`, but the same import from a *symlinked* extension directory fails at call time —
- * `Cannot find package '@earendil-works/pi-ai' imported from …/run.js` — because the module is imported
- * after load, from the file's real path, where no `node_modules` exists. So: try the specifier, then
- * pi's own installation (found by walking up from the script pi was launched with), then report every
- * attempt. A compiled single-file pi has no on-disk package to walk to, which the error says plainly.
+ * One extension, two harnesses: pi ships `@earendil-works/pi-ai` with a compiled `compat.js`, and omp —
+ * a fork of the same stack under its own scope — ships `@oh-my-pi/pi-ai` with the same `streamSimple`
+ * exported from its (TypeScript, Bun-run) source entry. Both are tried in order, and both are held to
+ * the same rule.
+ *
+ * The tempting alternative — walking ancestors of the entry script freely — was a supply-chain hole: a
+ * module planted in any writable ancestor directory is *executed* by `import` before any check, and
+ * would then receive the harness's resolved credential for every seat. So the search starts from the
+ * real path of the script the harness was launched with (`process.argv[1]` is the bin shim, a symlink
+ * into the package), stops after {@link PEER_WALK_LEVELS} levels, requires each candidate to exist, and
+ * realpath-verifies that it lives inside the directory it was found in. A miss fails closed instead of
+ * continuing down a search path.
+ *
+ * The bound is what keeps a planted `$HOME/node_modules/…` unreachable: pi keeps its peers inside its
+ * own package (one level up), and a hoisted install such as Bun's global root keeps them three to four
+ * levels up — while the user's home is further up still. A compiled single-file harness has no on-disk
+ * package to walk to, and this says so.
  */
-/**
- * Where a bundled peer can be found, in order, because a bare specifier is not enough here.
- *
- * Measured 2026-09-18: `import("@earendil-works/pi-ai/compat")` resolves from an extension loaded with
- * `-e`, but the same import from a *symlinked* extension directory fails at call time —
- * `Cannot find package '@earendil-works/pi-ai' imported from …/run.js` — because the import happens
- * after load, from the file's real path, where no `node_modules` exists. `process.argv[1]` is also the
- * bin shim (`…/bin/pi`), a symlink into the package, so it must be resolved before walking up.
- */
-/**
- * Peer modules come from pi's own installation, and nothing else.
- *
- * The tempting alternative — walking ancestors of the entry script — was a supply-chain hole: a module
- * planted in any writable ancestor directory is *executed* by `import` before any check, and would then
- * receive pi's resolved credential for every seat. So the installation root is derived from the real
- * path of the script pi was launched with, each candidate is realpath-verified to live inside that
- * installation's `node_modules`, and a miss fails closed instead of continuing down a search path.
- *
- * (`process.argv[1]` is the bin shim, a symlink into the package, which is why it must be resolved
- * first. A compiled single-file pi has no on-disk package: this throws with that stated.)
- */
-async function loadPeer(subpath, bare, check) {
+const PEER_WALK_LEVELS = 6;
+
+const PEERS = [
+  { harness: "pi", subpath: "node_modules/@earendil-works/pi-ai/dist/compat.js", bare: "@earendil-works/pi-ai/compat" },
+  { harness: "omp", subpath: "node_modules/@oh-my-pi/pi-ai/src/index.ts", bare: "@oh-my-pi/pi-ai" },
+];
+
+async function loadPeer(peer, check) {
   const entry = process.argv[1] ?? "";
   let real = null;
   try { real = fs.realpathSync(entry); } catch { /* compiled binary or missing shim */ }
-  if (!real) throw new Error(`cannot locate pi's installation to load ${bare} from (entry ${entry || "unknown"})`);
+  if (!real) throw new Error(`cannot locate the harness installation to load ${peer.bare} from (entry ${entry || "unknown"})`);
 
-  // Walk up from pi's own entry — bounded to a few levels, and each level must actually contain the
-  // module — so the search cannot wander into a directory a repository can write to.
   let root = null;
   let dir = path.dirname(real);
-  for (let i = 0; i < 4 && dir !== path.dirname(dir); i += 1) {
-    if (fs.existsSync(path.join(dir, subpath))) { root = dir; break; }
+  for (let i = 0; i < PEER_WALK_LEVELS && dir !== path.dirname(dir); i += 1) {
+    if (fs.existsSync(path.join(dir, peer.subpath))) { root = dir; break; }
     dir = path.dirname(dir);
   }
   if (!root) {
-    throw new Error(`${bare} is not installed beside the running pi (looked up from ${path.dirname(real)}); this extension uses the copy pi ships, never a search path`);
+    throw new Error(`no ${peer.bare} found beside the running harness (looked from ${path.dirname(real)} up ${PEER_WALK_LEVELS} levels); this extension uses the module the harness ships, never a search path outside its installation`);
   }
 
-  const resolved = fs.realpathSync(path.join(root, subpath));
+  const resolved = fs.realpathSync(path.join(root, peer.subpath));
   const realRoot = fs.realpathSync(root);
   if (!resolved.startsWith(realRoot + path.sep)) {
-    throw new Error(`${bare} resolved outside pi's installation (${resolved}); refusing to import it`);
+    throw new Error(`${peer.bare} resolved outside its installation (${resolved}); refusing to import it`);
   }
   const mod = await import(pathToFileURL(resolved).href);
-  if (!check(mod)) throw new Error(`${bare} at ${resolved} did not export what this extension needs`);
-  return { mod, from: resolved };
+  if (!check(mod)) throw new Error(`${peer.bare} at ${resolved} did not export what this extension needs`);
+  return { mod, from: resolved, harness: peer.harness };
 }
 
 let piCache;
+/** The harness's streaming entry: `streamSimple`, resolved from whichever installation is running us. */
 export async function loadPi() {
   if (!piCache) {
-    piCache = loadPeer("node_modules/@earendil-works/pi-ai/dist/compat.js", "@earendil-works/pi-ai/compat",
-      (m) => typeof m.streamSimple === "function")
-      .then(({ mod, from }) => ({ streamSimple: mod.streamSimple, from }));
+    piCache = (async () => {
+      const failures = [];
+      for (const peer of PEERS) {
+        try {
+          const { mod, from, harness } = await loadPeer(peer, (m) => typeof m.streamSimple === "function");
+          return { streamSimple: mod.streamSimple, from, harness };
+        } catch (error) {
+          failures.push(`${peer.harness}: ${error.message}`);
+        }
+      }
+      throw new Error(`no usable harness peer for streamSimple\n  ${failures.join("\n  ")}`);
+    })();
   }
   return piCache;
 }
 
+const SCHEMA_PEER = { harness: "pi", subpath: "node_modules/typebox/build/index.mjs", bare: "typebox" };
+
 let typeboxCache;
 /**
- * typebox, because pi-ai's `Tool.parameters` is a TSchema and its adapters serialise it into the
- * provider's tool schema. A plain JSON-schema object looks equivalent but is not: with one, the
- * opencode-go gateway answered `Cannot read properties of undefined (reading 'length')`, while the same
- * request over curl in the OpenAI wire shape returned 200 — measured 2026-09-18. With a Typebox schema
- * the call returns `toolUse` and a toolCall.
+ * The schema builder for a harness that does not inject one. pi expects an extension to bring
+ * `typebox` (a bundled peer) because pi-ai's `Tool.parameters` is a TSchema and its adapters serialise
+ * it into the provider's tool schema; omp injects `pi.zod` instead, so this path is pi's alone.
+ *
+ * A plain JSON-schema object is not a substitute: with one, the opencode-go gateway answered
+ * `Cannot read properties of undefined (reading 'length')`, while the same request over curl in the
+ * OpenAI wire shape returned 200 — measured 2026-09-18. With a real schema builder the call returns
+ * `toolUse` and a toolCall.
  */
 export async function loadTypebox() {
   if (!typeboxCache) {
-    typeboxCache = loadPeer("node_modules/typebox/build/index.mjs", "typebox", (m) => typeof m.Type?.Object === "function").then(({ mod }) => mod);
+    typeboxCache = loadPeer(SCHEMA_PEER, (m) => typeof m.Type?.Object === "function").then(({ mod }) => mod);
   }
   return typeboxCache;
 }
@@ -257,7 +270,7 @@ export async function verifyRun({ config, fusion, vars, decide, emit, signal, ru
  * executes the writes. It is not a stage — it sits outside the pipeline, as the reference
  * implementation had it — and `fileAgent: false` skips it entirely.
  */
-export async function fileAgentStep({ config, fusion, prompt, synthesis, registry, callModel, signal, emit }) {
+export async function fileAgentStep({ config, fusion, prompt, synthesis, registry, callModel, signal, emit, getWriteParameters }) {
   if (!fusion.fileAgent) return { toolCalls: [], usage: freshUsage() };
   const candidates = [fusion.fileAgent.alias];
   // The alias's provider chain is walked in order, exactly as a seat's is: a route that cannot resolve
@@ -283,7 +296,7 @@ export async function fileAgentStep({ config, fusion, prompt, synthesis, registr
             role: "user",
             content: `Original user request: ${prompt}\n\nDeliberation synthesis:\n${synthesis}\n\nSave the file(s) now using the write tool, or confirm if nothing needs saving.`,
           }],
-          tools: writeTool((await loadTypebox()).Type),
+          tools: writeTool(await getWriteParameters()),
         });
       } catch (error) {
         const detail = error?.message ?? String(error);
@@ -314,7 +327,7 @@ const FIXED_SYSTEM = "You are a file-saving agent. You receive a deliberation sy
  * the stream is emitted here, to the same shape the library's `AssistantMessageEventStream` implements
  * (plan §Step 6.6): queue-or-waiter delivery, `end`, async iteration, `result`.
  */
-export function createFusionStream({ config, sources, getRegistry, decide, callModel, getPi }) {
+export function createFusionStream({ config, sources, getRegistry, decide, callModel, getPi, getWriteParameters }) {
   return function fusionStream(model, context, options) {
     let outer;
     const events = [];
@@ -416,7 +429,7 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
         accumulateUsage(usage, run.decisionUsage);
 
         const verification = await verifyRun({ config, fusion, vars, decide, emit, signal: options?.signal, runGate: makeRunGate(options?.signal) });
-        const files = await fileAgentStep({ config, fusion, prompt, synthesis: run.text, registry, callModel, signal: options?.signal, emit });
+        const files = await fileAgentStep({ config, fusion, prompt, synthesis: run.text, registry, callModel, signal: options?.signal, emit, getWriteParameters });
 
         const toolCalls = files.toolCalls ?? [];
         const content = [{ type: "text", text: streamed }];
