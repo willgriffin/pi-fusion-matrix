@@ -883,8 +883,14 @@ seat and the assembly rules, all re-derived from `<vendored-fork>/lib/deliberati
 5. **`score` and weights.** One `score` question per panel seat, batched into a single backend request,
    producing a number and a confidence per seat. `panel+weights` renders them as a sorted
    `persona: score (confidence)` list above the panel, so a judge can weigh rather than guess.
-6. **Streaming** — `createAssistantMessageEventStream` from `@earendil-works/pi-ai` (pi bundles it; no
-   hand-rolled stream). Emit `start` with the empty partial, `text_start`, `text_delta` per progress/
+6. **Streaming** — hand-emit pi's event stream to the contract below, because the factory cannot be used
+   here: `streamSimple` must *return* a stream synchronously while `@earendil-works/pi-ai` is resolved
+   asynchronously (the peer module is loaded lazily, so that a pi whose installation cannot be walked —
+   a compiled single-file build — registers its models and reports the failure per seat instead of
+   failing the whole extension at load). The stream is the same shape the library's
+   `AssistantMessageEventStream` implements — queue-or-waiter delivery, `end`, async iteration, `result`
+   — so the two agree on every semantic that matters; if the peer ever becomes available synchronously,
+   substituting the library factory is the change to make. Emit `start` with the empty partial, `text_start`, `text_delta` per progress/
    substitution/verification/synthesis chunk, `text_end`, then `toolcall_start`/`toolcall_end` pairs per
    file-agent write, then `done` or `error`. Contract verified against pi's consumer at
    `node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js:201-243`: it replaces
@@ -892,7 +898,9 @@ seat and the assembly rules, all re-derived from `<vendored-fork>/lib/deliberati
    `AssistantMessage`, and it reads tool calls from the final message's `content`, so `done.message`
    must carry the `toolCall` blocks. Only the seat that produces the answer streams token-by-token;
    every other seat reports its status line, because a five-call pipeline streaming five interleaved
-   answers is unreadable.
+   answers is unreadable. **Verified live 2026-09-18** on pi 0.84.2 and 0.85.1: token-by-token text, the
+   file agent's `write` executed by pi from the emitted `toolCall` blocks, and the tool path returning a
+   rendered panel.
 7. **Usage** — sum `message.usage` over every delegated call and shape it as `{ input, output,
    cacheRead, cacheWrite, totalTokens, reasoning?, cost: { input, output, cacheRead, cacheWrite,
    total } }` (`Usage` in `pi-ai/dist/types.d.ts:255-278`). Zero-fill cost; no `calculateCost` call and

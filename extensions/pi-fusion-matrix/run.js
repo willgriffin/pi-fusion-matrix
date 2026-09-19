@@ -106,7 +106,7 @@ export async function loadPi() {
   if (!piCache) {
     piCache = loadPeer("node_modules/@earendil-works/pi-ai/dist/compat.js", "@earendil-works/pi-ai/compat",
       (m) => typeof m.streamSimple === "function")
-      .then(({ mod, from }) => ({ streamSimple: mod.streamSimple, createAssistantMessageEventStream: mod.createAssistantMessageEventStream, from }));
+      .then(({ mod, from }) => ({ streamSimple: mod.streamSimple, from }));
   }
   return piCache;
 }
@@ -308,8 +308,11 @@ const FIXED_SYSTEM = "You are a file-saving agent. You receive a deliberation sy
 /* ------------------------------------------------------------------ stream */
 
 /**
- * The provider's `streamSimple`. Returns a stream synchronously; the pipeline runs in a microtask, as
- * pi requires.
+ * The provider's `streamSimple`. It must return a stream synchronously, while `@earendil-works/pi-ai`
+ * is resolved asynchronously — the peer is loaded lazily so a pi whose installation cannot be walked
+ * (a compiled single-file build) still registers its models and fails per seat rather than at load. So
+ * the stream is emitted here, to the same shape the library's `AssistantMessageEventStream` implements
+ * (plan §Step 6.6): queue-or-waiter delivery, `end`, async iteration, `result`.
  */
 export function createFusionStream({ config, sources, getRegistry, decide, callModel, getPi }) {
   return function fusionStream(model, context, options) {
