@@ -437,6 +437,7 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
       }
 
       let terminal = null;
+      let terminalMessage = null;
       let sent = 0;
       // An `error` event *before* anything else is a route that never began rather than a turn that
       // failed: pi has not seen a partial, so the same recovery as a throw applies and the failure is
@@ -449,8 +450,8 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
             beforeStart = copy.error?.errorMessage ?? "target reported an error before any event";
             break;
           }
-          if (copy.type === "done") { copy.message = dressed(copy.message); terminal = "done"; }
-          if (copy.type === "error") { copy.error = dressed(copy.error); terminal = "error"; }
+          if (copy.type === "done") { copy.message = dressed(copy.message); terminal = "done"; terminalMessage = copy.message; }
+          if (copy.type === "error") { copy.error = dressed(copy.error); terminal = "error"; terminalMessage = copy.error; }
           push(copy);
           sent += 1;
         }
@@ -467,7 +468,27 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
         break;
       }
 
-      const final = dressed(await target.result());
+      // `result()` can reject after the target has already emitted events, and that is not a second answer:
+      // pi appends a second terminal message as another assistant message, so a committed turn has to end
+      // with what the caller already holds. Before the first event the route is still free to retry the
+      // level or walk on, exactly like a stream that failed at its first pull.
+      let final;
+      try {
+        final = dressed(await target.result());
+      } catch (error) {
+        const detail = error?.message ?? String(error);
+        // `record` appends to the very `attempts` array an already-dressed terminal message points at, so a
+        // failure recorded here still reaches a record the caller has been handed.
+        record(detail);
+        if (sent === 0) {
+          if (dropLevel(detail)) continue;
+          break;
+        }
+        const ending = terminalMessage ?? dressed(message(`Fusion proxy error: ${detail}`, { stopReason: "error", errorMessage: detail }));
+        if (terminal === null) push({ type: "error", reason: "error", error: ending });
+        end(ending);
+        return;
+      }
       // A target that ended without a terminal event leaves the harness's loop waiting on a stream that
       // never completes. The result is the same message, so it becomes the terminal event itself.
       if (terminal === null) {

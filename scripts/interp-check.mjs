@@ -168,6 +168,28 @@ const makeProxyPeer = (seen, { text = "read it back", tool = null, streamModel =
   },
 });
 
+// A target whose `result()` rejects: once events have reached the harness the turn is committed, so the
+// turn ends with the message the caller holds and the failure is recorded — never a second terminal event,
+// which pi would append as another assistant message.
+const makeRejectingPeer = (seen, { terminal = true } = {}) => ({
+  streamSimple: (model, context, options) => {
+    seen.push({ model, context, options });
+    const usage = { input: 5, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 10, reasoning: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+    const partial = () => ({ role: "assistant", api: model.api, provider: model.provider, model: model.id,
+      content: [{ type: "text", text: "half an answer" }], usage, stopReason: "stop", timestamp: Date.now() });
+    const final = partial();
+    const events = [
+      { type: "start", partial: { ...partial(), content: [] } },
+      { type: "text_delta", contentIndex: 0, delta: "half an answer", partial: partial() },
+      ...(terminal ? [{ type: "done", reason: "stop", message: final }] : []),
+    ];
+    return {
+      async *[Symbol.asyncIterator]() { yield* events; },
+      result: async () => { throw new Error("result() rejected after the stream ended"); },
+    };
+  },
+});
+
 const registryWith = (over) => ({ ...registry, ...over });
 const fusionStream = (peer, sessionRegistry = registry) => createFusionStream({
   config, sources, getRegistry: () => sessionRegistry, decide, callModel,
@@ -497,6 +519,24 @@ check("proxy: an error event before any event recovers like a throw",
     && eventRecovered.final.details?.proxied?.provider === "zai"
     && eventRecovered.final.details?.proxied?.attempts?.length === 3,
   `attempts=${JSON.stringify(eventAttempts)}, provider=${eventRecovered.final.details?.proxied?.provider}, recorded=${eventRecovered.final.details?.proxied?.attempts?.length}`);
+
+// 7b. proxy: a `result()` rejection past the first event must not become a second terminal message
+const rejectSeen = [];
+const rejected = await driveStream(fusionStream(makeRejectingPeer(rejectSeen))(fusionModel("proxy-eventful"), harnessContext, harnessOptions));
+const rejectedTerminals = rejected.events.filter((e) => e.type === "done" || e.type === "error");
+check("proxy: a `result()` rejection after a terminal event adds no second one",
+  rejectedTerminals.length === 1 && rejectedTerminals[0].type === "done"
+    && rejectedTerminals[0].message.details?.proxied?.attempts.some((a) => /result\(\) rejected/.test(String(a.detail)))
+    && rejected.final.provider === "fusion-matrix",
+  `terminals=${rejectedTerminals.map((e) => e.type).join(",")} attempts=${JSON.stringify(rejectedTerminals[0]?.message?.details?.proxied?.attempts ?? [])}`);
+const truncSeen = [];
+const truncated = await driveStream(fusionStream(makeRejectingPeer(truncSeen, { terminal: false }))(fusionModel("proxy-eventful"), harnessContext, harnessOptions));
+const truncTerminals = truncated.events.filter((e) => e.type === "done" || e.type === "error");
+check("proxy: a `result()` rejection with no terminal event ends the turn exactly once, with the record",
+  truncTerminals.length === 1 && truncTerminals[0].type === "error"
+    && truncTerminals[0].error.details?.proxied?.attempts.length === 1
+    && truncTerminals[0].error.provider === "fusion-matrix",
+  `terminals=${truncTerminals.map((e) => e.type).join(",")} attempts=${truncTerminals[0]?.error?.details?.proxied?.attempts?.length}`);
 
 // Every proxy rule the loader enforces, asserted where it is enforced rather than only through a harness.
 const { config: fresh } = loadMatrixConfig({ cwd: process.cwd(), layers: ["packaged"] });

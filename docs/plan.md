@@ -1412,7 +1412,11 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     executor ends as an error message with no deliberation. The two faces read `thinking` the same way
     too: the writing seat's candidate object pins the proxied turn's route and level, and the execute
     face's `"harness"` literal never reaches a seat, and an `error` event with nothing before it recovers
-    like a throw (retry without a refused level, else the next provider, both recorded). Each must *fail*
+    like a throw (retry without a refused level, else the next provider, both recorded); and a target whose
+    `result()` rejects past the first event ends the turn with the message the caller already holds — the
+    failure added to that record's `attempts`, never a second terminal event pi would append as another
+    assistant message (before the first event the same rejection retries the level or walks the route, like a
+    stream that failed at its first pull). Each must *fail*
     when the branch is mutated
     — dropping `tools` from the forwarded context, writing a status line into the stream, falling through
     to the pipeline after the proxy returns, or attaching `details` only to `result()` — which is the

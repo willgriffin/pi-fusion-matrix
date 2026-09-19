@@ -636,7 +636,7 @@ quota blocks a live one:
 
 ```bash
 node scripts/typesafe-stub.mjs & node scripts/semif-stub.mjs &      # local backends
-node scripts/interp-check.mjs                                       # 33 interpreter contracts
+node scripts/interp-check.mjs                                       # 35 interpreter contracts
 node scripts/doctor.mjs                                             # config + connectivity
 node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone
 node scripts/semif-probe.mjs    --backend http://127.0.0.1:8792/score
