@@ -32,6 +32,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_ROOTS = [
   { harness: "pi", root: path.join(os.homedir(), ".pi/agent/sessions") },
@@ -63,21 +65,26 @@ function addUsage(sums, usage) {
 }
 
 /** Every `*.jsonl` under a root, one level of cwd-slug directories deep. */
-function findSessions(root) {
+export function findSessions(root, { readdir = fs.readdirSync } = {}) {
   const out = [];
+  const unreadable = [];
   let cwdDirs;
   try {
-    cwdDirs = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return { missing: true, files: out };
+    cwdDirs = readdir(root, { withFileTypes: true });
+  } catch (error) {
+    // A root that is not there is a harness nobody has used; a root that is there and refuses to be read
+    // is a store we cannot account for, and those are different facts.
+    if (error?.code === "ENOENT") return { missing: true, files: out, unreadable };
+    return { missing: false, files: out, unreadable: [{ path: root, reason: error?.message ?? String(error) }] };
   }
   for (const dirent of cwdDirs) {
     if (!dirent.isDirectory()) continue;
     const dir = path.join(root, dirent.name);
     let names;
     try {
-      names = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
+      names = readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      unreadable.push({ path: dir, reason: error?.message ?? String(error) });
       continue;
     }
     for (const name of names) {
@@ -85,7 +92,7 @@ function findSessions(root) {
     }
   }
   out.sort();
-  return { missing: false, files: out };
+  return { missing: false, files: out, unreadable };
 }
 
 /**
@@ -212,7 +219,7 @@ export function aggregate(sessions) {
     deliberation: new Map(),
     tools: new Map(),
     toolCalls: new Map(),
-    gaps: { noDuration: 0, unpriced: 0, sessionsWithoutHeader: 0, toolAttribution: "most recent assistant turn" },
+    gaps: { noDuration: 0, unpriced: 0, sessionsWithoutHeader: 0, unreadable: [], toolAttribution: "most recent assistant turn" },
   };
 
   const turn = (map, key, seed) => {
@@ -259,15 +266,16 @@ export function aggregate(sessions) {
         const record = turn(report.proxy, key, { aliases: new Map(), levels: new Map(), attempts: new Map(), dropped: 0, failures: 0, sums: emptySums(), blank: 0 });
         record.turns += 1;
         if (typeof proxied.alias === "string") record.aliases.set(proxied.alias, (record.aliases.get(proxied.alias) ?? 0) + 1);
-        const level = proxied.thinking ?? null;
-        record.levels.set(level ?? "none", (record.levels.get(level ?? "none") ?? 0) + 1);
+        // `thinking: null` is a turn that ran at no level; an absent key is a record that did not say, and
+        // reading the second as the first would overstate the drops.
+        const recorded = Object.hasOwn(proxied, "thinking");
+        const level = recorded ? (proxied.thinking ?? "none") : "unrecorded";
+        record.levels.set(level, (record.levels.get(level) ?? 0) + 1);
         const attempts = Array.isArray(proxied.attempts) ? proxied.attempts : [];
         for (const attempt of attempts) record.attempts.set(attempt?.reason ?? "?", (record.attempts.get(attempt?.reason ?? "?") ?? 0) + 1);
         // A turn that ran at no level while a route was refused at the level we asked for: the drop is the
         // fact worth counting, because it is what makes a cheap model answer without reasoning.
-        const dropped = attempts.length > 0 && level === null;
-        if (dropped) record.dropped += 1;
-        if (typeof proxied.attempts === "undefined") record.blank += 1;
+        if (recorded && proxied.thinking === null && attempts.length > 0) record.dropped += 1;
         continue;
       }
 
@@ -375,6 +383,8 @@ export function render(report, { limit = 12 } = {}) {
   lines.push(`  messages with no recorded duration: ${report.gaps.noDuration} (pi records none; omp records duration/ttft)`);
   lines.push(`  messages carrying no price: ${report.gaps.unpriced}`);
   lines.push(`  records shaped like ours but not recognised: ${report.unknownShapes.length}`);
+  lines.push(`  files or directories that could not be read: ${report.gaps.unreadable.length}`);
+  for (const unreadable of report.gaps.unreadable.slice(0, 10)) lines.push(`    ${unreadable.path}: ${unreadable.reason}`);
   lines.push(`  tool calls are attributed by ${report.gaps.toolAttribution} — the format carries no caller`);
   for (const unknown of report.unknownShapes.slice(0, 10)) {
     lines.push(`    ${path.basename(String(unknown.file ?? "?"))} ${unknown.carrier}: ${unknown.keys.join(", ")}`);
@@ -482,10 +492,84 @@ function check() {
   const only = aggregate([extractSession(filtered, { file: "fixture.jsonl" })]);
   ok("filters change the totals", only.records.deliberation === 1 && only.sessions === 1);
 
+  // An absent `thinking` key is a record that did not say, not a turn that ran at no level.
+  const legacy = extractSession([sessionMeta, { type: "message", message: { role: "assistant", api: FUSION_API, model: "quick",
+    usage: usage(5, 1, 0.001), content: [], details: { proxied: { alias: "glm-flash", attempts: [{ reason: "transient" }] } } } }], { file: "legacy.jsonl", harness: "pi" });
+  const legacyRow = aggregate([legacy]).proxy.get("quick");
+  ok("an unrecorded level is not counted as a drop", legacyRow?.dropped === 0 && legacyRow?.levels.get("unrecorded") === 1, JSON.stringify([...(legacyRow?.levels ?? [])]));
+
+  // The store reader: a file or directory that cannot be read is counted and printed, never skipped, and the
+  // exit status says the ledger is incomplete — a reader that dropped it silently would understate totals.
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-report-check-"));
+  const slug = path.join(storeDir, "--private-tmp-project-alpha--");
+  fs.mkdirSync(slug, { recursive: true });
+  fs.writeFileSync(path.join(slug, "readable.jsonl"), lines(goodEntries));
+  const locked = path.join(slug, "locked.jsonl");
+  fs.writeFileSync(locked, "{}\n");
+  const roots = [{ harness: "pi", root: storeDir }];
+  const denied = (file) => Object.assign(new Error(`EACCES: permission denied, open '${file}'`), { code: "EACCES" });
+  const injected = readStore({ roots, readFile: (file, encoding) => (file === locked ? (() => { throw denied(file); })() : fs.readFileSync(file, encoding)) });
+  ok("a session file that cannot be read is counted, not skipped", injected.sessions.length === 1 && injected.unreadable.length === 1 && injected.unreadable[0].path === locked, JSON.stringify(injected.unreadable));
+  ok("the readable session's records still reach the totals", aggregate(injected.sessions).records.deliberation === 4);
+  const unlistable = readStore({ roots, readdir: (dir, ...rest) => { if (dir === slug) throw denied(dir); return fs.readdirSync(dir, ...rest); } });
+  ok("a session directory that cannot be listed is counted, not skipped", unlistable.unreadable.length === 1 && unlistable.unreadable[0].path === slug && unlistable.sessions.length === 0, JSON.stringify(unlistable.unreadable));
+  ok("a harness with no store is missing, not unreadable", readStore({ roots: [{ harness: "pi", root: path.join(storeDir, "nope") }] }).roots[0].missing === true);
+  if (process.getuid?.() === 0) {
+    console.log("  skip  the exit status for an unreadable store (running as root)");
+  } else {
+    fs.chmodSync(locked, 0o000);
+    const child = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--dir", storeDir], { encoding: "utf8" });
+    fs.chmodSync(locked, 0o600);
+    ok("the exit status says the store could not be fully read", child.status === 1 && /could not be read/.test(child.stdout), `status=${child.status} stdout=${JSON.stringify(child.stdout.split("\n").at(-3))}`);
+  }
+  fs.rmSync(storeDir, { recursive: true, force: true });
+
   const failures = results.filter((r) => !r.pass);
   for (const r of results) console.log(`  ${r.pass ? "ok  " : "FAIL"} ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);
   console.log(`\nsession-report: ${results.length - failures.length}/${results.length} checks passed`);
   return failures.length === 0 ? 0 : 2;
+}
+
+/**
+ * The store into sessions. `readFile`/`readdir` are injectable so `--check` can prove the accounting for a
+ * file that refuses to be read; in a real run they are `node:fs`.
+ */
+export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceMs, readFile = fs.readFileSync, readdir = fs.readdirSync } = {}) {
+  const reportRoots = [];
+  const sessions = [];
+  const files = [];
+  const unreadable = [];
+  if (sessionFile) {
+    files.push({ harness: "session", root: path.dirname(path.resolve(sessionFile)), file: path.resolve(sessionFile) });
+  } else {
+    for (const { harness, root } of roots) {
+      if (harnessFilter && harness !== harnessFilter) continue;
+      const found = findSessions(root, { readdir });
+      reportRoots.push({ harness, root, files: found.files.length, missing: found.missing });
+      for (const entry of found.unreadable) unreadable.push({ harness, path: entry.path, reason: entry.reason });
+      for (const file of found.files) files.push({ harness, root, file });
+    }
+  }
+
+  for (const { harness, file } of files) {
+    let text;
+    try {
+      text = readFile(file, "utf8");
+    } catch (error) {
+      if (sessionFile) return { sessions, roots: reportRoots, unreadable, fatal: `${file}: ${error?.message ?? String(error)}` };
+      // Never skip quietly: a file that cannot be read takes its turns and its records out of every total
+      // below, and an absent total is exactly what this report exists to tell apart from a clean one.
+      unreadable.push({ harness, path: file, reason: error?.message ?? String(error) });
+      continue;
+    }
+    const { entries, unparsed } = parseLines(text);
+    const session = extractSession(entries, { file, harness, unparsed });
+    if (cwdFilter && !String(session.cwd ?? "").includes(cwdFilter)) continue;
+    if (sinceMs !== undefined && Date.parse(session.startedAt ?? "") < sinceMs) continue;
+    sessions.push(session);
+  }
+
+  return { sessions, roots: reportRoots, unreadable, fatal: undefined };
 }
 
 function main() {
@@ -505,45 +589,19 @@ function main() {
     process.exit(1);
   }
 
-  const reportRoots = [];
-  const sessions = [];
-  const files = [];
-  if (sessionFile) {
-    files.push({ harness: "session", root: path.dirname(path.resolve(sessionFile)), file: path.resolve(sessionFile) });
-  } else {
-    for (const { harness, root } of roots) {
-      if (harnessFilter && harness !== harnessFilter) continue;
-      const found = findSessions(root);
-      reportRoots.push({ harness, root, files: found.files.length, missing: found.missing });
-      for (const file of found.files) files.push({ harness, root, file });
-    }
+  const { sessions, roots: reportRoots, unreadable: unreadablePaths, fatal } = readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceMs });
+  if (fatal) {
+    console.error(`session report: cannot read ${fatal}`);
+    process.exit(1);
   }
-
   if (!sessionFile && reportRoots.every((r) => r.missing || r.files === 0)) {
     for (const r of reportRoots) console.error(`session report: ${r.missing ? "no sessions directory at" : "no session files under"} ${r.root}`);
     process.exit(1);
   }
 
-  for (const { harness, file } of files) {
-    let text;
-    try {
-      text = fs.readFileSync(file, "utf8");
-    } catch (error) {
-      if (sessionFile) {
-        console.error(`session report: cannot read ${file}: ${error.message}`);
-        process.exit(1);
-      }
-      continue;
-    }
-    const { entries, unparsed } = parseLines(text);
-    const session = extractSession(entries, { file, harness, unparsed });
-    if (cwdFilter && !String(session.cwd ?? "").includes(cwdFilter)) continue;
-    if (sinceMs !== undefined && Date.parse(session.startedAt ?? "") < sinceMs) continue;
-    sessions.push(session);
-  }
-
   const report = aggregate(sessions);
   report.roots = sessionFile ? [{ harness: "session", root: path.dirname(path.resolve(sessionFile)), files: 1, missing: false }] : reportRoots;
+  report.gaps.unreadable = unreadablePaths;
 
   if (has("json")) console.log(renderJson(report));
   else {
@@ -553,14 +611,16 @@ function main() {
       for (const session of sessions) {
         for (const record of session.records) {
           const label = record.kind === "proxy"
-            ? `proxy ${record.fusion} → ${record.details.alias} @${record.details.thinking ?? "no level"} (${record.details.attempts?.length ?? 0} attempt(s))`
+            ? `proxy ${record.fusion} → ${record.details.alias} @${Object.hasOwn(record.details, "thinking") ? record.details.thinking ?? "no level" : "unrecorded"} (${record.details.attempts?.length ?? 0} attempt(s))`
             : `deliberation ${record.fusion} via ${record.carrier} (${record.details.cascades?.length ?? 0} cascade(s), ${record.details.seatErrors?.length ?? 0} seat error(s))`;
           console.log(`  ${String(session.file).split("/").at(-1).slice(0, 28).padEnd(29)} ${record.at ?? ""} ${label}`);
         }
       }
     }
   }
-  process.exit(0);
+  // A partial ledger is not a report: say so with the exit status too, so a hook cannot read a short total
+  // as a fact about the fusions.
+  process.exit(unreadablePaths.length === 0 ? 0 : 1);
 }
 
 main();
