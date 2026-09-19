@@ -1033,8 +1033,12 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
 
 Exit status: `0` report produced, `1` the store could not be accounted for (missing or empty `--dir`,
 unreadable `--session`, an unreadable file or directory, a line that did not parse, or a session a filter
-could not attribute), `2` `--check` failed. `--check` is the reader's own accounting, checked against fixtures (49 checks, each shown
-to fail under a mutation), so the instrument is held to the same standard as the pipeline it reads.
+could not attribute), `2` `--check` failed. `--check` is the reader's own accounting, checked against fixtures (51 checks as a normal
+user; 44 as root, where the permission-dependent cases are printed as skipped rather than passed — the
+printed `N/N` is always the real total) — and, as
+for the interpreter contracts, each of those checks is verified the same way it is written: by temporarily
+mutating the reader and watching the check fail (a manual pass run with a throwaway script, not a committed
+harness). The instrument is therefore held to the standard of the pipeline it reads.
 
 ## Critical files & anchors
 
@@ -1284,7 +1288,8 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     prints its snippet while leaving every tracked file byte-identical (asserted by hash).
 
 22. **The run record survives, and the report reads it** — `node scripts/session-report.mjs --check`
-    passes 49/49 with every check mutation-proved, then in a scratch `cwd` (Step 8's prerequisites):
+    passes 51/51 (44/44 as root, the permission cases printed as skipped once), each check having been shown
+    to fail under a temporary mutation of the reader, then in a scratch `cwd` (Step 8's prerequisites):
     `node scripts/session-report.mjs --cwd <scratch> --json` on the store *before* a `/matrix` run shows
     zero deliberation records, and after `/matrix quick "…"` in **both** pi and omp it shows one, with the
     answer message carrying `details.fusion` — then `--verbose` names that run. A failed run records itself:
