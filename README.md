@@ -484,6 +484,7 @@ node scripts/session-report.mjs                          # ~/.pi/agent/sessions 
 node scripts/session-report.mjs --cwd my-project --since 2026-09-19
 node scripts/session-report.mjs --verbose                # one line per record, with its timestamp
 node scripts/session-report.mjs --json                   # the same numbers, for a spreadsheet
+node scripts/session-report.mjs --harness pi             # one harness's store (the other is named, not omitted)
 ```
 
 It totals turns, tokens, cost, tool calls and tool errors per fusion and per model, and for each

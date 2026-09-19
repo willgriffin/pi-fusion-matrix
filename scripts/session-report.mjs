@@ -416,8 +416,11 @@ function renderJson(report) {
   }));
   return JSON.stringify({
     sessions: report.sessions,
+    sessionsRead: report.store?.read ?? report.sessions,
     entries: report.entries,
-    unparsed: report.unparsed,
+    // The same figure the text report prints: unparsed lines are a fact about the store, so a filter must
+    // not present a different number under the same name on the machine-readable surface.
+    unparsed: report.store?.unparsed ?? report.unparsed,
     records: report.records,
     roots: report.roots,
     turns: plain(report.turns),
@@ -583,6 +586,21 @@ function check() {
   ok("a store left out by --harness is named, not silently absent", harnessed.store.skippedRoots.length === 1 && harnessed.store.skippedRoots[0].harness === "omp", JSON.stringify(harnessed.store.skippedRoots));
   fs.rmSync(datedDir, { recursive: true, force: true });
 
+  if (process.getuid?.() !== 0) {
+    const usage = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--harness", "foo"], { encoding: "utf8" });
+    ok("an unknown --harness is a named usage error, not a silent exit", usage.status === 1 && /names no store/.test(usage.stderr), `status=${usage.status}`);
+  }
+
+  const jsonDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-report-json-"));
+  const jsonSlug = path.join(jsonDir, "--private-tmp-project-alpha--");
+  fs.mkdirSync(jsonSlug, { recursive: true });
+  fs.writeFileSync(path.join(jsonSlug, "one.jsonl"), `{"type":"sess\n${lines(goodEntries.slice(1))}\n`);
+  fs.writeFileSync(path.join(jsonSlug, "two.jsonl"), lines([{ ...sessionMeta, cwd: "/tmp/project-beta" }, ...goodEntries.slice(1)]));
+  const jsonStore = readStore({ roots: [{ harness: "pi", root: jsonDir }], cwdFilter: "project-beta" });
+  const jsonReport = JSON.parse(renderJson(buildReport(jsonStore)));
+  ok("--json publishes the store's unparsed count, as the text report does", jsonReport.unparsed === 1 && jsonReport.store.unparsed === 1 && jsonReport.sessions === 1 && jsonReport.sessionsRead === 2, JSON.stringify({ unparsed: jsonReport.unparsed, store: jsonReport.store?.unparsed, sessions: jsonReport.sessions, read: jsonReport.sessionsRead }));
+  fs.rmSync(jsonDir, { recursive: true, force: true });
+
   const failures = results.filter((r) => !r.pass);
   for (const r of results) console.log(`  ${r.pass ? "ok  " : "FAIL"} ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);
   console.log(`\nsession-report: ${results.length - failures.length}/${results.length} checks passed`);
@@ -663,6 +681,14 @@ export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceM
   return { sessions, roots: reportRoots, unreadable, store, fatal: undefined };
 }
 
+export function buildReport(store, { sessionFile } = {}) {
+  const report = aggregate(store.sessions);
+  report.roots = sessionFile ? [{ harness: "session", root: path.dirname(path.resolve(sessionFile)), files: 1, missing: false }] : store.roots;
+  report.gaps.unreadable = store.unreadable;
+  report.store = store.store;
+  return report;
+}
+
 function main() {
   if (has("check")) process.exit(check());
 
@@ -671,6 +697,11 @@ function main() {
     ? dirs.map((root) => ({ harness: root.includes(`${path.sep}.omp`) ? "omp" : root.includes(`${path.sep}.pi`) ? "pi" : "custom", root: path.resolve(root) }))
     : DEFAULT_ROOTS;
   const harnessFilter = value("harness");
+  const knownHarnesses = new Set([...DEFAULT_ROOTS.map((r) => r.harness), "custom"]);
+  if (harnessFilter && !knownHarnesses.has(harnessFilter) && !values("dir").some((root) => root.includes(`${path.sep}.${harnessFilter}`))) {
+    console.error(`session report: --harness "${harnessFilter}" names no store (${[...knownHarnesses].join(", ")})`);
+    process.exit(1);
+  }
   const sessionFile = value("session");
   const cwdFilter = value("cwd");
   const since = value("since");
@@ -680,20 +711,21 @@ function main() {
     process.exit(1);
   }
 
-  const { sessions, roots: reportRoots, unreadable: unreadablePaths, store, fatal } = readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceMs });
+  const store = readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceMs });
+  const { sessions, roots: reportRoots, unreadable: unreadablePaths, fatal } = store;
   if (fatal) {
     console.error(`session report: cannot read ${fatal}`);
     process.exit(1);
   }
   if (!sessionFile && reportRoots.every((r) => r.missing || r.files === 0)) {
+    // Nothing was read, so say why in full: the roots a filter left out are the explanation, and an empty
+    // report with a bare exit status is indistinguishable from a crash.
     for (const r of reportRoots) console.error(`session report: ${r.missing ? "no sessions directory at" : "no session files under"} ${r.root}`);
+    for (const skipped of store.store.skippedRoots) console.error(`session report: store left out by --harness ${harnessFilter}: ${skipped.root}`);
     process.exit(1);
   }
 
-  const report = aggregate(sessions);
-  report.roots = sessionFile ? [{ harness: "session", root: path.dirname(path.resolve(sessionFile)), files: 1, missing: false }] : reportRoots;
-  report.gaps.unreadable = unreadablePaths;
-  report.store = store;
+  const report = buildReport(store, { sessionFile });
 
   if (has("json")) console.log(renderJson(report));
   else {
@@ -713,7 +745,7 @@ function main() {
   // A partial ledger is not a report: say so with the exit status too, so a hook cannot read a short total
   // as a fact about the fusions. Same for a filter that could not be applied to part of the store — the
   // sessions it skipped may be the ones the filter was looking for.
-  process.exit(unreadablePaths.length === 0 && store.unattributable.length === 0 ? 0 : 1);
+  process.exit(unreadablePaths.length === 0 && store.store.unattributable.length === 0 ? 0 : 1);
 }
 
 main();
