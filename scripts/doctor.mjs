@@ -14,7 +14,7 @@
  * Run it inside pi (or through /matrix-doctor) for those checks.
  */
 import path from "node:path";
-import { loadMatrixConfig } from "../extensions/pi-fusion-matrix/config.js";
+import { loadMatrixConfig, harnessName } from "../extensions/pi-fusion-matrix/config.js";
 import { runDoctor, formatFindings, repairSnippet } from "../extensions/pi-fusion-matrix/doctor.js";
 
 const args = process.argv.slice(2);
@@ -36,7 +36,7 @@ if (has("json")) {
   console.log(JSON.stringify({ layers: loaded.layers.map((l) => l.file), findings, exit }, null, 2));
 } else {
   const layers = loaded.layers.map((l) => l.file.replace(process.env.HOME ?? "", "~")).join(" → ");
-  console.log(`matrix doctor — layers: ${layers}`);
+  console.log(`matrix doctor — harness: ${harnessName()} · layers: ${layers}`);
   console.log(formatFindings(findings));
   if (has("repair")) {
     const snippet = repairSnippet(findings);

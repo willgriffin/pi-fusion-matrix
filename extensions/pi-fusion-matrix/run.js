@@ -18,6 +18,7 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { resolveCandidates, seatRequest, label, isObject } from "./resolve.js";
 import { runPipeline, freshUsage, accumulateUsage, isSufficient } from "./pipeline.js";
+import { harnessName } from "./config.js";
 
 /**
  * pi-ai's `Tool` shape. `parameters` arrives ready-made from the caller, because the schema builder is
@@ -73,6 +74,9 @@ const PEERS = [
   { harness: "omp", subpath: "node_modules/@oh-my-pi/pi-ai/src/index.ts", bare: "@oh-my-pi/pi-ai" },
 ];
 
+/** The running harness's peer first, then the other one, so the usual case costs one lookup. */
+const peersFor = (harness) => [...PEERS.filter((peer) => peer.harness === harness), ...PEERS.filter((peer) => peer.harness !== harness)];
+
 async function loadPeer(peer, check) {
   const entry = process.argv[1] ?? "";
   let real = null;
@@ -105,7 +109,7 @@ export async function loadPi() {
   if (!piCache) {
     piCache = (async () => {
       const failures = [];
-      for (const peer of PEERS) {
+      for (const peer of peersFor(harnessName())) {
         try {
           const { mod, from, harness } = await loadPeer(peer, (m) => typeof m.streamSimple === "function");
           return { streamSimple: mod.streamSimple, from, harness };

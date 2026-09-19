@@ -292,8 +292,18 @@ export function loadMatrixConfig(): { config: MatrixConfig; layers: string[] };
 `loadMatrixConfig()` deep-merges three optional layers, lowest priority first:
 
 1. `<repo>/matrix.json` (always present)
-2. `~/.config/pi-fusion-matrix/matrix.json`
-3. `<session cwd>/.pi-fusion-matrix.json`
+2. `<agent dir>/pi-fusion-matrix.json` — `~/.pi/agent` under pi, `~/.omp/agent` under omp
+3. `<session cwd>/<project dir>/pi-fusion-matrix.json` — `.pi/` under pi, `.omp/` under omp
+
+The machine and project layers are **per harness**, because a provider id and a credential are harness
+facts rather than extension facts: one account is `kimi-coding` in pi and `kimi-code` in omp, one
+harness's key can be stale while the other's still works, and omp enforces a model's supported thinking
+levels where pi passes them through. Both harnesses read their own agent directory (and both honour
+`PI_CODING_AGENT_DIR`, so a scratch agent dir isolates tests completely), and each already reads its own
+project directory — `.pi/settings.json` for pi, `.omp/settings.json` for omp — so this config sits
+beside every other harness-specific setting instead of inventing a second convention. Which harness is
+running is read synchronously from the entry script the harness was launched with, the same evidence
+peer resolution uses later.
 
 Reuse the merge shape the reference implementation uses (
 `<vendored-fork>/lib/config.js:58-67` (`mergeConfig`: objects merge field by field, arrays and
@@ -857,7 +867,8 @@ that must bill to another account:
 
 1. adds that account as its own provider in `~/.pi/agent/models.json` (for example `tp-work`, whose
    `apiKey` is that organization's secret reference), and
-2. lists it in the repo-local `.pi-fusion-matrix.json`, e.g.
+2. lists it in the project layer — `.pi/pi-fusion-matrix.json` under pi, `.omp/pi-fusion-matrix.json`
+   under omp, e.g.
    `{"aliases": {"deepseek-flash": {"providers": ["go", "tp-work", "tp"]}}}` — layers deep-merge, and
    arrays replace, so this one alias is the whole project override.
 
@@ -1024,7 +1035,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    produced (`{"modes": {"lean": {"stages": [{"single": "synth-lean", "input": "panel+judge"}]}}}` →
    `stage 0 input "panel+judge" has no preceding single stage`). Remove each file afterwards.
 4. **Provider-layer fallback (same alias, new billing route)** — in
-   `/tmp/fusion-matrix-check/.pi-fusion-matrix.json` set
+   `/tmp/fusion-matrix-check/.pi/pi-fusion-matrix.json` set
    `{"aliases": {"deepseek-pro": {"providers": ["nope", "tp"]}}}`. A `fusion-matrix/deep` run must print
    ` ├─ ↩ skeptic deepseek-pro@nope → deepseek-pro@tp (missing provider)`, complete, and —
    driven through the `matrix` tool — report exactly one substitution whose `from` and `to` share
@@ -1109,7 +1120,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     prompt; the live cascade, verify, and route calls above all ran against the real backend inside it.
 13. **Per-project billing selection** — add a second provider block to `~/.pi/agent/models.json` (copy
     the built-in `opencode-go` shape as `opencode-go-work`, with that account's key) and set
-    `/tmp/fusion-matrix-check/.pi-fusion-matrix.json` to
+    `/tmp/fusion-matrix-check/.pi/pi-fusion-matrix.json` to
     `{"aliases": {"glm": {"providers": ["opencode-go-work", "opencode-go", "zai"]}}}`. A
     `--model fusion-matrix/standard` run must execute on `opencode-go-work` (banner and
     `details.seats[].provider` show it) with no edit to any fusion and no credential in the project

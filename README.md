@@ -61,13 +61,18 @@ substitutions on pi 0.84.2/0.85.1 and omp 18.2.6.
 
 ### One extension, two harnesses
 
-Two things differ between them, and both are resolved at runtime rather than branched in config:
-
 | | pi | omp |
 |---|---|---|
+| extension dir | `~/.pi/agent/extensions/` | `~/.omp/agent/extensions/` |
+| machine config | `~/.pi/agent/pi-fusion-matrix.json` | `~/.omp/agent/pi-fusion-matrix.json` |
+| project config | `<cwd>/.pi/pi-fusion-matrix.json` | `<cwd>/.omp/pi-fusion-matrix.json` |
 | streaming peer | `@earendil-works/pi-ai/compat` (`streamSimple`) | `@oh-my-pi/pi-ai` (`streamSimple`) |
 | tool schema builder | the extension brings `typebox` (`Type.Object`) | the harness injects `pi.zod` (`z.object`) |
 | thinking levels | passed through; the provider may ignore an unsupported level | enforced per model — an unsupported level is refused up front |
+
+Everything in those rows is harness-specific for the same reason: provider ids, credentials, and model
+capabilities differ between them. The extension detects its harness from the entry script it was
+launched with, so config and peer both land on the right side without a flag.
 
 Each peer is resolved from the running harness's own installation, realpath-verified to live inside it,
 and never from a search path (a module planted in a writable ancestor directory would be executed
@@ -473,23 +478,32 @@ log a credential: it asks pi for the credential of the provider a seat names, pe
 
 ## Trust boundary
 
-The session's `.pi-fusion-matrix.json` comes from whatever repository you are in, so it is treated as
-untrusted. It may change aliases, personas, modes, and fusions — routing and billing — but it may
-**not** introduce a decision backend, add a `verify` gate command, or point a persona prompt at a file
-outside the repo that declared it. Those are the three surfaces that can send content to an endpoint,
-run a command, or read a file into a prompt, and they come only from the packaged config and
-`~/.config/pi-fusion-matrix/matrix.json`, which are yours. Validation rejects them, naming the entry.
+The project layer — `.pi/pi-fusion-matrix.json` under pi, `.omp/pi-fusion-matrix.json` under omp —
+comes from whatever repository you are in, so it is treated as untrusted. It may change aliases,
+personas, modes, and fusions — routing and billing — but it may **not** introduce a decision backend,
+add a `verify` gate command, or point a persona prompt at a file outside the repo that declared it.
+Those are the three surfaces that can send content to an endpoint, run a command, or read a file into a
+prompt, and they come only from the packaged config and the machine layer, which are yours. Validation
+rejects them, naming the entry.
 
 ## Configuration layers
 
 `matrix.json` merges across layers, lowest priority first; objects merge field by field, arrays and
-scalars replace.
+scalars replace. The machine and project layers are **per harness**, because the things they carry —
+provider ids, credentials, thinking levels — are harness facts: the same account is `kimi-coding` in pi
+and `kimi-code` in omp, and one harness's key can be stale while the other's still works.
 
-| layer | file | trust |
-|---|---|---|
-| packaged | this repo's `matrix.json` | trusted |
-| machine | `~/.config/pi-fusion-matrix/matrix.json` | trusted (yours) |
-| session | `<session cwd>/.pi-fusion-matrix.json` | untrusted (see above) |
+| layer | pi | omp | trust |
+|---|---|---|---|
+| packaged | this repo's `matrix.json` | same file | trusted |
+| machine | `~/.pi/agent/pi-fusion-matrix.json` | `~/.omp/agent/pi-fusion-matrix.json` | trusted (yours) |
+| project | `<cwd>/.pi/pi-fusion-matrix.json` | `<cwd>/.omp/pi-fusion-matrix.json` | untrusted (see above) |
+
+Those are the directories each harness already reads — `<cwd>/.pi/settings.json` and
+`<cwd>/.omp/settings.json` are its own project settings — so this config sits beside every other
+harness-specific setting rather than inventing a second convention. `PI_CODING_AGENT_DIR` moves the
+agent directory for both harnesses, so pointing it at a scratch directory isolates the config too;
+`/matrix-info` and `matrix doctor` both print the harness and the layers they actually loaded.
 
 So a project can re-point one alias at another account, or swap a slot's roster, without touching a
 fusion or this repository:

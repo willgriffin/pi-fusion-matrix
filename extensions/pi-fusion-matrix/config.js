@@ -24,7 +24,49 @@ import { fileURLToPath } from "node:url";
 export const HERE = path.dirname(fileURLToPath(import.meta.url));
 /** `…/pi-fusion-matrix/extensions/pi-fusion-matrix/config.js` → the repository root. */
 export const REPO_ROOT = path.resolve(HERE, "..", "..");
-export const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+
+/**
+ * Which harness is running us.
+ *
+ * pi and omp are forks of one stack with **separate agent directories and separate project
+ * conventions**, and everything that names a provider is harness-specific: one account is
+ * `kimi-coding` in pi and `kimi-code` in omp, one harness's key can be stale while the other's works,
+ * and omp enforces a model's supported thinking levels where pi passes them through. So the machine and
+ * project layers belong to the harness, not to this extension.
+ *
+ * Decided synchronously from the entry script the harness was launched with — the same evidence peer
+ * resolution uses later, read here because config loads before any peer does. Anything that is not
+ * recognisably omp counts as pi, which is the harness this was written for.
+ */
+export function harnessName() {
+  const entry = String(process.argv[1] ?? "").toLowerCase();
+  if (entry.includes("oh-my-pi") || /(^|[/\\])omp([/\\]|$)/.test(entry)) return "omp";
+  return "pi";
+}
+
+/**
+ * Each harness's own agent directory (machine-wide) and project directory — the ones it already reads,
+ * so our config sits where every other harness-specific setting does. Both honour
+ * `PI_CODING_AGENT_DIR`, which is what makes isolated test runs isolate their config too.
+ */
+export const HARNESS = {
+  pi: { agentDir: () => process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent"), projectDir: ".pi" },
+  omp: { agentDir: () => process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".omp", "agent"), projectDir: ".omp" },
+};
+
+/** Our file name inside those directories. */
+export const CONFIG_FILE = "pi-fusion-matrix.json";
+
+/** The paths this process would load, for the doctor and the layer report. */
+export function configPaths({ cwd = process.cwd() } = {}) {
+  const { agentDir, projectDir } = HARNESS[harnessName()];
+  return {
+    harness: harnessName(),
+    packaged: path.join(REPO_ROOT, "matrix.json"),
+    machine: path.join(agentDir(), CONFIG_FILE),
+    project: path.join(cwd, projectDir, CONFIG_FILE),
+  };
+}
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 export const STAGE_KINDS = ["parallel", "single", "decide", "score", "render"];
@@ -59,17 +101,23 @@ function readJson(file) {
 /**
  * Every layer that exists, lowest priority first, each labelled with what it is.
  *
+ * Packaged → this harness's machine directory → this harness's project directory. The machine and
+ * project paths are per harness (`~/.pi/agent` and `<cwd>/.pi` for pi, `~/.omp/agent` and `<cwd>/.omp`
+ * for omp), because a provider id and a credential are harness facts: the same account answers in one
+ * and 401s in the other.
+ *
  * The three surfaces that can leave the machine or run code — decision backends, `verify` gates, and
- * persona prompt paths — are trusted only from the packaged config and the machine-wide directory. The
- * session cwd layer is *a repository*: cloning a project must never be enough to point a credential at
+ * persona prompt paths — are trusted only from the packaged config and the machine directory. The
+ * project layer is *a repository*: cloning a project must never be enough to point a credential at
  * someone else's endpoint, execute a command, or read a file into a prompt. Aliases, personas, modes,
  * and fusions may still come from anywhere.
  */
 export function configLayers({ cwd = process.cwd() } = {}) {
+  const paths = configPaths({ cwd });
   const files = [
-    { file: path.join(REPO_ROOT, "matrix.json"), kind: "packaged" },
-    { file: path.join(os.homedir(), ".config", "pi-fusion-matrix", "matrix.json"), kind: "machine" },
-    { file: path.join(cwd, ".pi-fusion-matrix.json"), kind: "cwd" },
+    { file: paths.packaged, kind: "packaged" },
+    { file: paths.machine, kind: "machine" },
+    { file: paths.project, kind: "cwd" },
   ];
   const layers = [];
   for (const { file, kind } of files) {

@@ -12,7 +12,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { loadMatrixConfig, validateConfig, REPO_ROOT } from "./config.js";
+import { loadMatrixConfig, validateConfig, harnessName, REPO_ROOT } from "./config.js";
 import { loadPi, loadTypebox, makeCallModel, createFusionStream } from "./run.js";
 import { createDecide } from "./decide.js";
 import { runDoctor, formatFindings, repairSnippet, EXIT } from "./doctor.js";
@@ -154,7 +154,7 @@ export default async function (pi) {
     description: "List the configured modes, fusions, seats, and provider routes",
     handler: async (_args, ctx) => {
       const lines = [];
-      lines.push(`provider: ${providerId}${config.providerName ? ` (${config.providerName})` : ""} · default fusion: ${config.defaultFusion ?? fusionIds[0]}`);
+      lines.push(`provider: ${providerId}${config.providerName ? ` (${config.providerName})` : ""} · default fusion: ${config.defaultFusion ?? fusionIds[0]} · harness: ${harnessName()}`);
       lines.push(`layers: ${layers.map((l) => l.file.replace(process.env.HOME ?? "", "~")).join(" → ")}`);
       lines.push("");
       lines.push("modes:");
