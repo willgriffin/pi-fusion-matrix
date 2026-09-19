@@ -265,10 +265,11 @@ export type FusionSpec = {
   route?: RouteSpec;
   /**
    * The execute face (Step 8). Without it the executor is the writing seat — the persona of the mode's
-   * final `single` stage — so re-pointing that seat re-points what codes under this rung. `alias` names
-   * the executor outright when the writer is not the model you want acting, and is the way a mode that
-   * writes nothing (`render`, a bare `decide`) declares one at all. `proxy` and `route` on one fusion is
-   * a load error: a proxied turn runs no pipeline, so the route could never fire.
+   * final `single` stage — so re-pointing that seat re-points what codes under this rung. `alias`
+   * re-points which model that seat acts as, when the writer is not the model you want acting; a fusion
+   * whose mode writes nothing has no writing seat, so a `proxy` on one is a load error rather than an
+   * executor with no persona for the thinking rule to read. `proxy` and `route` on one fusion is a load
+   * error too: a proxied turn runs no pipeline, so the route could never fire.
    */
   proxy?: { alias: string };
 };
@@ -510,6 +511,8 @@ pi.registerProvider(providerId, {
   models: Object.entries(config.fusions).map(([id, fusion]) => {
     const executor = executorOf(config, fusion);            // Step 8: the writing seat, or `proxy.alias`
     const alias = executor ? config.aliases[executor.alias] : undefined;
+    // `reasoning` follows the alias's declaration and defaults to the executor being a reasoning model;
+    // nothing reads `fusion.model.reasoning`, so an operator cannot half-configure it.
     return {
       id,
       name: fusion.name ?? `Fusion · ${id}`,
@@ -518,7 +521,7 @@ pi.registerProvider(providerId, {
       // `alias.reasoning` also settles whether the harness passes a thinking level through at all: both
       // harnesses gate `reasoning` on this flag, so a proxying fusion that says `false` makes `--thinking`
       // inert and the target falls back to its own default.
-      reasoning: executor ? (alias?.reasoning ?? fusion.model?.reasoning ?? true) : Boolean(fusion.model?.reasoning),
+      reasoning: executor ? (alias?.reasoning ?? true) : false,
       input: ["text"],
       contextWindow: alias?.contextWindow ?? fusion.model?.contextWindow ?? 128000,
       maxTokens: alias?.maxTokens ?? fusion.model?.maxTokens ?? 8192,
@@ -1051,12 +1054,20 @@ where that changes, not a heuristic here.
   fusion declares for it.
 
 To change which model codes under a rung, re-point one seat: `best`'s `synth` at `qwen-max` makes every
-`best` execution turn run on that model while its panel stays cheap at `low`. `proxy: { alias }` names
-the executor outright, for the case where the writer is a fine merge and a thin coder; it is also how a
-mode that writes nothing (`render`, a bare `decide`) declares an execute face. The consequences are
-worth keeping in view: re-pointing a writer also upgrades that rung's *deliberation* synthesis (usually
-wanted, one call), and a rung whose writer is a flash model is a cheap executor — `good` means "cheap
-models, cheap writing", which is correct, visible, and fixed by re-pointing its writer.
+`best` execution turn run on that model while its panel stays cheap at `low`. `proxy: { alias }`
+re-points *which model the writing seat acts as*, for the case where the writer is a fine merge and a
+thin coder. It is not a way to give a mode that writes nothing (`render`, a bare `decide`) an executor:
+such a fusion has no persona, so the thinking rule would have no row to read and a configured level
+would be dropped in silence — the loader rejects it instead.
+
+The proxied turn walks that seat's **candidate**, not merely the alias's own route: the object form
+carries a per-seat provider order, a `modelOverride`, and a thinking level, and the two faces have to
+walk the same candidates, or the coding turn can run on an account the seat deliberately excluded.
+
+The consequences are worth keeping in view: re-pointing a writer also upgrades that rung's
+*deliberation* synthesis (usually wanted, one call), and a rung whose writer is a flash model is a cheap
+executor — `good` means "cheap models, cheap writing", which is correct, visible, and fixed by
+re-pointing its writer.
 
 **What a proxied turn forwards.** `context.messages`, `context.tools`, and `context.systemPrompt` reach
 the target byte-identical, as does `options` with the credential resolved for the target: `signal`,
@@ -1106,8 +1117,11 @@ fusion, for the writing seat only:
 | `"harness"` | whatever level the harness sent |
 | absent | the writing seat's persona thinking if it declares one, else the harness's level |
 
-That is total and deterministic, and it needs no signal we cannot see. A harness that ever exposes its
-settings can reinstate the "was this auto?" distinction without changing the config surface.
+That is total and deterministic, and it needs no signal we cannot see. The literal is the execute face's
+alone: the pipeline strips it where a seat's level is resolved (`pipeline.js`), because a seat is called
+at a level we choose and would otherwise ask its provider for a level named "harness". A harness that
+ever exposes its settings can reinstate the "was this auto?" distinction without changing the config
+surface.
 
 **Registered metadata is the facade's.** A fusion with an execute face registers its executor's
 `contextWindow`, `maxTokens`, and thinking capability, taken from that alias's declared values —
@@ -1364,13 +1378,13 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     0 it used to print is the finding this item is about.
 
 20. **Offline interpreter contracts** — `node scripts/typesafe-stub.mjs &` then
-    `node scripts/interp-check.mjs` must pass 27/27. The original nine: a decisive stage decision skips
+    `node scripts/interp-check.mjs` must pass 30/30. The original nine: a decisive stage decision skips
     the stage it gates with no judge call; an ambiguous one calls the judge and records a prior containing
     the cheap read's answer; debate makes 3 seats × 3 rounds with peers' opinions; a `score` stage issues
     **one** batched request for three seats; `verify` warns without blocking; a confident route redirects
-    and an unconfident one declines. The eighteen added with Step 8: the proxy contracts of item 22, the
-    seat's half of the shared thinking-refusal rule, and the registration/`matrix-info` surfaces of item
-    24. This is the check that must run when a provider's quota blocks the live items — and it caught a
+    and an unconfident one declines. The twenty-one added with Step 8: the proxy contracts of item 22, the
+    seat's half of the shared thinking-refusal rule, the registration/`matrix-info` surfaces of item 24,
+    and the six loader rules of item 25. This is the check that must run when a provider's quota blocks the live items — and it caught a
     real gap on first use: stage-level `sufficientWhen` was unimplemented, so a converged panel still paid
     for the judge.
 21. **Doctor exit codes and non-mutation** — with an injected registry and catalogue: clean config exits
@@ -1387,7 +1401,9 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     tools present; an unresolvable route advances to the next with the attempt recorded and no
     decoration; a level the target refuses is dropped once and the turn continues; a route that fails
     before any event advances while one that fails after `start` ends the turn; and an unreachable
-    executor ends as an error message with no deliberation. Each must *fail* when the branch is mutated
+    executor ends as an error message with no deliberation. The two faces read `thinking` the same way
+    too: the writing seat's candidate object pins the proxied turn's route and level, and the execute
+    face's `"harness"` literal never reaches a seat. Each must *fail* when the branch is mutated
     — dropping `tools` from the forwarded context, writing a status line into the stream, falling through
     to the pipeline after the proxy returns, or attaching `details` only to `result()` — which is the
     check's own acceptance.
@@ -1430,10 +1446,12 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     named message: `{"fusions": {"best": {"proxy": {"alias": "no-such-alias"}}}}` →
     `proxy alias "no-such-alias" is not an alias`; `{"fusions": {"default-smrt": {"proxy": {"alias":
     "qwen-flash"}}}}` → `proxy and route cannot both be declared`; `{"fusions": {"best": {"thinking":
-    {"judge": "harness"}}}}` → `thinking "harness" is only legal for the writing seat "synth"`. **Verified
-    live 2026-09-19**: all three fail `pi -ne -e <repo>/extensions/pi-fusion-matrix` at load with those
-    messages and exit non-zero, and an empty `proxy: {}` reports `proxy needs an alias`. Remove each file
-    afterwards, and confirm the packaged config alone validates clean (`node scripts/doctor.mjs` exits 0).
+    {"judge": "harness"}}}}` → `thinking "harness" is only legal for the writing seat "synth"`; and
+    `{"fusions": {"opinions": {"proxy": {"alias": "kimi"}}}}` → `proxy needs a writing seat`. **Verified
+    live 2026-09-19**: the first three fail `pi -ne -e <repo>/extensions/pi-fusion-matrix` at load with
+    those messages and exit non-zero, and an empty `proxy: {}` reports `proxy needs an alias`; all six
+    rules are asserted offline in `scripts/interp-check.mjs`. Remove each file afterwards, and confirm the
+    packaged config alone validates clean (`node scripts/doctor.mjs` exits 0).
 
 ## Assumptions & contingencies
 

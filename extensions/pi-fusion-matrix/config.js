@@ -214,11 +214,16 @@ export function interpolate(value, vars, where) {
 
 /* ------------------------------------------------------------------ executor */
 
-/** The first candidate that names an alias — a decision candidate names no model to proxy to. */
-function firstAlias(candidates) {
+/**
+ * The first candidate that names an alias — a decision candidate names no model to proxy to. The candidate
+ * itself is kept, not just its alias name, because the object form carries the seat's own provider order,
+ * `modelOverride`, and thinking level, and the proxied turn has to walk the same route the seat's
+ * deliberation does.
+ */
+function firstCandidate(candidates) {
   for (const candidate of candidates ?? []) {
     if (typeof candidate === "string") return candidate;
-    if (isObject(candidate) && typeof candidate.alias === "string" && candidate.alias) return candidate.alias;
+    if (isObject(candidate) && typeof candidate.alias === "string" && candidate.alias) return candidate;
   }
   return null;
 }
@@ -228,10 +233,10 @@ function firstAlias(candidates) {
  * alias it runs on. One definition declares both faces, so re-pointing the writer re-points what codes
  * under that rung.
  *
- * `proxy.alias` names the executor outright, which is the case where the writer is a fine merge and a
- * thin coder; without it the writer is the persona of the mode's final `single` stage. A mode that ends
- * in `render` (or a bare `decide`) writes nothing, so it declares no executor and always deliberates —
- * unless its config names one with `proxy.alias`.
+ * `proxy.alias` re-points which model that seat runs on — the case where the writer is a fine merge and
+ * a thin coder. A mode that ends in `render` (or a bare `decide`) writes nothing, so it declares no
+ * executor and always deliberates; the loader rejects a `proxy` on one, because its executor would have
+ * no persona and the thinking rule would have no row to read.
  *
  * @returns `{ persona, alias, declared }` or `null` when the fusion has no execute face.
  */
@@ -239,8 +244,13 @@ export function executorOf(config, fusion) {
   const stages = config?.modes?.[fusion?.mode]?.stages ?? [];
   const persona = stages[stages.length - 1]?.single ?? null;
   const declared = typeof fusion?.proxy?.alias === "string" && fusion.proxy.alias ? fusion.proxy.alias : null;
-  const alias = declared ?? firstAlias(fusion?.candidates?.[persona]);
-  return alias ? { persona, alias, declared } : null;
+  // A mode that writes nothing has no writing seat, so it declares no executor at all: `proxy.alias`
+  // overrides which model the *writer* runs on, and the loader rejects it where there is no writer —
+  // otherwise the executor would have no persona, and the thinking table would have no row for it.
+  if (persona === null) return null;
+  const candidate = firstCandidate(fusion?.candidates?.[persona]);
+  const alias = declared ?? (typeof candidate === "string" ? candidate : candidate?.alias);
+  return alias ? { persona, alias, candidate, declared } : null;
 }
 
 /**
@@ -254,10 +264,13 @@ export function executorOf(config, fusion) {
  */
 export function executorThinking(config, fusion) {
   const writer = executorOf(config, fusion);
-  const declared = writer?.persona ? fusion?.thinking?.[writer.persona] : undefined;
+  if (!writer) return undefined;
+  const declared = fusion?.thinking?.[writer.persona];
   if (declared === HARNESS_THINKING) return undefined;
-  if (declared !== undefined) return declared;
-  return writer?.persona ? config?.personas?.[writer.persona]?.thinking : undefined;
+  // The fusion's own override first, then the level the seat's candidate declares for itself, then the
+  // persona's — the same three the pipeline reads for that seat, so the two faces sample alike.
+  const candidate = isObject(writer.candidate) ? writer.candidate.thinking : undefined;
+  return declared ?? candidate ?? config?.personas?.[writer.persona]?.thinking;
 }
 
 /* ------------------------------------------------------------------ validation */
@@ -458,6 +471,13 @@ export function validateConfig(config, { sources } = {}) {
         err(`fusion "${id}": proxy needs an alias; the writing seat already is the default`);
       } else if (!aliases[fusion.proxy.alias]) {
         err(`fusion "${id}": proxy alias "${fusion.proxy.alias}" is not an alias`);
+      }
+      // `proxy.alias` re-points which model the writing seat runs on; it is not a way to give a mode
+      // that writes nothing an executor. Such a fusion has no persona, so the thinking table's "the
+      // writing seat's persona level" row would have nothing to read and a configured level would be
+      // dropped in silence — this load error is the loud version of that.
+      if (typeof fusion.proxy.alias === "string" && fusion.proxy.alias && !executorOf(config, fusion)) {
+        err(`fusion "${id}": proxy needs a writing seat (a mode whose last stage is a single seat); mode "${fusion.mode}" writes nothing, so the executor would have no persona to take a thinking level from`);
       }
       // A proxied turn runs no pipeline, so a route on the same fusion could never fire — two
       // contradictory declarations rather than a preference between them.

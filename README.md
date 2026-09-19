@@ -175,8 +175,11 @@ re-pointing that one seat re-points what codes under the rung:
 | `review-check` | five-seat committee, cascaded | `kimi` @harness |
 | `opinions`, `debate` | three seats, rendered | — every turn deliberates |
 
-`proxy: { "alias": "gpt" }` names the executor outright, for when the writer is a fine merge and a thin
-coder; it is also how a `render`-ended mode declares an execute face at all. The writing seat's
+`proxy: { "alias": "gpt" }` re-points which model the writing seat acts as, for when the writer is a
+fine merge and a thin coder — it is not a way to give a `render`-ended mode an execute face, and the
+loader rejects a `proxy` on one, because its executor would have no persona for the level rule to read.
+The proxied turn walks that seat's *candidate*, so a per-seat provider order, `modelOverride`, or
+thinking level applies to executing exactly as it does to deliberating. The writing seat's
 `thinking` takes a concrete level, `"harness"` (run at whatever level the harness sent — it resolves
 `auto` before the extension ever sees it), or nothing (the writing seat's persona level, else the
 harness's). A proxying fusion registers its executor's context window and max output rather than a
@@ -630,7 +633,7 @@ quota blocks a live one:
 
 ```bash
 node scripts/typesafe-stub.mjs & node scripts/semif-stub.mjs &      # local backends
-node scripts/interp-check.mjs                                       # 27 interpreter contracts
+node scripts/interp-check.mjs                                       # 30 interpreter contracts
 node scripts/doctor.mjs                                             # config + connectivity
 node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone
 node scripts/semif-probe.mjs    --backend http://127.0.0.1:8792/score
@@ -649,9 +652,11 @@ byte-identical, the target's tool call reaching the caller, the message holding 
 nothing else, no seat call, `details.proxied` on the terminal event's message, a render-ended rung still
 deliberating with tools present, the thinking table's cases, an unresolvable route advancing with the
 attempt recorded, a refused level dropped once, a route that dies mid-stream ending the turn, and an
-unreachable executor ending as an error instead of a deliberation. The same file asserts what the
-extension *registers* — the executor's numbers and thinking capability per rung — and what
-`/matrix-info` prints for each fusion's execute face.
+unreachable executor ending as an error instead of a deliberation, the writing seat's candidate object
+pinning the proxied route and level, and the execute face's `"harness"` literal never reaching a seat.
+The same file asserts what the extension *registers* — the executor's numbers and thinking capability per
+rung — what `/matrix-info` prints for each fusion's execute face, and each of the loader's six proxy
+rules by name.
 
 ## What it does not do
 

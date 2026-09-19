@@ -361,7 +361,10 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
   // what an unset level means: the harness resolves `auto` before we see it, so there is nothing to read.
   const level = executorThinking(config, fusion);
 
-  for (const resolved of resolveCandidates(config, executor.alias)) {
+  // The writer's *candidate*, not just its alias name: the object form carries the seat's own provider
+  // order, `modelOverride`, and thinking level, and a proxied turn has to walk the route that seat's
+  // deliberation walks rather than the alias's own order.
+  for (const resolved of resolveCandidates(config, executor.candidate ?? executor.alias)) {
     const seat = await seatRequest(registry, resolved);
     if (!seat.ok) {
       attempts.push({ alias: resolved.alias, seat: label(resolved), reason: seat.reason, detail: seat.detail });

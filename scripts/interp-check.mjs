@@ -14,7 +14,7 @@
  * It caught a real gap on first run: stage-level `sufficientWhen` was unimplemented, so a converged
  * panel still paid for the judge.
  */
-import { loadMatrixConfig } from "../extensions/pi-fusion-matrix/config.js";
+import { loadMatrixConfig, mergeConfig, validateConfig } from "../extensions/pi-fusion-matrix/config.js";
 import { runPipeline } from "../extensions/pi-fusion-matrix/pipeline.js";
 import { createDecide } from "../extensions/pi-fusion-matrix/decide.js";
 import { routeFusion, verifyRun, createFusionStream } from "../extensions/pi-fusion-matrix/run.js";
@@ -374,6 +374,52 @@ check("matrix-info: every fusion prints its execute face",
     && / {2}review-check: committee-cascaded[^\n]*\n[\s\S]*? {4}executes: kimi @harness \(writing seat synth\)/.test(info)
     && /executes: — \(no writing seat/.test(info),
   info.split("\n").filter((line) => line.includes("executes:")).slice(0, 3).join(" | "));
+
+/* ------------------------------------------------------------ review findings */
+
+// The two faces must not read `thinking` differently: the execute face's `"harness"` literal is the
+// harness's level for a proxied turn and means nothing to a seat — a seat that inherited it would ask its
+// provider for a level called "harness".
+const harnessSeatLevels = [];
+const levelRecordingCallModel = async ({ persona, reasoning }) => {
+  harnessSeatLevels.push(reasoning ?? null);
+  return { text: `canned ${persona?.name}`, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", toolCalls: [] };
+};
+const harnessSeatRun = await runPipeline({
+  config, sources, fusion: { mode: "single", thinking: { technical: "harness" }, candidates: { technical: ["glm"] }, id: "seat-harness" },
+  prompt: "x", callModel: levelRecordingCallModel, decide, emit: silent, registry,
+});
+check("seat: the `harness` literal never reaches a seat",
+  harnessSeatLevels.join(",") === "medium" && harnessSeatRun.text === "canned technical",
+  `levels=${JSON.stringify(harnessSeatLevels)}`);
+
+// A writer in the object form pins the proxied turn to that seat's own route and level, because the two
+// faces have to walk the same candidates.
+config.fusions["proxy-object"] = {
+  mode: "single",
+  candidates: { technical: [{ alias: "kimi", providers: ["kimi-coding"], thinking: "high" }] },
+};
+const objectSeen = [];
+await driveStream(fusionStream(makeProxyPeer(objectSeen))(fusionModel("proxy-object"), harnessContext, harnessOptions));
+check("proxy: a writer's candidate object pins the route and the level",
+  objectSeen[0]?.model.provider === "kimi-coding" && objectSeen[0]?.options.reasoning === "high",
+  `provider=${objectSeen[0]?.model.provider} @${objectSeen[0]?.options.reasoning}`);
+
+// Every proxy rule the loader enforces, asserted where it is enforced rather than only through a harness.
+const { config: fresh } = loadMatrixConfig({ cwd: process.cwd(), layers: ["packaged"] });
+const errorsFor = (patch) => validateConfig(mergeConfig(JSON.parse(JSON.stringify(fresh)), patch), {});
+const proxyRules = [
+  ["an unknown alias", { fusions: { best: { proxy: { alias: "no-such-alias" } } } }, /proxy alias "no-such-alias" is not an alias/],
+  ["an empty proxy block", { fusions: { best: { proxy: {} } } }, /proxy needs an alias/],
+  ["proxy with route", { fusions: { "default-smrt": { proxy: { alias: "qwen-flash" } } } }, /proxy and route cannot both be declared/],
+  ["a writing seat that is not the writer", { fusions: { best: { thinking: { judge: "harness" } } } }, /"harness" is only legal for the writing seat "synth"/],
+  ["proxy on a mode that writes nothing", { fusions: { opinions: { proxy: { alias: "kimi" } } } }, /proxy needs a writing seat/],
+  ["a non-integer alias contextWindow", { aliases: { "glm-flash": { contextWindow: 0 } } }, /contextWindow must be a positive integer/],
+];
+const ruleResults = proxyRules.map(([, patch, re]) => re.test(errorsFor(patch).join("\n")));
+check("config: every proxy rule is a named load error",
+  ruleResults.every(Boolean) && errorsFor({}).length === 0,
+  proxyRules.filter((_, i) => !ruleResults[i]).map(([name]) => name).join(", ") || `${proxyRules.length} rules, packaged config clean`);
 
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

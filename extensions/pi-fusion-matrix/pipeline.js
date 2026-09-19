@@ -20,7 +20,7 @@
  * a substitution).
  */
 
-import { resolvePrompt } from "./config.js";
+import { resolvePrompt, HARNESS_THINKING } from "./config.js";
 import { resolveCandidates, seatRequest, label, isObject } from "./resolve.js";
 
 /** pi-ai rejects temperature on some models; learned per provider/model and reported once. */
@@ -295,7 +295,12 @@ export async function runSeat({
         continue;
       }
 
-      const thinking = fusion.thinking?.[personaName] ?? resolved.thinking ?? persona.thinking;
+      // `"harness"` is the execute face's literal (Step 8) and means nothing to a seat, which we call at
+      // a level we choose: a seat reading it would ask its provider for a level called "harness". So it is
+      // stripped here and the seat keeps its own persona level, exactly as if the fusion had not declared
+      // one for it.
+      const declaredThinking = fusion.thinking?.[personaName];
+      const thinking = (declaredThinking === HARNESS_THINKING ? undefined : declaredThinking) ?? resolved.thinking ?? persona.thinking;
       const key = `${resolved.provider}/${resolved.model}`;
       const messages = [];
       if (prior) messages.push({ role: "user", content: prior });
@@ -340,7 +345,7 @@ export async function runSeat({
       // a level that *is* supported is still requested next time and one that is refused is not retried
       // forever.
       const thinkingKey = `${key}@${thinking}`;
-      if (message.stopReason === "error" && !noThinking.has(thinkingKey) && isThinkingRefusal(message.errorMessage)) {
+      if (message.stopReason === "error" && thinking && !noThinking.has(thinkingKey) && isThinkingRefusal(message.errorMessage)) {
         rememberThinkingRefusal(resolved.provider, resolved.model, thinking);
         emit.delta(` ├─ ️ ${key} does not support thinking "${thinking}"; retrying that seat without a reasoning level.\n`);
         message = await call(!noTemperature.has(key), false);

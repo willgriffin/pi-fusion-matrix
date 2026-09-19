@@ -98,9 +98,10 @@ export default async function (pi) {
       api: "fusion-matrix",
       provider: providerId,
       // A deliberation seat's level comes from config per persona, so a fusion with no execute face
-      // advertises none; a proxying fusion has to let the harness pass `--thinking` through, which pi
-      // and omp both gate on this flag.
-      reasoning: executor ? (alias?.reasoning ?? fusion.model?.reasoning ?? true) : Boolean(fusion.model?.reasoning),
+      // advertises none — the pre-Step-8 value. A proxying fusion has to let the harness pass
+      // `--thinking` through, which pi and omp both gate on this flag, so it advertises the executor's
+      // own capability unless that alias declares otherwise.
+      reasoning: executor ? (alias?.reasoning ?? true) : false,
       input: ["text"],
       contextWindow: alias?.contextWindow ?? fusion.model?.contextWindow ?? 128000,
       maxTokens: alias?.maxTokens ?? fusion.model?.maxTokens ?? 8192,
