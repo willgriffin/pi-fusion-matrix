@@ -392,6 +392,7 @@ export function render(report, { limit = 12 } = {}) {
   lines.push(`  messages carrying no price: ${report.gaps.unpriced}`);
   lines.push(`  records shaped like ours but not recognised: ${report.unknownShapes.length}`);
   lines.push(`  files or directories that could not be read: ${report.gaps.unreadable.length}`);
+  for (const skipped of report.store?.skippedRoots ?? []) lines.push(`  store not read (--harness): ${skipped.root.replace(os.homedir(), "~")}`);
   const unattributable = report.store?.unattributable ?? [];
   lines.push(`  sessions a filter could not attribute (no header, or nothing to compare): ${unattributable.length}`);
   for (const entry of unattributable.slice(0, 10)) lines.push(`    ${entry.path}: ${entry.reason}`);
@@ -559,6 +560,29 @@ function check() {
   }
   fs.rmSync(truncatedDir, { recursive: true, force: true });
 
+  // A session with no placeable timestamp must not be totalled into a --since window it cannot be shown
+  // to belong to, and an explicit --session excluded by a filter must say so.
+  const datedDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-report-since-"));
+  const datedSlug = path.join(datedDir, "--private-tmp-project-alpha--");
+  fs.mkdirSync(datedSlug, { recursive: true });
+  const undated = path.join(datedSlug, "undated.jsonl");
+  fs.writeFileSync(undated, lines([{ ...sessionMeta, timestamp: "not-a-date" }, ...goodEntries.slice(1)]));
+  const dated = path.join(datedSlug, "dated.jsonl");
+  fs.writeFileSync(dated, lines([{ ...sessionMeta, timestamp: "2026-09-19T08:00:00.000Z" }, ...goodEntries.slice(1)]));
+  const sinceRoots = [{ harness: "pi", root: datedDir }];
+  const sinceMs = Date.parse("2026-09-19");
+  const windowed = readStore({ roots: sinceRoots, sinceMs });
+  ok("a session with no placeable timestamp is named, not totalled into --since", windowed.store.unattributable.length === 1 && windowed.store.unattributable[0].path === undated && windowed.sessions.length === 1, JSON.stringify({ sessions: windowed.sessions.length, unattributable: windowed.store.unattributable.map((u) => u.path.split("/").at(-1)) }));
+  const oneFile = readStore({ roots: sinceRoots, sessionFile: dated, cwdFilter: "project-beta" });
+  ok("an explicit --session excluded by a filter is named", oneFile.store.unattributable.length === 1 && oneFile.sessions.length === 0);
+  if (process.getuid?.() !== 0) {
+    const child = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--dir", datedDir, "--since", "2026-09-19"], { encoding: "utf8" });
+    ok("an unplaceable session under --since exits non-zero", child.status === 1 && /could not attribute/.test(child.stdout), `status=${child.status}`);
+  }
+  const harnessed = readStore({ roots: [{ harness: "pi", root: datedDir }, { harness: "omp", root: datedDir }], harnessFilter: "pi" });
+  ok("a store left out by --harness is named, not silently absent", harnessed.store.skippedRoots.length === 1 && harnessed.store.skippedRoots[0].harness === "omp", JSON.stringify(harnessed.store.skippedRoots));
+  fs.rmSync(datedDir, { recursive: true, force: true });
+
   const failures = results.filter((r) => !r.pass);
   for (const r of results) console.log(`  ${r.pass ? "ok  " : "FAIL"} ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);
   console.log(`\nsession-report: ${results.length - failures.length}/${results.length} checks passed`);
@@ -574,11 +598,16 @@ export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceM
   const sessions = [];
   const files = [];
   const unreadable = [];
+  const store = { read: 0, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [] };
   if (sessionFile) {
     files.push({ harness: "session", root: path.dirname(path.resolve(sessionFile)), file: path.resolve(sessionFile) });
   } else {
     for (const { harness, root } of roots) {
-      if (harnessFilter && harness !== harnessFilter) continue;
+      if (harnessFilter && harness !== harnessFilter) {
+        // A store `--harness` left out is named, so "pi only" cannot read as "the other store was empty".
+        store.skippedRoots.push({ harness, root });
+        continue;
+      }
       const found = findSessions(root, { readdir });
       reportRoots.push({ harness, root, files: found.files.length, missing: found.missing });
       for (const entry of found.unreadable) unreadable.push({ harness, path: entry.path, reason: entry.reason });
@@ -588,7 +617,6 @@ export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceM
 
   // Store facts, as opposed to the rows a filter selects: a filter must never take the accounting with it,
   // or `--cwd` on a store whose header lines are truncated reports zero records and zero unparsed lines.
-  const store = { read: 0, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, unattributable: [] };
 
   for (const { harness, file } of files) {
     let text;
@@ -606,18 +634,28 @@ export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceM
     store.read += 1;
     store.unparsed += unparsed;
     if (session.problems.length) store.withoutHeader += 1;
-    const lacks = (field) => (field === "cwd" ? !session.cwd : Number.isNaN(Date.parse(session.startedAt ?? "")));
+    const lacksCwd = !session.cwd;
     if (cwdFilter && !String(session.cwd ?? "").includes(cwdFilter)) {
       // Excluded, but not silently: an exclusion the filter cannot justify (no cwd to compare, no header at
       // all) may be a session that *would* have matched, so it is named instead of counted as a clean miss.
-      if (lacks("cwd")) store.unattributable.push({ harness, path: file, reason: "no cwd in the session header, so --cwd cannot tell whether it matches" });
+      if (lacksCwd) store.unattributable.push({ harness, path: file, reason: "no cwd in the session header, so --cwd cannot tell whether it matches" });
+      else if (sessionFile) store.unattributable.push({ harness, path: file, reason: "asked for by --session, then excluded by --cwd" });
       else store.excludedByCwd += 1;
       continue;
     }
-    if (sinceMs !== undefined && Date.parse(session.startedAt ?? "") < sinceMs) {
-      if (lacks("startedAt")) store.unattributable.push({ harness, path: file, reason: "no parseable timestamp, so --since cannot place it" });
-      else store.excludedBySince += 1;
-      continue;
+    if (sinceMs !== undefined) {
+      // `NaN < sinceMs` is false, so an unplaceable session must be caught before the comparison or it is
+      // silently totalled into a window it cannot be shown to belong to.
+      const startedMs = Date.parse(session.startedAt ?? "");
+      if (Number.isNaN(startedMs)) {
+        store.unattributable.push({ harness, path: file, reason: "no parseable timestamp, so --since cannot place it" });
+        continue;
+      }
+      if (startedMs < sinceMs) {
+        if (sessionFile) store.unattributable.push({ harness, path: file, reason: "asked for by --session, then excluded by --since" });
+        else store.excludedBySince += 1;
+        continue;
+      }
     }
     sessions.push(session);
   }

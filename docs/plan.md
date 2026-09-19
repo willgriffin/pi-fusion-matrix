@@ -1030,7 +1030,7 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
 
 Exit status: `0` report produced, `1` the store could not be accounted for (missing or empty `--dir`,
 unreadable `--session`, an unreadable file or directory, or a session a filter could not attribute), `2`
-`--check` failed. `--check` is the reader's own accounting, checked against fixtures (34 checks, each shown
+`--check` failed. `--check` is the reader's own accounting, checked against fixtures (38 checks, each shown
 to fail under a mutation), so the instrument is held to the same standard as the pipeline it reads.
 
 ## Critical files & anchors
@@ -1281,7 +1281,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     prints its snippet while leaving every tracked file byte-identical (asserted by hash).
 
 22. **The run record survives, and the report reads it** — `node scripts/session-report.mjs --check`
-    passes 34/34 with every check mutation-proved, then in a scratch `cwd` (Step 8's prerequisites):
+    passes 38/38 with every check mutation-proved, then in a scratch `cwd` (Step 8's prerequisites):
     `node scripts/session-report.mjs --cwd <scratch> --json` on the store *before* a `/matrix` run shows
     zero deliberation records, and after `/matrix quick "…"` in **both** pi and omp it shows one, with the
     answer message carrying `details.fusion` — then `--verbose` names that run. A failed run records itself:
