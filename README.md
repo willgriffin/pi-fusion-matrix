@@ -543,9 +543,10 @@ The run record is the audit trail: `details.stages` (kind and calls per stage �
 always present, empty arrays included.
 
 A proxied turn is one model call, so it records `details.proxied` instead: the `alias`, `provider`,
-vendor `model`, and `template` that answered, the `thinking` level it ran at, and `attempts` — every
-route the alias walked before one answered. Nothing about it is in the message, which is the point;
-the record is where a proxied turn's routing is auditable.
+vendor `model`, and `template` that answered, the `thinking` level it ran at (`null` when the target
+refused the declared level and the turn ran without one), and `attempts` — every route the alias walked
+before one answered. Nothing about it is in the message, which is the point; the record is where a
+proxied turn's routing is auditable.
 
 ## What leaves your machine
 

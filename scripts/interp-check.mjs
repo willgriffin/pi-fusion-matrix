@@ -276,9 +276,10 @@ const refusingPeer = {
 const refusedLevel = await driveStream(fusionStream(refusingPeer)(fusionModel("quick"), harnessContext, harnessOptions));
 check("proxy: an unsupported thinking level is dropped once and recorded",
   refusalSeen.join(",") === "low," && refusedLevel.final.stopReason === "stop"
+    && refusedLevel.final.details?.proxied?.thinking === null
     && /not supported/.test(refusedLevel.final.details?.proxied?.attempts?.[0]?.detail ?? "")
     && textOfEvents(refusedLevel.events) === "read it back",
-  `levels=${JSON.stringify(refusalSeen)}, attempts=${JSON.stringify(refusedLevel.final.details?.proxied?.attempts?.map((a) => a.reason))}`);
+  `levels=${JSON.stringify(refusalSeen)}, recorded=${JSON.stringify(refusedLevel.final.details?.proxied?.thinking)}, attempts=${JSON.stringify(refusedLevel.final.details?.proxied?.attempts?.map((a) => a.reason))}`);
 
 // 12. a route that fails before anything reached the caller advances to the next provider, exactly as
 // a seat does; 13. one that fails after `start` cannot, because pi has already pushed that partial into

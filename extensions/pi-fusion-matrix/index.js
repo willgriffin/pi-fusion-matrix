@@ -84,8 +84,9 @@ export default async function (pi) {
    * `contextWindow` and reads `maxTokens` to tell a truncated answer from a finished one
    * (`_checkCompaction`'s `isRecoverableLength`), so an 8192 default in front of a 384K-output model
    * either clips an edit or sends the loop recovering from a truncation that never happened. The alias
-   * declares them because registration runs before any session exists to resolve a catalogue template;
-   * `fusion.model` still overrides, and is all there is for a fusion that only deliberates.
+   * declares them because registration runs before any session exists to resolve a catalogue template,
+   * and its declared numbers win; `fusion.model` is the fallback, and all there is for a fusion that
+   * only deliberates.
    */
   const registeredModel = (id) => {
     const fusion = config.fusions[id];

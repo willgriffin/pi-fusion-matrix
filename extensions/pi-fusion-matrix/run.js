@@ -390,7 +390,9 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
     // `done`/`error` event's message (`agent-loop.js` replaces `context.messages[last]` with each
     // partial and ends on the terminal event), so details attached only to the result would never be
     // seen — measured 2026-09-19: pi persisted the pipeline's `details` and nothing for a proxied turn.
-    const proxied = { alias: resolved.alias, provider: resolved.provider, model: resolved.model, template: seat.template, thinking: level ?? options?.reasoning, attempts };
+    // `thinking` follows `targetOptions`, so a level this route had to drop is recorded as dropped
+    // rather than as the level the turn did not run at; `attempts` carries the refusal itself.
+    const proxied = { alias: resolved.alias, provider: resolved.provider, model: resolved.model, template: seat.template, thinking: targetOptions.reasoning ?? null, attempts };
     const dressed = (part) => (part ? { ...identified(part), details: { ...(part.details ?? {}), proxied } } : part);
 
     // A thinking level the target refuses is our request rather than its failure, and it can surface
@@ -404,6 +406,7 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
       retriedLevel = true;
       rememberThinkingRefusal(resolved.provider, resolved.model, targetOptions.reasoning);
       delete targetOptions.reasoning;
+      proxied.thinking = null;
       return true;
     };
 
