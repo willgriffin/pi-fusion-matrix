@@ -1,106 +1,534 @@
 # pi-fusion-matrix
 
-A [pi](https://pi.dev) extension that owns **fusion resolution** and nothing else: named fusions whose
-five slots each carry an ordered fallback chain, executed through pi's own provider runtime, with a
-pluggable decision backend used conservatively.
+Several models deliberate; one answer comes back — and every step of how that happened, including
+**who got routed to what**, is configuration you can read and a run record you can audit.
 
-Status: planned. The implementation spec is [`docs/plan.md`](docs/plan.md); work is tracked in
-[this repository's issues](../../issues).
+A [pi](https://pi.dev) extension for multi-model deliberation. It owns resolution, routing, and
+execution: which model chain answers each seat, whether a cheap decision can answer instead of a model
+call, which shape a run takes, and which fusion a request should even use in the first place. It
+registers one model per fusion (`fusion-matrix/deep`, `fusion-matrix/standard`, …), runs each seat
+through pi's own provider runtime and credential store, and returns a normal pi assistant-message
+stream. Providers, endpoints, credentials, transport, and accounting stay pi's.
 
-## What it does
+Status: implemented and verified. Twelve fusions register and run on pi 0.84.2 and 0.85.1, the
+twenty-one verification items in [`docs/plan.md`](docs/plan.md) are recorded there with their evidence,
+and the repository's own offline contracts (`scripts/interp-check.mjs`, `scripts/doctor.mjs`, both
+probes) pass with no keys and no network. The spec is [`docs/plan.md`](docs/plan.md).
 
-- **Shapes are config.** A `mode` is a stage list — `pair` (two experts + a merge), `lean` (two + a
-  synthesizer that absorbs the judge), `committee` (three + judge + synthesis), `committee-merged`
-  (four calls instead of five), `opinion` (fan out, no merge), `debate` (three rounds against peers'
-  opinions), `single`, `committee-cascaded`. Adding one is a config edit.
-- **Seats are config too.** A `persona` is what a seat is told and how it samples — prompt, temperature,
-  thinking level. Persona prompts live in `prompts/*.md`, so changing what an expert is told is a text
-  edit. A fusion binds a mode to a roster: `"deep": { "mode": "committee", "candidates": {…} }` gives you
-  `fusion-matrix/deep` in `/model` and `--model`, with its own model chain per seat.
-- **Two fallback layers** — inside an alias, providers are tried in order (same model, different
-  billing route: quality-preserving); across a slot, aliases are tried in order (different model:
-  reported as a substitution).
-- **Version-free aliases** — a seat names `deepseek-flash`, never a vendor version. The id sent
-  upstream lives in `aliases.<name>.model` and the routes in `providers` (pi's own provider ids:
-  `opencode-go`, `zai`, `kimi-coding`, `openai`), so a vendor release edits one field and no alias
-  name, fusion, or seat. Endpoints and credentials stay entirely pi's — no `models.json` block ships,
-  and a vendor id does not need to be in pi's catalogue to be used.
-- **Decisions** — a `decide` element for closed questions over an option set, backed by TypeSafe
-  (default; calibrated `confidence`, no local service) or SemIf (local, zero marginal cost).
-  Conservative by construction: `verify` reports and never rewrites; `route` selects a whole fusion
-  (never a judge or synthesis model); and uncertainty escalates rather than guesses — at fusion level a
-  decision that is unsure declines to route, and inside a slot a decision whose answer is not actionable
-  escalates to the next candidate (the judge can be a cheap consensus read that falls through to a real
-  judge when the panel is ambiguous). A backend without confidence cannot gate anything at all.
+## Why this exists
 
-## What it does not do
+Two failures of the obvious implementation:
 
-- It does not own providers, endpoints, or credentials. Those are pi's (`~/.pi/agent/models.json`,
-  `/login`, `auth.json`). This extension never resolves a secret and never constructs a base URL.
-- It does not import or require `@quarkos/pi-fusion`. That project's pipeline behavior is a reference
-  the spec re-derives; see "Reference-only" in `docs/plan.md`.
-- It does not run stages that write to disk, iterate until a gate turns green, or schedule a task DAG.
-  A seat is one model call; `verify` gates run once and report. See the boundary note in `docs/plan.md`.
+- **Hardcoding is the default failure mode.** A fusion that pins one provider, one key, and five bare
+  model ids cannot express "the same model on a second billing route", and every vendor rename becomes
+  a code change. Here, providers are pi's own ids and the model chain is `matrix.json`, so a vendor
+  release edits one field and no code.
+- **Silent degradation is the dangerous one.** A pipeline that quietly substitutes a cheaper model, or
+  streams two models' answers into one message, or presents progress lines as a result, is worse than
+  one that fails. Every substitution, skipped stage, failed seat, truncated decision state, and
+  declined route here is reported in the stream and recorded in the run's `details`.
 
 ## Install
 
-pi auto-discovers `extensions/*/index.ts`. Point an install at it:
-
 ```bash
-ln -s "$PWD/extensions/pi-fusion-matrix" ~/.pi/agent/extensions/pi-fusion-matrix
+pi install git:github.com/willgriffin/pi-fusion-matrix
 ```
 
-Reload in a running session with `/reload`. Provider names referenced by `matrix.json` must exist in
-`~/.pi/agent/models.json` — model ids are resolved by pi, so any model any installed extension
-registers is usable.
+Or point pi at a checkout — useful while editing config, since a local path is not copied:
+
+```bash
+pi install /absolute/path/to/pi-fusion-matrix
+pi -e /absolute/path/to/pi-fusion-matrix   # try it for one run, installs nothing
+```
+
+Then `/reload` in a running session. A git install is pinned to the ref you installed — pin one
+explicitly (`…@v1`, `…@<sha>`) if you want a fixed point; `pi update --extensions` reconciles the clone
+to that ref rather than moving it. It declares no runtime dependencies — pi bundles the peers it lists
+— so there is nothing for the installer to fetch.
+
+Requirements before the first run:
+
+- **The providers your aliases name must exist in pi.** The packaged aliases route through
+  `opencode-go`, `zai`, `kimi-coding`, and `openai`; a provider pi does not know produces a reported
+  `missing provider` substitution, not a crash. Add your own with `/login` or a `models.json` entry.
+- **`TYPESAFE_API_KEY` for the packaged decision backend** (`route`, `verify`, and cascades). Nothing
+  else needs a key: `matrix.json` ships no `models.json` block, and this extension never reads or
+  caches a credential — it asks pi for the credential of the provider a seat names, per request.
+- **A catalogued model id is not required.** Seats resolve by provider + id, so an alias may name a
+  model pi's curated list has never heard of. The id that answered is in `details.seats[].model`.
+
+## Run it
+
+```bash
+pi -p "In two sentences: when is optimistic locking the wrong default?" \
+   --model fusion-matrix/deep --no-session
+```
+
+```
+ ├─ plan technical: kimi@opencode-go → kimi@kimi-coding → qwen-max@opencode-go
+ ├─ plan skeptic: deepseek-pro@opencode-go
+ ├─ plan systems: glm@opencode-go → glm@zai
+ ├─ plan judge: deepseek-pro@opencode-go
+ ├─ plan synth: kimi@opencode-go → kimi@kimi-coding → qwen-max@opencode-go
+ ├─ ⏳ technical: opencode-go/kimi-k3 @medium
+ ├─ ⏳ skeptic: opencode-go/deepseek-v4-pro
+ ├─ ⏳ systems: opencode-go/glm-5.3
+ ├─ ⏳ judge: opencode-go/deepseek-v4-pro @high
+ ├─ ⏳ synth: opencode-go/kimi-k3
+# When Optimistic Locking Is the Wrong Default
+…
+```
+
+Read that transcript as the run's shape. `plan …` is the expansion of the roster into routes, printed
+before the first call, so the route each seat *will* take is visible rather than inferred. `⏳` is a
+seat starting, named as `provider/vendor-model @thinking` — the judge's `@high` comes from the fusion's
+`thinking` override, and the vendor ids are the ones actually sent upstream. Then the answer streams
+from the synthesis seat only; the other four report status lines, because five interleaved answers are
+unreadable.
+
+A fusion is reachable three ways:
+
+| surface | how |
+|---|---|
+| model id | `--model fusion-matrix/<id>` or `/model` — one registered model per fusion |
+| tool | the `matrix` tool (fusion + prompt), for an agent that should deliberate mid-task |
+| command | `/matrix <id> <prompt>`, with `/matrix` alone using `defaultFusion` |
+
+`pi --list-models fusion` lists all twelve, and `/matrix-info` prints the resolvable aliases with
+their routes, the modes, the fusions with their rosters, and the config layers loaded.
+
+## The primitives
+
+Ten things, and that is the whole vocabulary. Five are nouns you write in config (`alias`,
+`persona`, `mode`, `fusion`, and the `candidate` entries inside a roster); five are behaviours you
+compose (`decide`, `route`, `verify`, `fileAgent`, and the `score` stage kind).
+
+**Routing happens in three places**, and it is worth knowing which one you are changing:
+
+| where | decides | written with |
+|---|---|---|
+| before the run | which **fusion** this request deserves — cheap, deep, or a named alternative | `route` |
+| inside a run, per seat | which **model and which account** answers it, in what fallback order | `aliases.*.providers`, a slot's `candidates` |
+| inside a seat | whether a **decision** answers it outright, or escalates to a model call | a `decide` candidate + `sufficientWhen` |
+
+The conservative rule that shapes all three: routing is always at the *whole-fusion* or *whole-seat*
+level, never a silent swap of one seat inside a run. `route` picks a fusion, not a judge or a
+synthesis model; a per-seat choice is a candidate list, which is ordered, validated, and reported.
+Nothing swaps a model mid-run to make something fit.
+
+The line the design draws: **shapes and seats are configuration, the executor is code.** Adding a
+pipeline shape or re-pointing a seat is a `matrix.json` edit. The stage *kinds*, the connector set, and
+the assembly rules are code, because a config language expressive enough to need interpreter branches
+of its own is one whose validity nobody can check. Everything below is validated at load: a config that
+cannot run fails loudly instead of registering models that pretend it can.
+
+### `alias` — a version-free name for a vendor model
+
+```json
+{
+  "aliases": {
+    "deepseek-flash": { "model": "deepseek-v4.1-flash", "providers": ["opencode-go"] },
+    "glm":            { "model": "glm-5.3",             "providers": ["opencode-go", "zai"] },
+    "kimi":           { "model": "kimi-k3",             "providers": [
+                         "opencode-go",
+                         { "id": "kimi-coding", "modelOverride": "k3" }
+                       ] }
+  }
+}
+```
+
+`model` is the vendor id sent upstream verbatim; `providers` is the **ordered route list** — same
+model, tried in order, which is how one model reaches a second billing account or survives one
+account's outage. The name is what every fusion mentions, so a vendor release that renames
+`deepseek-v4.1-flash` to `deepseek-v4-flash` is a one-field edit that no fusion, seat, or mode sees.
+
+The object form (`{ "id": ..., "modelOverride": ... }`) is for when two providers name the same model
+differently. `maxTokens` and `reasoning` are optional per alias, and a declared value wins over pi's
+catalogue template for that provider — an undeclared one leaves the template alone, because those
+fields feed the request's output envelope and pi's thinking-budget maths.
+
+### `persona` — a seat: what it is told, how it samples
+
+```json
+{
+  "personas": {
+    "technical": { "prompt": "prompts/technical.md", "temperature": 0.5, "thinking": "medium" },
+    "judge":     { "prompt": "prompts/judge.md",     "temperature": 0.2, "output": "json" },
+    "terse":     { "prompt": "Answer in one paragraph.\nName the strongest objection to the proposal above." }
+  }
+}
+```
+
+Defined once and reused by every mode and fusion, so "the judge" is one definition rather than a
+property of one pipeline position. `prompt` is a path — relative to the config file that declares it,
+so your own persona file never has to live in this repo — or inline text. The rule that separates
+them, and it is worth knowing because the loader takes it literally: **a prompt containing a newline
+is text; one without is a filename.** A one-line inline prompt therefore needs an explicit `\n` (as
+above), and a persona whose path does not exist is a load error naming it, not a silent empty prompt.
+`thinking` is pi's reasoning level for that seat, `temperature` its sampling, and `output: "json"` asks
+the seat for a JSON object, parses it with a fence-then-braces recovery, and keeps the raw text under
+`unique_insights` if parsing fails, so a downstream stage still receives something.
+
+A fusion can override one persona's prompt for one fusion only (`review` uses that for its critique
+synthesis), and its `thinking` level the same way.
+
+### `mode` — a shape: an ordered list of stages
+
+```json
+{
+  "modes": {
+    "pair": {
+      "stages": [
+        { "parallel": ["technical", "skeptic"], "input": "prompt" },
+        { "single": "merge", "input": "panel" }
+      ]
+    }
+  }
+}
+```
+
+A mode says what happens, never which model does it. Eight ship, and the call count is the feature —
+a shape that quietly adds or drops a call is a bug:
+
+| mode | stages | model calls |
+|---|---|---|
+| `single` | `single` | 1 |
+| `pair` | `parallel` → `single` | 3 |
+| `lean` | `parallel` → `single` (synthesizer absorbs the judge) | 3 |
+| `committee` | `parallel` → `single` → `single` | 5 |
+| `committee-merged` | `parallel` → `single` `alsoSynthesize` | 4 |
+| `opinion` | `parallel` → `render` | 3, no generation |
+| `debate` | `parallel` `rounds: 3` → `render` | 9 |
+| `committee-cascaded` | `parallel` → `decide` → `single` → `single` | 5 + 1 decision call |
+
+### `fusion` — a mode bound to a roster, and the model pi registers
+
+```json
+{
+  "fusions": {
+    "deep": {
+      "mode": "committee",
+      "thinking": { "judge": "high" },
+      "candidates": {
+        "technical": ["kimi", "qwen-max"],
+        "skeptic": ["deepseek-pro"],
+        "systems": ["glm"],
+        "judge": ["deepseek-pro"],
+        "synth": ["kimi", "qwen-max"]
+      },
+      "fileAgent": { "alias": "deepseek-flash" }
+    }
+  }
+}
+```
+
+This is the object you actually invoke: it becomes `fusion-matrix/deep`. Every persona the mode uses
+must appear in the roster and nothing may appear that the mode does not use — the loader rejects the
+mismatch rather than orphaning a model silently. Optional keys: `thinking` and `prompts` (per-persona
+overrides), `fileAgent`, `maxAdvance` (how many candidates one seat may walk, default 3), `verify`, and
+`route`.
+
+### `candidate` — one slot in a roster, three forms
+
+```json
+{
+  "candidates": {
+    "technical": [
+      "glm",
+      { "alias": "kimi", "providers": ["kimi-coding", "opencode-go"], "thinking": "high" },
+      {
+        "decide": {
+          "instructions": "Do the experts agree on a single recommendation?",
+          "criteria": {
+            "agrees": "They converge on the same recommendation.",
+            "partial": "They overlap but differ on something substantive.",
+            "disagrees": "They recommend different things."
+          }
+        },
+        "sufficientWhen": { "choiceIs": "agrees", "minConfidence": 0.85 }
+      }
+    ]
+  }
+}
+```
+
+A bare alias id, an alias with its route list or thinking re-ordered for this slot only, or **a
+decision** — which is what makes a cascade possible. A seat walks its candidates in order: a model
+candidate is a model call, a decision candidate is one backend call that may answer the slot outright.
+Falling from an alias to the next alias is a *substitution* (a different model, always reported);
+falling to the next provider inside an alias is a re-route (the same model, also reported).
+
+### Stage kinds
+
+Each stage declares exactly one kind, plus its `input` (the connector below).
+
+```jsonc
+{ "parallel": ["technical", "skeptic", "systems"], "input": "prompt" }          // concurrent seats
+{ "parallel": […], "rounds": 3, "roundInput": "peers" }                          // debate: each round sees every OTHER seat's last answer
+{ "single": "judge", "input": "panel" }                                          // one seat
+{ "single": "judge", "input": "panel", "alsoSynthesize": true }                  // …and it answers, in the same message
+{ "decide": { "instructions": "…", "criteria": { … } }, "input": "panel" }       // one backend call, no generation
+{ "score": { "instructions": "How well does this response address the question?",
+             "criteria": ["off-topic", "partial", "solid", "thorough"] }, "over": "panel" }   // one batched call
+{ "render": "panel", "input": "panel+weights" }                                  // assemble text, call no model
+```
+
+`parallel` runs its seats concurrently and drops a degraded seat from later rounds. `single` is one
+call; a mode must end in `single` or `render`, because anything else produces no assistant message
+(the loader says so). `decide` is a closed question — with a `sufficientWhen` it also *gates* the next
+stage, which is the cheap-read-before-expensive-judge pattern. `score` rates every panel seat against
+a level list in one request. `render` is how a shape ends without generating, and its output is sent
+to the caller like any answer.
+
+### Connectors — what a stage receives
+
+```jsonc
+{ "single": "synth", "input": "panel+judge" }
+```
+
+| connector | resolves to |
+|---|---|
+| `prompt` | the user's request |
+| `panel` | every seat of the most recent `parallel` stage, labelled with the model that answered |
+| `panel+judge` | that panel, plus the output of the `single` stage immediately before this one |
+| `panel+weights` | that panel, plus per-seat `score (confidence)` lines from the most recent `score` |
+| `peers` | inside a `rounds` stage: every **other** seat's previous-round output |
+| `previous` | the immediately preceding stage's output |
+| `{{name}}` | the output of the earlier stage that declared `"name": "…"` |
+
+An unresolved connector is a load error — the validator walks the stage list as dataflow, so a shape
+that reads something nobody produced never reaches a run.
+
+### `decide` and the backend seam
+
+```json
+{
+  "decide": { "defaultBackend": "typesafe" },
+  "backends": {
+    "typesafe": { "kind": "typesafe", "url": "https://api.typesafe.ai/v1/systemone",
+                  "apiKeyEnv": "TYPESAFE_API_KEY", "model": "jev-1.13.0" },
+    "semif":    { "kind": "semif", "url": "http://127.0.0.1:8791/score", "model": "qwen3.5-4b" }
+  }
+}
+```
+
+One vocabulary, two backends, normalised so no stage code branches on which one answered. A decision
+is either a **criteria** choice (an option map, the common case) or **typed questions** (`noul`,
+`choice`, `score`, batched — TypeSafe only; SemIf's row schema is one question per request, and that
+is a load error rather than a runtime surprise). `state` may use any connector, and defaults to the
+stage's input (for `route`, to `{{prompt}}`); it is truncated from the middle, with a notice, rather
+than sent oversized.
+
+| | `typesafe` | `semif` |
+|---|---|---|
+| answers | choices, scores, noul, with calibrated `confidence` | option probabilities, **no** confidence |
+| batching | all questions in one request | one question per request |
+| gating | may gate a route or a slot cascade | may gate nothing — a load error |
+| placement | hosted; input tokens billed | local (`tools/semif-server/`), zero marginal cost |
+
+SemIf's own output calls its probabilities "uncalibrated as decision confidence", which is why a
+backend without confidence cannot steer cost: a threshold against an uncalibrated number would be
+noise pretending to be a policy.
+
+### `sufficientWhen` — the cascade
+
+```json
+{
+  "decide": { "instructions": "Do the experts agree?", "criteria": { "agrees": "…", "disagrees": "…" } },
+  "sufficientWhen": { "choiceIs": "agrees", "minConfidence": 0.85 }
+}
+```
+
+A decision is *actionable* when its answer matches and its confidence clears the bar. When it is not,
+the seat (or the stage) escalates: the next candidate runs, or the next stage runs, with the cheap
+read's answer handed forward as a prior so the expensive stage addresses the ambiguity instead of
+rediscovering it. A cascade that escalates every time is measurable dead weight — which is why every
+run records `details.cascades` with the answer, whether it was sufficient, and what it advanced to.
+Tune thresholds from that data, not intuition. Thresholds live in `sufficientWhen` and nowhere else.
+
+### `route` — pick a fusion before the first stage
+
+```json
+{
+  "route": {
+    "instructions": "How much deliberation does this request need?",
+    "criteria": {
+      "trivial":       { "description": "A direct factual or mechanical question", "then": "quick" },
+      "architectural": "System-level tradeoffs with long-lived consequences"
+    }
+  }
+}
+```
+
+One decision before anything runs; the option that wins may name another fusion to run instead. The
+action lives with the option it applies to, options without `then` simply run this fusion, and a
+target may not route again (one hop). The gate defaults to `minConfidence` 0.5 and the effective
+threshold is recorded, because "unsure means spend, not gamble" has to be visible when it declines.
+An outage is reported as an outage — never as "no option matched".
+
+This is the escalation route: `review-routed` sends `"Reply with exactly: ZQX1"` to the cheap fusion
+(` ├─ ↪ routed to quick (trivial, conf 1.00)`) and keeps an architectural prompt on the full committee
+(` ├─  route declined (architectural); running review-routed`).
+
+### `verify` — report after the synthesis, never rewrite it
+
+```json
+{
+  "verify": [
+    { "state": "{{synthesis}}",
+      "questions": { "grounded_in_panel": { "type": "noul",
+                     "instructions": "Every substantive claim traces to the expert responses." } } },
+    { "gate": { "command": ["just", "test"], "expectExit": 0, "timeoutMs": 120000 } }
+  ]
+}
+```
+
+A decision entry or a gate. Both are **report-only**: a low `noul`, a pessimistic choice, a low
+confidence, or a gate that exits unexpectedly emits one warning line and changes nothing about the
+answer; a backend failure is recorded as skipped, not as a run failure. A gate runs its argv once, in
+the session cwd, with bounded output and an escalating kill — no loop, no feedback into a stage. Gates
+and backends may only be declared by the packaged config or `~/.config/pi-fusion-matrix/matrix.json`
+(see the trust boundary below).
+
+### `fileAgent` — files out of a synthesis
+
+```json
+{ "fusions": { "standard": { "fileAgent": { "alias": "deepseek-flash" } } } }
+```
+
+One cheap seat, after the synthesis, decides whether the answer contains files worth saving and asks
+to write them. It is not a stage — it cannot change the answer — and `"fileAgent": false` disables it.
+In a streamed pi run the writes are handed to pi as tool calls, so pi's own permission gate applies; a
+write result ends the run with a confirmation rather than starting a second deliberation. Through the
+tool and command paths there is no such gate, so the extension confines writes to the session
+directory, refuses absolute paths and `..`, and reports what it refused.
+
+## Fallback and reporting
+
+Two layers, independently configured and always reported. Lines from real runs:
+
+```
+ ├─ ↩ skeptic deepseek-pro@nope → deepseek-pro@opencode-go (missing provider)
+ ├─ ↩ systems kimi@nope → glm@opencode-go (missing provider)
+ ├─ ↩ synth-lean glm@opencode-go → glm@zai (quota)
+ ├─ ⚠️ No deliberation happened: 3 of 3 seats were unavailable (quota). Nothing was synthesized — this is not an answer.
+```
+
+A failure is classified (`quota`, `credential`, `missing model`, `transient`), retried once if
+transient, then advanced — and text already streamed is never extended by the next provider's reply.
+A seat that dies does not abort the run; a run whose every seat died says so instead of presenting
+progress lines as an answer; a stage a sufficient decision skipped is recorded as `skipped`.
+
+The run record is the audit trail: `details.stages` (kind and calls per stage — the cost contract),
+`details.seats` (persona, alias, provider, vendor `model`, `template`, thinking, usage), plus
+`details.seatErrors`, `details.substitutions`, `details.cascades`, `details.routing`,
+`details.verification`, `details.rounds`, and `details.usage` — with `seatErrors` and `substitutions`
+always present, empty arrays included.
 
 ## What leaves your machine
 
-Two things do, and both are worth knowing before the first run:
+Two things, and both are worth knowing before the first run:
 
-- **Decisions go to the backend you configure.** The packaged default is TypeSafe (`backends.typesafe`,
-  `https://api.typesafe.ai/v1/systemone`, key from `TYPESAFE_API_KEY`), and every decision call sends the
-  deliberation **state** there: the panel's raw responses for a cascade or a `score` stage (source code
-  included, when the review carried it in), the synthesis for `verify`, and the prompt for `route`.
-  TypeSafe bills input tokens only and does not train on requests, but that content does leave the host
-  verbatim. Point `decide.defaultBackend` at the local `semif` backend (`backends.semif`,
-  `http://127.0.0.1:8791/score`) for content that must not leave the host — see `tools/semif-server/`.
+- **Decisions go to the backend you configure.** The packaged default is TypeSafe
+  (`https://api.typesafe.ai/v1/systemone`, key from `TYPESAFE_API_KEY`), and every decision call sends
+  the deliberation **state** there: the panel's raw responses for a cascade or a `score` stage (source
+  code included, when a review carried it in), the synthesis for `verify`, and the prompt for `route`.
+  That content leaves the host verbatim. Point `decide.defaultBackend` at the local `semif` backend
+  (`http://127.0.0.1:8791/score`, see `tools/semif-server/`) for content that must not leave the host.
 - **Seats go to the providers your aliases name.** Panel responses are sent to the judge and synthesis
-  models, which may be different vendors. That is the point of a fusion, and it is why the alias table is
-  the place to decide who sees what.
+  seats, which may be different vendors — that is the point of a fusion, and it is why the alias table
+  is where you decide who sees what.
 
-Nothing else is transmitted. There is no telemetry, and the extension does not read or cache credentials:
-it asks pi for the credential of the provider a seat names, per request.
+Nothing else is transmitted. There is no telemetry, and the extension does not read, resolve, cache, or
+log a credential: it asks pi for the credential of the provider a seat names, per request.
 
 ## Trust boundary
 
 The session's `.pi-fusion-matrix.json` comes from whatever repository you are in, so it is treated as
-untrusted. It may change aliases, personas, modes, and fusions — routing and billing — but it may **not**
-introduce a decision backend, add a `verify` gate command, or point a persona prompt at a file: those are
-the three surfaces that can send content to an endpoint, run a command, or read a file into a prompt.
-Those come only from the packaged config and `~/.config/pi-fusion-matrix/matrix.json`, which are yours.
-Validation rejects them with a message naming the offending entry.
+untrusted. It may change aliases, personas, modes, and fusions — routing and billing — but it may
+**not** introduce a decision backend, add a `verify` gate command, or point a persona prompt at a file
+outside the repo that declared it. Those are the three surfaces that can send content to an endpoint,
+run a command, or read a file into a prompt, and they come only from the packaged config and
+`~/.config/pi-fusion-matrix/matrix.json`, which are yours. Validation rejects them, naming the entry.
 
-## Configuration
+## Configuration layers
 
-`matrix.json` merges across layers, lowest priority first:
+`matrix.json` merges across layers, lowest priority first; objects merge field by field, arrays and
+scalars replace.
 
-1. this repo's `matrix.json`
-2. `~/.config/pi-fusion-matrix/matrix.json`
-3. `<session cwd>/.pi-fusion-matrix.json`
+| layer | file | trust |
+|---|---|---|
+| packaged | this repo's `matrix.json` | trusted |
+| machine | `~/.config/pi-fusion-matrix/matrix.json` | trusted (yours) |
+| session | `<session cwd>/.pi-fusion-matrix.json` | untrusted (see above) |
 
-Top-level knobs: `providerId` (default `fusion-matrix`), `providerName`, and `defaultFusion` for the
-tool and command when no id is given. A project that must bill to another account adds that account as
-its own provider in `~/.pi/agent/models.json` and lists it in the repo-local `matrix.json`; no profile
-system is involved.
+So a project can re-point one alias at another account, or swap a slot's roster, without touching a
+fusion or this repository:
 
-## Commands
+```json
+{ "aliases": { "glm": { "providers": ["opencode-go-work", "opencode-go", "zai"] } } }
+```
 
-- `/matrix <id> <prompt>` — run a named fusion; with no id, `defaultFusion` is used.
-- `/matrix-info` — list resolvable aliases, fusions, backends, and the config layers loaded.
-- `/matrix-doctor` — validate the config, check provider connectivity, and report catalogue drift
-  (`--online` for the network checks, `--repair` prints the one additive fix).
+Top-level knobs: `providerId` (default `fusion-matrix`), `providerName`, `defaultFusion` for the tool
+and the bare `/matrix`.
 
-## License
+## Commands, the tool, and the doctor
 
-Private.
+- `/matrix <id> <prompt>` — run a named fusion; `/matrix` alone uses `defaultFusion`.
+- `/matrix-info` — resolvable aliases with their routes, modes, fusions with rosters, backends, layers.
+- `/matrix-doctor` (`--online`, `--repair`) — validate the config, check provider connectivity, and
+  report catalogue drift. `node scripts/doctor.mjs` runs the same checks outside a session:
+
+```
+matrix doctor — layers: ~/…/pi-fusion-matrix/matrix.json → ~/.config/pi-fusion-matrix/matrix.json
+· [connect] no model registry available (running outside pi); connectivity not checked
+· [connect] alias "glm-flash" has a single route, so a quota or outage on opencode-go has no fallback
+…
+```
+
+Exit status separates *broken* from *out of date*: `0` clean, `1` config errors, `2` connectivity,
+`3` reachability or drift — so CI and a pre-run hook can tell "fix this" from "review this". Repairs
+are additive only: `--repair` prints the `models.json` upsert snippet for an id you want in pi's own
+picker, never rewrites an alias, and never picks a replacement model. Drift is a report, not a rewrite.
+
+## Verifying the package itself
+
+Offline — no keys, no network, no GPU. These are the checks that must still run when a provider's
+quota blocks a live one:
+
+```bash
+node scripts/typesafe-stub.mjs & node scripts/semif-stub.mjs &      # local backends
+node scripts/interp-check.mjs                                       # 9 interpreter contracts
+node scripts/doctor.mjs                                             # config + connectivity
+node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone
+node scripts/semif-probe.mjs    --backend http://127.0.0.1:8792/score
+```
+
+The same two probes run against the real backends when you want the contract checked live
+(`--backend https://api.typesafe.ai/v1/systemone`, and export `TYPESAFE_API_KEY`; the probe defaults to
+the pinned model in `matrix.json`).
+
+`interp-check` covers the contracts a refactor breaks first: a sufficient stage decision skips the
+stage it gates with no judge call, an ambiguous one escalates with a prior, debate makes 3 seats × 3
+rounds with peers' opinions, a `score` stage issues **one** batched request, `verify` warns without
+blocking, and a confident route redirects while an unconfident one declines.
+
+## What it does not do
+
+- **No providers, endpoints, or credentials.** Those are pi's (`models.json`, `/login`, `auth.json`).
+- **No dependency on `@quarkos/pi-fusion`.** That project's pipeline behaviour is a reference the spec
+  re-derives; nothing here imports a sibling checkout or an absolute path, and the package runs with
+  every other extension disabled.
+- **No stages that write to disk, no gate loops, no task DAG.** A seat is one model call; a gate runs
+  once and reports. Plan-then-DAG execution is a scheduler, not a deliberation pipeline.
+- **No silent model substitution, ever.** An alias's `model` is exactly what runs; a finding about an
+  id that moved is a doctor report, not an automatic repair.
+
+## Reference
+
+- [`docs/plan.md`](docs/plan.md) — the canonical spec: config schema, the seat algorithm, the failure
+  taxonomy, the decision contract, and the verification items with their evidence.
+- [`docs/plan.md` §Critical files](docs/plan.md) — upstream references used to derive behaviour
+  (pi's provider docs, TypeSafe's API, SemIf), never vendored.
+
+Private / unlicensed.
