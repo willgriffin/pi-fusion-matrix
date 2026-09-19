@@ -141,9 +141,19 @@ export default async function (pi) {
       ctx.ui.setStatus("matrix", `🧠 ${fusion}…`);
       try {
         const result = await runOnce({ config, sources, fusion, prompt, getRegistry: () => getRegistry(sessionIdOf(ctx)), decide, callModel, onProgress: (line) => ctx.ui.setStatus("matrix", line), getWriteParameters });
-        pi.sendMessage({ customType: "matrix-answer", content: result.text, display: true }, { triggerTurn: false });
+        // The run record rides the message, as it does on the tool path: a custom message entry keeps
+        // `details` (pi's `session-manager.js` `appendCustomMessageEntry`), where before the command
+        // recorded only the answer text, so the deliberate face was unobservable once the turn ended —
+        // measured 2026-09-19: 46 stored sessions, zero deliberation records.
+        // `scripts/session-report.mjs` is the reader; it counts what it recognises and
+        // names what it does not, so a missing record cannot read as a clean run.
+        pi.sendMessage({ customType: "matrix-answer", content: result.text, display: true, details: { fusion, ...result.details } }, { triggerTurn: false });
       } catch (error) {
-        ctx.ui.notify(`fusion failed: ${error?.message ?? String(error)}`, "error");
+        const message = error?.message ?? String(error);
+        ctx.ui.notify(`fusion failed: ${message}`, "error");
+        // A failure is the record most worth keeping: without it the next day's report cannot tell a
+        // run that failed from a fusion nobody asked.
+        pi.sendMessage({ customType: "matrix-answer", content: `fusion failed: ${message}`, display: true, details: { fusion, error: message } }, { triggerTurn: false });
       } finally {
         ctx.ui.setStatus("matrix", undefined);
       }

@@ -65,6 +65,7 @@ node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone
 node scripts/semif-probe.mjs    --backend http://127.0.0.1:8792/score
 node scripts/interp-check.mjs                                           # interpreter contracts
 node scripts/doctor.mjs                                                 # config + connectivity
+node scripts/session-report.mjs --check                                 # run-record reader contracts
 ```
 
 The interpreter and doctor checks need no keys, no network, and no quota — they are the checks that must
