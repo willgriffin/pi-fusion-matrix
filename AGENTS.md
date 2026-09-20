@@ -77,6 +77,10 @@ that iterate until green, and plan-then-DAG execution. `verify` gates run once a
 - **No unbounded waits in test code.** Anything that can await must carry its own deadline, and a
   deadline that fires is a *failed check with a message*, never a hung suite. A test that hangs is
   indistinguishable from a test that found a deadlock and from one that found nothing.
+- **No test may depend on the machine it runs on.** `npm test` removes `TYPESAFE_API_KEY` from the environment
+  before running, because a unit test that passes only where a key happens to be exported is a test that lies
+  about its isolation — it fails in CI for a reason nobody wrote down. A test that needs a credential sets its
+  own fixture value and restores the environment afterwards.
 
 ## Tests
 
