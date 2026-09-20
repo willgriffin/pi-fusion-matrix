@@ -38,7 +38,7 @@ export default [
   {
     // The extension is a library inside someone else's process: a status line belongs in the stream it returns,
     // not on a stderr nobody reads, and a credential belongs in the harness's store, not in this code.
-    files: ["extensions/**/*.js"],
+    files: ["extensions/**/*.{js,mjs}"],
     rules: {
       "no-console": "error",
       "no-restricted-syntax": [

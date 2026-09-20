@@ -320,8 +320,12 @@ export async function runSeat(args) {
  * forever. Observed seat calls on a full-diff packet run 12–80 s, so this leaves room for a slow provider and
  * still turns a stall into a substitution. A fusion may tighten or loosen it with `seatTimeoutMs`.
  *
- * The bound is built from `AbortSignal.timeout` and `AbortSignal.any`, so the runtime floor this package
- * declares in `engines` is Node 20.3 rather than whatever the extension API alone would need.
+ * The bound is built from `AbortSignal.timeout` and `AbortSignal.any`, which need Node 20.3. The floor this
+ * package *declares* in `engines` is higher — 20.19 — because the development toolchain (eslint, commitlint,
+ * prettier) needs it, and a declared floor that cannot run the repository's own gates is a floor that lies.
+ * One feature is version-dependent at runtime and is already reported rather than assumed: `node:sqlite`, which
+ * the report's plan-window section needs and which does not exist before 22.5 — the section names that absence
+ * instead of failing.
  */
 const SEAT_TIMEOUT_MS = 300000;
 
