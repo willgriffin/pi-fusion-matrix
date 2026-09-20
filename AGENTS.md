@@ -55,9 +55,45 @@ that iterate until green, and plan-then-DAG execution. `verify` gates run once a
   never in a `fusions` entry, a `slots` list, or code. It cannot live in `models.json` instead: pi sends
   a model's `id` upstream verbatim and keys the registry by `provider` + `id`.
 
+## Coding rules
+
+- **Source files are edited with the editor, never by string replacement in a shell.** No
+  `sed -i`, no `python3 -c` rewriting a file, no heredoc that does `text.replace(old, new)`: a
+  mismatch is a silent no-op rather than an error, and there is no diff to review. Read the region,
+  edit it, and read it back. Scripted *investigation* is fine; scripted *mutation of the tree* is not.
+- **One behaviour per module, exported.** A function that can only be exercised through a whole
+  pipeline run is a function whose contract nobody can test in isolation. Export the unit; the
+  pipeline test then covers the wiring.
+- **Every fixture is named, local, and self-contained.** No mutable module-level state shared between
+  checks — a suite where check 40 depends on what check 3 left behind reports failures that move when
+  you reorder it.
+- **No assertion on source text, wiring, or field forwarding.** Assert what a consumer observes:
+  the stream, the record, the named error. A check that reads the implementation back to itself
+  fails the day the implementation is refactored correctly.
+- **No unbounded waits in test code.** Anything that can await must carry its own deadline, and a
+  deadline that fires is a *failed check with a message*, never a hung suite. A test that hangs is
+  indistinguishable from a test that found a deadlock and from one that found nothing.
+
+## Tests
+
+Two kinds, and the difference is deliberate:
+
+- `test/*.test.mjs` — unit tests, `node --test`, one file per module, run by `npm test`. Every
+  exported decision (validation rules, truncation, the failure taxonomy, deadline handling) has one
+  here. These are the tests a change to one module must not break.
+- `scripts/interp-check.mjs` — the offline *contract* runner: whole `runPipeline` runs against canned
+  collaborators, no keys, no network, no quota. Its job is the wiring between modules and the shape
+  of a run; it is not where a single module's behaviour belongs, and it must still pass when every
+  provider is exhausted.
+
 ## Validation
 
 Run before shipping, from the repository root:
+
+```bash
+npm test                                                                # unit tests
+npm run lint:commits                                                    # conventional commits
+```
 
 ```bash
 node scripts/typesafe-stub.mjs & node scripts/semif-stub.mjs &          # local backends
@@ -76,5 +112,9 @@ calls, `TYPESAFE_API_KEY`.
 
 ## Conventions
 
-- Conventional Commits, no scope unless the repository's own commitlint allows it.
+- Conventional Commits, with a scope from the closed list in `commitlint.config.js` — a module of this
+  package, or the concern the change belongs to. `npm run lint:commits` checks every commit a branch adds over
+  the default branch, and `npm run lint:commits -- --message "<title>"` checks one message, which is how a pull
+  request's title is checked. An unknown scope is a failure, not a preference: the log is the only index this
+  repository keeps for free.
 - `docs/plan.md` changes only as part of the change that invalidates it.

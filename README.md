@@ -526,6 +526,48 @@ write result ends the run with a confirmation rather than starting a second deli
 tool and command paths there is no such gate, so the extension confines writes to the session
 directory, refuses absolute paths and `..`, and reports what it refused.
 
+## Reviewing with a fusion
+
+Reviews are their own traffic: a packet (a diff, the criteria it was written against, the validation evidence)
+goes in, and a *disposition* — a verdict and findings with severities — comes back. `smrt-review` picks the rung
+by blast radius, and each rung is a deliberating rung that can never be a session model:
+
+```bash
+omp -p "@/tmp/packet.md" --model fusion-matrix/smrt-review --no-tools   # routed: cheap, committee, or deep
+omp -p "@/tmp/packet.md" --model fusion-matrix/review-check --no-tools  # the committee, unrouted
+omp -p "@/tmp/packet.md" --model fusion-matrix/review-quick --no-tools  # one adversarial seat, then the disposition
+```
+
+`--no-tools` is not required — an `execute: false` rung deliberates with tools present, which is what
+`execute: false` is for — but a review packet carries the diff as text, and leaving the tool schemas out of the
+request makes every seat cheaper.
+
+The last seat of a review rung answers in JSON, and the run records it: `details.dispositionBy` (which persona's
+answer stands), `details.verdict`, `details.findings` (`severity` from `blocking | major | minor | editorial`,
+`path`, `line`, `criterion`, `claim`) and `details.severityCounts`. Severity is what decides whether another
+review is worth buying — an `editorial` finding never is — which is the point of recording it at all.
+
+A schema violation is recorded as `details.malformedAnswers` with the reason, and records no verdict and no
+findings: `{"verdict":"clean"}` is an answer that claims the contract and fails it, and a run that returns one
+is not a clean review. The schema judges an answer that *claims* to be a disposition (it carries `verdict` or
+`findings`) — another JSON persona's answer is a valid answer to a different contract — and the record is a
+chain, not a slot: every answer that failed its contract stays, each naming the seat that superseded it, so a
+second bad answer cannot erase the first and a malformed answer that arrives after a valid one takes the standing
+position outright. A finding's `line` keeps an explicit `null`.
+
+`path` is the reviewer's claim, not a fact — the cheap rung names files it has only read as text — so
+`session-report.mjs` checks each recorded path against the session's working directory and prints
+`[path not found]` beside the ones that do not exist *as of that run of the report*. A path that does not resolve
+inside the session's tree is marked `[path outside the session]` rather than resolved: resolving one would let a
+hallucinated `/etc/passwd` read as found on any machine that has one, and `../../outside/secret.ts` do the same
+while looking innocent.
+
+`execute: false` on these rungs is not decoration: with an execute face, a tool-bearing turn to a review rung
+would *proxy to its writing seat*, so the panel would never run and the review would be one model's opinion.
+The loader enforces it wherever a writing seat answers in JSON — a disposition is not an agent turn — so the
+rule holds for the next rung without anyone having to remember it.
+The loader refuses that combination, along with a `review` router whose targets could do it.
+
 ## Fallback and reporting
 
 Two layers, independently configured and always reported. Lines from real runs:

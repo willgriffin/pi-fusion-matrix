@@ -103,6 +103,11 @@
       "prompt": "prompts/synth.md",
       "temperature": 0.5
     },
+    "review-synth": {
+      "prompt": "prompts/review-synth.md",
+      "temperature": 0.3,
+      "output": "json"
+    },
     "synth-lean": {
       "prompt": "prompts/synth-lean.md",
       "temperature": 0.5,
@@ -276,6 +281,57 @@
           "input": "panel+judge"
         }
       ]
+    },
+    "review-single": {
+      "stages": [
+        {
+          "parallel": [
+            "skeptic"
+          ],
+          "input": "prompt"
+        },
+        {
+          "single": "review-synth",
+          "input": "panel"
+        }
+      ]
+    },
+    "review-committee": {
+      "stages": [
+        {
+          "parallel": [
+            "technical",
+            "skeptic",
+            "systems"
+          ],
+          "input": "prompt"
+        },
+        {
+          "decide": {
+            "instructions": "Do the reviewers agree on the same material findings?",
+            "criteria": {
+              "agrees": "They converge on the same findings and the same severity.",
+              "partial": "They overlap but differ on a substantive finding or its severity.",
+              "disagrees": "They report materially different findings."
+            }
+          },
+          "input": "panel",
+          "sufficientWhen": {
+            "choiceIs": [
+              "agrees"
+            ],
+            "minConfidence": 0.85
+          }
+        },
+        {
+          "single": "judge",
+          "input": "panel"
+        },
+        {
+          "single": "review-synth",
+          "input": "panel+judge"
+        }
+      ]
     }
   },
   "fusions": {
@@ -423,7 +479,7 @@
       "fileAgent": false
     },
     "review-check": {
-      "mode": "committee-cascaded",
+      "mode": "review-committee",
       "candidates": {
         "technical": [
           "kimi",
@@ -438,7 +494,7 @@
         "judge": [
           "deepseek-pro"
         ],
-        "synth": [
+        "review-synth": [
           "kimi",
           "qwen-max"
         ]
@@ -475,7 +531,124 @@
             }
           }
         }
+      ],
+      "execute": false
+    },
+    "review-quick": {
+      "name": "Review · quick (one skeptic)",
+      "mode": "review-single",
+      "execute": false,
+      "thinking": {
+        "skeptic": "low",
+        "review-synth": "low"
+      },
+      "candidates": {
+        "skeptic": [
+          "deepseek-pro"
+        ],
+        "review-synth": [
+          "deepseek-pro"
+        ]
+      },
+      "fileAgent": false,
+      "verify": [
+        {
+          "state": "{{synthesis}}",
+          "questions": {
+            "addresses_question": {
+              "type": "noul",
+              "instructions": "The review states whether the diff meets the acceptance criteria it was written against, rather than describing the diff.",
+              "criteria": {
+                "true": "Judges the change against its criteria",
+                "false": "Describes the diff or answers a different question"
+              }
+            }
+          }
+        }
       ]
+    },
+    "smrt-review": {
+      "name": "Review · routed by blast radius",
+      "mode": "review-committee",
+      "review": true,
+      "execute": false,
+      "thinking": {
+        "technical": "medium",
+        "skeptic": "medium",
+        "systems": "medium",
+        "judge": "high",
+        "review-synth": "high"
+      },
+      "candidates": {
+        "technical": [
+          "qwen-max",
+          "kimi"
+        ],
+        "skeptic": [
+          "glm",
+          "deepseek-pro"
+        ],
+        "systems": [
+          "deepseek-pro"
+        ],
+        "judge": [
+          "kimi"
+        ],
+        "review-synth": [
+          "qwen-max"
+        ]
+      },
+      "fileAgent": false,
+      "verify": [
+        {
+          "state": "{{synthesis}}",
+          "questions": {
+            "addresses_question": {
+              "type": "noul",
+              "instructions": "The review states whether the diff meets the acceptance criteria it was written against, rather than describing the diff.",
+              "criteria": {
+                "true": "Judges the change against its criteria",
+                "false": "Describes the diff or answers a different question"
+              }
+            },
+            "grounded_in_panel": {
+              "type": "noul",
+              "instructions": "Every finding traces to something in the packet or the panel, not to a guess about code nobody read.",
+              "criteria": {
+                "true": "All findings traceable",
+                "false": "Contains findings with no support in the packet"
+              }
+            },
+            "boundary_handled": {
+              "type": "noul",
+              "instructions": "The review considered irreversible or boundary-crossing effects — authentication, authorization, tenancy, data, release — rather than only local behaviour.",
+              "criteria": {
+                "true": "Boundaries considered",
+                "false": "Only local behaviour considered"
+              }
+            }
+          }
+        }
+      ],
+      "route": {
+        "instructions": "How much review does this change need? Judge the blast radius of the diff — what it can affect if it is wrong — not how many lines it moves, and prefer the cheapest review that can carry it. Answer `high` when you are unsure.",
+        "criteria": {
+          "mechanical": {
+            "description": "Docs, comments, formatting, or a configuration value, with no behaviour change — and nothing a test or a script could catch instead.",
+            "then": "review-quick"
+          },
+          "standard": {
+            "description": "An ordinary behaviour change: code that runs, tests, or user-visible output, contained within one component.",
+            "then": "review-check"
+          },
+          "high": {
+            "description": "A boundary: authentication, authorization, tenancy, payments, a schema or data migration, a public API contract, release or lifecycle tooling, anything irreversible, or any change whose blast radius you cannot bound from the packet."
+          }
+        },
+        "sufficientWhen": {
+          "minConfidence": 0.6
+        }
+      }
     }
   },
   "decide": {

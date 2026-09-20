@@ -11,11 +11,21 @@
       "./extensions"
     ]
   },
-  "dependencies": {},
+  "scripts": {
+    "test": "node --test",
+    "lint:commits": "node scripts/lint-commits.mjs"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20.3.0"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.3",
+    "@commitlint/config-conventional": "^21.2.3"
+  }
 }

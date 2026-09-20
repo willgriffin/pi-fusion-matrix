@@ -142,6 +142,85 @@ function normaliseJsonSeat(text) {
   return JSON.stringify({ unique_insights: [String(text ?? "")] }, null, 2);
 }
 
+/**
+ * The severities a review finding may carry, worst first. Closed where it is recorded: a model that invents a
+ * severity is kept as `unknown` rather than dropped, because a finding nobody can sort is still a finding.
+ */
+export const SEVERITIES = ["blocking", "major", "minor", "editorial"];
+
+/** Findings by severity, in the closed order, plus `unknown` for one nobody could sort. */
+function countSeverities(findings = []) {
+  const counts = Object.fromEntries(SEVERITIES.map((severity) => [severity, 0]));
+  for (const finding of findings) counts[finding.severity ?? "unknown"] = (counts[finding.severity ?? "unknown"] ?? 0) + 1;
+  return counts;
+}
+
+const VERDICTS = ["clean", "findings"];
+
+/**
+ * One finding, as recorded. `line` keeps an explicit `null`: the persona prompt allows a null line for a finding
+ * about the change as a whole, and dropping the key would lose the field the contract says is always present.
+ */
+const normaliseFinding = (finding) => ({
+  severity: finding.severity,
+  path: finding.path,
+  line: finding.line === null ? null : finding.line,
+  criterion: finding.criterion,
+  claim: finding.claim,
+});
+
+/**
+ * Why a disposition is not one, or `undefined` when it is. The schema is the persona prompt's, enforced here
+ * because a *parseable* answer is not necessarily a disposition: `{"verdict":"clean"}` would otherwise record as
+ * an empty, unmarked review — a clean-looking result produced by an answer that answered nothing.
+ */
+function dispositionFlaw(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "the disposition is not an object";
+  if (!VERDICTS.includes(value.verdict)) return `verdict is not one of ${VERDICTS.join("|")}`;
+  if (!Array.isArray(value.findings)) return "findings is not an array";
+  for (const [index, finding] of value.findings.entries()) {
+    if (!finding || typeof finding !== "object" || Array.isArray(finding)) return `findings[${index}] is not an object`;
+    if (!SEVERITIES.includes(finding.severity)) return `findings[${index}].severity is not one of ${SEVERITIES.join("|")}`;
+    if (typeof finding.path !== "string" || !finding.path) return `findings[${index}].path is missing`;
+    if (!(finding.line === null || Number.isInteger(finding.line))) return `findings[${index}].line is neither an integer nor null`;
+    if (typeof finding.criterion !== "string" || !finding.criterion) return `findings[${index}].criterion is missing`;
+    if (typeof finding.claim !== "string" || !finding.claim) return `findings[${index}].claim is missing`;
+  }
+  // An inconsistent verdict is a flaw, not a preference: `clean` with findings, or `findings` with none, cannot be
+  // both recorded and trusted.
+  if (value.verdict === "clean" && value.findings.length > 0) return "verdict is clean but findings is not empty";
+  if (value.verdict === "findings" && value.findings.length === 0) return "verdict is findings but findings is empty";
+  return undefined;
+}
+
+/**
+ * A JSON seat's answer as both *text for the next stage* and *the disposition it declared*. The record is the
+ * point: a review whose findings exist only as prose cannot be counted, and a verdict the model never stated is
+ * not invented here — `findings` is always present, `verdict` only when it said one, and an answer that does not
+ * satisfy the contract it was asked for is recorded as malformed rather than wrapped into something that reads
+ * like a clean review.
+ *
+ * Exported because this *is* a unit: the schema is the whole contract of a review rung's last seat, and it is
+ * testable without running a pipeline.
+ */
+export function dispositionOf(persona, text) {
+  if (persona?.output !== "json") return { text };
+  const { ok, value } = parseJsonOutput(text);
+  if (!ok) return { text: normaliseJsonSeat(text), malformed: "the answer was not a JSON object" };
+  // Only an answer that *claims* to be a disposition is judged by the disposition's schema. Another JSON
+  // persona's answer — a classifier's label, a summariser's object — is a valid answer to a different promise,
+  // and failing it here would be this seat's schema applied to somebody else's contract. The claim is read from
+  // the answer, not from a list of personas, so a new JSON seat is judged by the schema it actually answers to.
+  const claimsDisposition = isObject(value) && ("verdict" in value || "findings" in value);
+  if (!claimsDisposition) return { text: JSON.stringify(value, null, 2) };
+  const flaw = dispositionFlaw(value);
+  if (flaw) return { text: normaliseJsonSeat(text), malformed: flaw };
+  return {
+    text: JSON.stringify(value, null, 2),
+    disposition: { verdict: value.verdict, summary: typeof value.summary === "string" ? value.summary : undefined, findings: value.findings.map(normaliseFinding) },
+  };
+}
+
 function temperatureFor(persona, model, override) {
   const base = override ?? persona.temperature;
   return String(model).toLowerCase().includes("kimi") ? 1.0 : base;
@@ -217,10 +296,24 @@ export async function runSeat(args) {
   return { ...seat, durationMs: Date.now() - startedAt };
 }
 
+/**
+ * How long one seat call may take before it is treated as a failed attempt.
+ *
+ * A seat that hangs is worse than a seat that fails: a failure advances the cascade and is reported, while a
+ * hang is a silent run — no answer, no error, nothing to report — for as long as the harness waits, which is
+ * forever. Observed seat calls on a full-diff packet run 12–80 s, so this leaves room for a slow provider and
+ * still turns a stall into a substitution. A fusion may tighten or loosen it with `seatTimeoutMs`.
+ *
+ * The bound is built from `AbortSignal.timeout` and `AbortSignal.any`, so the runtime floor this package
+ * declares in `engines` is Node 20.3 rather than whatever the extension API alone would need.
+ */
+const SEAT_TIMEOUT_MS = 300000;
+
 async function runSeatInner({
   personaName, persona, candidates, fusion, config, registry, callModel, decide, emit, signal, vars, maxAdvance = 3,
   onDelta, fusionSource,
 }) {
+  const seatTimeoutMs = Number.isInteger(fusion?.seatTimeoutMs) && fusion.seatTimeoutMs > 0 ? fusion.seatTimeoutMs : SEAT_TIMEOUT_MS;
   // A fusion may override one persona's prompt. Inline text, or a path beside the layer that declared
   // the fusion — the packaged `review` synthesis override depends on this. `resolvePrompt` decides by
   // "contains a newline": right for a persona, whose prompt is normally a file, but wrong for a
@@ -336,16 +429,36 @@ async function runSeatInner({
       const call = async (withTemperature, withThinking = true) => {
         calls += 1;
         const callStartedAt = Date.now();
+        // Per call, not per seat: each attempt gets the bound, and the attempts are counted, so a seat that
+        // spent three deadlines has spent three attempts' worth of time in the record rather than one.
+        const deadline = AbortSignal.timeout(seatTimeoutMs);
+        const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
+        // A call started after the run was already stopped must not be *made*: a transport that only listens
+        // for the abort event never sees one that has already been dispatched, so the request would be sent
+        // after cancellation and its answer waited for indefinitely.
+        if (signal?.aborted) {
+          return {
+            text: "", usage: emptyUsage(), stopReason: "error", toolCalls: [], durationMs: 0, timedOut: false,
+            errorMessage: "the run was already aborted before this call",
+          };
+        }
         try {
           const message = await callModel({
             model: seat.model, apiKey: seat.apiKey, headers: seat.headers, messages,
             temperature: withTemperature ? temperature : undefined,
-            reasoning: withThinking ? thinking : undefined, signal, persona: seatPersona,
+            reasoning: withThinking ? thinking : undefined, signal: bounded, persona: seatPersona,
             onDelta: onDelta ? (chunk) => { emitted += chunk; onDelta(chunk); } : undefined,
           });
           return { ...message, durationMs: Date.now() - callStartedAt };
         } catch (error) {
-          return { text: "", usage: emptyUsage(), stopReason: "error", errorMessage: error?.message ?? String(error), toolCalls: [], durationMs: Date.now() - callStartedAt };
+          // The deadline and the caller's abort are different facts: one is the provider failing to answer
+          // in time (a substitution), the other is the user stopping the run (which must propagate as such).
+          const timedOut = deadline.aborted && !signal?.aborted;
+          return {
+            text: "", usage: emptyUsage(), stopReason: "error", toolCalls: [], durationMs: Date.now() - callStartedAt,
+            errorMessage: timedOut ? `no answer within ${seatTimeoutMs} ms` : error?.message ?? String(error),
+            timedOut,
+          };
         }
       };
 
@@ -354,7 +467,11 @@ async function runSeatInner({
       // keep only the final figure.
       const noteFailure = (failed) => {
         const text = failed.errorMessage ?? "unknown error";
-        const reason = QUOTA.test(text) ? "quota" : CREDENTIAL.test(text) ? "credential" : MISSING_MODEL.test(text) ? "missing model" : "transient";
+        // A cancelled run is neither the provider's failure nor a timeout: the taxonomy has to say which, or a
+        // deliberate stop is filed as a transient provider error and read as one later.
+        const reason = failed.timedOut ? "timeout"
+          : signal?.aborted ? "aborted"
+            : QUOTA.test(text) ? "quota" : CREDENTIAL.test(text) ? "credential" : MISSING_MODEL.test(text) ? "missing model" : "transient";
         attempts.push({ alias: resolved.alias, seat: label(resolved), reason, detail: text, durationMs: failed.durationMs });
         return { text, reason };
       };
@@ -390,13 +507,16 @@ async function runSeatInner({
             degraded: true, error: text, reason, calls,
           };
         }
+        // A retry is for a failure that might not repeat. `aborted` and `timeout` are not transient, so a
+        // cancelled run and a stalled provider both advance rather than paying the wait again.
         const isTransient = reason === "transient";
         if (isTransient) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
           const retried = await call(!noTemperature.has(key));
           if (retried.stopReason !== "error") {
+            const retriedDisposition = dispositionOf(persona, retried.text);
             return {
-              persona: personaName, text: persona.output === "json" ? normaliseJsonSeat(retried.text) : retried.text,
+              persona: personaName, text: retriedDisposition.text, disposition: retriedDisposition.disposition, malformed: retriedDisposition.malformed,
               provider: resolved.provider, model: resolved.model, alias: resolved.alias,
               template: seat.template, thinking, usage: retried.usage, substitutions, cascades, attempts,
               degraded: false, calls,
@@ -409,8 +529,9 @@ async function runSeatInner({
         continue;
       }
 
+      const seatDisposition = dispositionOf(persona, message.text);
       return {
-        persona: personaName, text: persona.output === "json" ? normaliseJsonSeat(message.text) : message.text,
+        persona: personaName, text: seatDisposition.text, disposition: seatDisposition.disposition, malformed: seatDisposition.malformed,
         provider: resolved.provider, model: resolved.model, alias: resolved.alias,
         template: seat.template, thinking, usage: message.usage, substitutions, cascades, attempts,
         degraded: false, calls,
@@ -467,6 +588,28 @@ export async function runPipeline({
   const stages = [];
   const seatRecords = [];
   const runStartedAt = Date.now();
+  let lastDisposition = null;
+  const malformedAnswers = [];
+  /**
+   * One writer, in order, and nothing is overwritten. Every answer that failed its contract is a fact about the
+   * run, so each one stays in the record; when a later answer lands — valid or malformed — the ones before it are
+   * named as superseded by it. The answer that stands is the one `dispositionBy` names; when no valid answer
+   * landed, it is the last malformed entry, the only one left without `supersededBy`.
+   *
+   * A malformed answer that arrives after a valid one takes the standing position outright: that ordering must
+   * never read as clean. A malformed answer after another malformed one does not make the first disappear — the
+   * record is a chain, not a slot.
+   */
+  const noteDisposition = (seat) => {
+    if (!seat.disposition && !seat.malformed) return;
+    for (const earlier of malformedAnswers) if (earlier.supersededBy === undefined) earlier.supersededBy = seat.persona;
+    if (seat.disposition) {
+      lastDisposition = { persona: seat.persona, ...seat.disposition };
+    } else {
+      lastDisposition = null;
+      malformedAnswers.push({ persona: seat.persona, reason: seat.malformed });
+    }
+  };
   const rounds = [];
   const substitutions = [];
   const cascades = [];
@@ -537,6 +680,7 @@ export async function runPipeline({
         record.calls += roundSeats.reduce((total, seat) => total + (seat.calls ?? 0), 0);
         stagesRun += 1;
         for (const seat of roundSeats) {
+          noteDisposition(seat);
           accumulateUsage(usage, seat.usage);
           if (seat.decisionUsage) accumulateUsage(decisionUsage, seat.decisionUsage);
           seatRecords.push({
@@ -575,6 +719,7 @@ export async function runPipeline({
       });
       record.calls = seat.calls ?? 0;
       stagesRun += 1;
+      noteDisposition(seat);
       accumulateUsage(usage, seat.usage);
       if (seat.decisionUsage) accumulateUsage(decisionUsage, seat.decisionUsage);
       seatRecords.push({
@@ -699,7 +844,12 @@ export async function runPipeline({
     decisionUsage,
     // `seatErrors` is always present, empty array included: a run that degraded quietly is a wrong answer.
     details: { fusion: fusion.id, mode: fusion.mode, stages, seats: seatRecords, seatErrors, rounds, substitutions,
-      cascades: [...cascades, ...cascadeRecords], durationMs: Date.now() - runStartedAt },
+      cascades: [...cascades, ...cascadeRecords], durationMs: Date.now() - runStartedAt,
+      // `malformedAnswers` is a chain, one entry per answer that failed its own contract, each naming the seat
+      // that superseded it: an answer that failed is a fact about the run, and a fact that a later answer
+      // overwrites is a fact the record lost.
+      ...(lastDisposition ? { dispositionBy: lastDisposition.persona, verdict: lastDisposition.verdict, severityCounts: countSeverities(lastDisposition.findings), findings: lastDisposition.findings } : {}),
+      ...(malformedAnswers.length > 0 ? { malformedAnswers } : {}) },
     stagesRun,
   };
 }

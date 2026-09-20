@@ -211,6 +211,139 @@ const harnessContext = {
 };
 const harnessOptions = { sessionId: "session-1", reasoning: "high", temperature: 0.3, metadata: { user_id: "u1" }, thinkingBudgets: { high: 4096 } };
 
+/* ------------------------------------------------------------------ the review route */
+
+// The classes, as the decision backend would answer them. The seam is already injectable, so these contracts
+// do not depend on the stub's modes: one canned answer per class, asserted against the rung that must run.
+const decideAs = (choice, confidence = 0.95) => async () => ({ backend: "canned", model: "canned", answers: { choice: { choice, confidence } }, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+// the loader keys fusions by id; the object itself carries none, so the router is built the way a run sees it
+const smrt = { ...config.fusions["smrt-review"], id: "smrt-review" };
+const routeOf = async (choice, confidence) => routeFusion({ config, fusion: smrt, prompt: "a packet", decide: decideAs(choice, confidence), emit: silent });
+
+const mechanical = await routeOf("mechanical");
+check("review route: a mechanical change goes to the cheap single-seat review",
+  mechanical.routing?.routedTo === "review-quick" && mechanical.fusion.id === "review-quick" && mechanical.routing.answer?.choice === "mechanical",
+  JSON.stringify(mechanical.routing));
+const standard = await routeOf("standard");
+check("review route: an ordinary change goes to the committee",
+  standard.routing?.routedTo === "review-check" && standard.fusion.id === "review-check",
+  JSON.stringify(standard.routing));
+// `high` declares no target on purpose: running this fusion *is* the deep review, so the record says escalated,
+// not declined — a deliberate escalation that reads as a decline is a lie in the audit trail.
+const high = await routeOf("high");
+check("review route: the boundary class escalates to the router's own deep review",
+  high.fusion.id === "smrt-review" && high.routing?.escalated === "high" && high.routing.declined === undefined,
+  JSON.stringify(high.routing));
+const unsure = await routeOf("mechanical", 0.2);
+check("review route: an unsure answer escalates rather than routing cheap",
+  unsure.fusion.id === "smrt-review" && String(unsure.routing?.declined).includes("confidence"),
+  JSON.stringify(unsure.routing));
+
+// The gate that makes a reviewer pinnable: `execute: false` means a *tool-bearing* turn runs the pipeline
+// instead of proxying. Without it a task agent pinned to this rung would get its writer and no panel.
+calls.length = 0;
+const reviewTurn = await driveStream(fusionStream(makeProxyPeer([]))(fusionModel("review-check"), harnessContext, harnessOptions));
+check("an execute: false rung deliberates on a tool-bearing turn instead of proxying",
+  reviewTurn.final.details?.proxied === undefined && calls.length > 0
+    && reviewTurn.events.some((event) => typeof event.partial?.content?.[0]?.text === "string" || typeof event.delta === "string"),
+  `seat calls=${calls.length}, proxied=${Boolean(reviewTurn.final.details?.proxied)}`);
+
+// The disposition is data: severities counted, verdict as stated, findings recorded — and a malformed one is
+// recorded as malformed rather than wrapped into something that reads like a clean review.
+const dispositionModel = (payload) => async (args) => ({ text: typeof payload === "string" ? payload : JSON.stringify(payload),
+  usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", toolCalls: [] });
+const runReview = (model) => runPipeline({ config, sources, fusion: { ...config.fusions["review-quick"], id: "review-quick" }, prompt: "a packet", callModel: model, decide, emit: silent, registry });
+
+const goodFinding = { severity: "blocking", path: "extensions/pi-fusion-matrix/run.js", line: 42, criterion: "no silent degradation", claim: "a refusal is swallowed" };
+const reviewRun = await runReview(dispositionModel({ verdict: "findings", summary: "one boundary is unhandled", findings: [goodFinding, { ...goodFinding, severity: "editorial", path: "README.md", line: null }] }));
+const recorded = reviewRun.details;
+check("a review run records its findings, their severities and the verdict",
+  recorded.verdict === "findings" && recorded.findings?.length === 2 && recorded.dispositionBy === "review-synth"
+    && recorded.severityCounts?.blocking === 1 && recorded.severityCounts?.editorial === 1
+    && recorded.findings[0].path === "extensions/pi-fusion-matrix/run.js" && recorded.findings[0].line === 42,
+  JSON.stringify({ verdict: recorded.verdict, by: recorded.dispositionBy, counts: recorded.severityCounts }));
+check("a null line is recorded as null, not dropped",
+  recorded.findings?.[1]?.line === null && "line" in (recorded.findings?.[1] ?? {}),
+  JSON.stringify(recorded.findings?.[1]));
+
+// A parseable answer is not necessarily a disposition: each of these would otherwise record as a clean review.
+const flawedDispositions = [
+  ["a clean verdict with no findings array", { verdict: "clean" }],
+  ["a verdict nobody defined", { verdict: "banana", findings: [] }],
+  ["findings that are not a list", { verdict: "findings", findings: "oops" }],
+  ["a finding with an invented severity", { verdict: "findings", findings: [{ ...goodFinding, severity: "invented" }] }],
+  ["a finding with no claim", { verdict: "findings", findings: [{ ...goodFinding, claim: "" }] }],
+  ["clean with findings", { verdict: "clean", findings: [goodFinding] }],
+  ["findings with none", { verdict: "findings", findings: [] }],
+];
+const flawResults = [];
+for (const [name, payload] of flawedDispositions) {
+  // A flawed answer must be *recorded*, so an answer that throws the run is a failure of the contract, not a
+  // failing check: catching it here keeps the reason visible instead of ending the suite at the first throw.
+  let run;
+  try { run = await runReview(dispositionModel(payload)); } catch (error) {
+    flawResults.push([name, false, `the run threw: ${error.message}`]);
+    continue;
+  }
+  flawResults.push([name, Boolean(run.details.malformedAnswers?.length) && run.details.findings === undefined && run.details.verdict === undefined, run.details.malformedAnswers?.[0]?.reason]);
+}
+check("a disposition that violates the schema is recorded as malformed, never as a clean review",
+  flawResults.every(([, ok]) => ok),
+  flawResults.filter(([, ok]) => !ok).map(([name]) => name).join(", ") || flawResults.map(([, , reason]) => reason).slice(0, 3).join(" | "));
+
+const malformedRun = await runReview(dispositionModel("I could not read the diff, sorry."));
+check("an answer that is not a JSON object is recorded as malformed, not as a clean review",
+  malformedRun.details.malformedAnswers?.[0]?.persona === "review-synth" && malformedRun.details.findings === undefined
+    && malformedRun.details.verdict === undefined,
+  JSON.stringify(malformedRun.details.malformedAnswers));
+
+// Three JSON seats, three answers, one record. `review-committee` ends in `judge` then `review-synth`, so a
+// per-persona model can put a different kind of answer in each seat and the run-level record has to stay
+// unambiguous: a valid disposition from an earlier seat, a *different* persona's JSON that claims nothing, and
+// a malformed answer that arrives last.
+const perPersonaModel = (answers) => async (args) => {
+  const payload = answers[args?.persona?.name] ?? { verdict: "clean", findings: [] };
+  return { text: typeof payload === "string" ? payload : JSON.stringify(payload),
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", toolCalls: [] };
+};
+const runReviewCheck = (answers) => runPipeline({ config, sources, fusion: { ...config.fusions["review-check"], id: "review-check" }, prompt: "a packet", callModel: perPersonaModel(answers), decide, emit: silent, registry });
+
+// The case that made the schema global: a classifier's answer, or any JSON persona answering a different
+// contract, is recovered as data and recorded against nothing.
+const foreignJson = await runReviewCheck({ judge: { label: "mechanical", confidence: 0.95 }, "review-synth": { verdict: "clean", findings: [] } });
+check("a JSON answer that does not claim to be a disposition is not judged by its schema",
+  foreignJson.details.malformedAnswers === undefined && foreignJson.details.verdict === "clean"
+    && foreignJson.details.dispositionBy === "review-synth",
+  JSON.stringify({ malformed: foreignJson.details.malformedAnswers, verdict: foreignJson.details.verdict }));
+
+// A malformed answer that arrives *after* a valid one wins outright; that ordering is the one that must never
+// read as clean.
+const shadowed = await runReviewCheck({ judge: { verdict: "clean", findings: [] }, "review-synth": "not a disposition at all" });
+check("a malformed final disposition leaves no earlier verdict standing",
+  shadowed.details.malformedAnswers?.[0]?.persona === "review-synth" && shadowed.details.malformedAnswers?.[0]?.supersededBy === undefined
+    && shadowed.details.verdict === undefined && shadowed.details.findings === undefined,
+  JSON.stringify({ malformed: shadowed.details.malformedAnswers, verdict: shadowed.details.verdict }));
+
+// The other order: a malformed answer, then one that answers. The failure is not deleted by being superseded —
+// it is named as superseded, so no reader can call the pairing ambiguous.
+const superseded = await runReviewCheck({ judge: "not a disposition at all", "review-synth": { verdict: "clean", findings: [] } });
+check("a valid disposition after a malformed answer names the answer it superseded",
+  superseded.details.verdict === "clean" && superseded.details.dispositionBy === "review-synth"
+    && superseded.details.malformedAnswers?.[0]?.persona === "judge" && superseded.details.malformedAnswers?.[0]?.supersededBy === "review-synth",
+  JSON.stringify({ verdict: superseded.details.verdict, malformed: superseded.details.malformedAnswers }));
+
+// Bad answer, then another bad answer: the record is a chain, so the first one does not disappear when the
+// second lands — it is named as superseded by it, and the standing failure is the last entry.
+const chainedMalformed = await runReviewCheck({ judge: "not a disposition at all", "review-synth": { verdict: "banana", findings: [] } });
+check("a second bad answer does not erase the first",
+  chainedMalformed.details.malformedAnswers?.length === 2
+    && chainedMalformed.details.malformedAnswers[0].persona === "judge"
+    && chainedMalformed.details.malformedAnswers[0].supersededBy === "review-synth"
+    && chainedMalformed.details.malformedAnswers[1].persona === "review-synth"
+    && chainedMalformed.details.malformedAnswers[1].supersededBy === undefined
+    && chainedMalformed.details.malformedAnswers[1].reason === "verdict is not one of clean|findings",
+  JSON.stringify(chainedMalformed.details.malformedAnswers));
+
 // 7. proxy: the harness's context goes to the writing seat's alias verbatim, and its events come back
 const seen = [];
 calls.length = 0;
@@ -430,12 +563,13 @@ check("registration: a rung with no execute face keeps the package default",
 
 let info = "";
 await commands.get("matrix-info").handler(undefined, { ui: { notify: (text) => { info = text; } } });
-check("matrix-info: every fusion prints its execute face",
+check("matrix-info: every fusion prints its execute face, and the review rungs print the declaration",
   / {2}quick: single\n[\s\S]*? {4}executes: glm-flash @low \(proxy alias\)/.test(info)
     && / {2}best: pair-judged\n[\s\S]*? {4}executes: glm-flash @high \(writing seat synth\)/.test(info)
-    && / {2}review-check: committee-cascaded[^\n]*\n[\s\S]*? {4}executes: kimi @harness \(writing seat synth\)/.test(info)
-    && /executes: — \(no writing seat/.test(info),
-  info.split("\n").filter((line) => line.includes("executes:")).slice(0, 3).join(" | "));
+    && / {2}review-check: review-committee[^\n]*\n[\s\S]*? {4}executes: — \(declared never a session model/.test(info)
+    && / {2}smrt-review: review-committee[^\n]*\n[\s\S]*? {4}executes: — \(declared never a session model/.test(info)
+    && / {2}opinions: opinion[^\n]*\n[\s\S]*? {4}executes: — \(no writing seat/.test(info),
+  info.split("\n").filter((line) => line.includes("executes:")).join(" | "));
 
 // A seat's own clock: the harness records none for a call we make ourselves, so the record has to.
 const timedRun = await runPipeline({ config, sources, fusion: { ...config.fusions["review-check"], id: "review-check" }, prompt: "time it", callModel, decide, emit: silent, registry });
@@ -665,6 +799,51 @@ const ruleResults = proxyRules.map(([, patch, re]) => re.test(errorsFor(patch).j
 check("config: every proxy rule is a named load error",
   ruleResults.every(Boolean) && errorsFor({}).length === 0,
   proxyRules.filter((_, i) => !ruleResults[i]).map(([name]) => name).join(", ") || `${proxyRules.length} rules, packaged config clean`);
+
+// The review route's rules, each one a silent degradation if it were allowed to load: a reviewer pinned to a
+// rung with an execute face proxies to its writer and the panel never runs.
+const reviewRules = [
+  ["execute: false with a proxy block", { fusions: { best: { execute: false, proxy: { alias: "glm-flash" } } } }, /proxy and execute: false cannot both be declared/],
+  // `best` is an ordinary work rung (it has an executor), so these two patches exercise the rule rather than
+  // merging into a rung that already declares `execute: false`.
+  ["review without execute: false", { fusions: { best: { review: true } } }, /review requires execute: false/],
+  ["review without a route", { fusions: { best: { review: true, execute: false } } }, /review requires route/],
+  ["a review route to an executor", { fusions: { "smrt-review": { route: { criteria: { mechanical: { description: "x", then: "quick" }, high: { description: "y" } } } } } }, /declares no execute: false/],
+];
+const reviewResults = reviewRules.map(([, patch, re]) => re.test(errorsFor(patch).join("\n")));
+check("config: every review-route rule is a named load error",
+  reviewResults.every(Boolean),
+  reviewRules.filter((_, i) => !reviewResults[i]).map(([name]) => name).join(", ") || `${reviewRules.length} rules`);
+
+// A writing seat that answers in JSON is a disposition, not an agent turn. Every packaged rung already declares
+// `execute: false` by hand, and the rule is what keeps the next one from having to remember: the failure it
+// prevents is silent, because a proxy to a JSON seat answers perfectly well — with a review instead of work.
+const jsonWriter = errorsFor({ fusions: { "review-check": { execute: true } } }).join("\n");
+check("a fusion whose writing seat answers in JSON must declare execute: false",
+  /the writing seat "review-synth" answers in JSON, so this fusion must declare execute: false/.test(jsonWriter)
+    && errorsFor({}).length === 0,
+  jsonWriter.split("\n")[0] || "no error raised");
+
+// A seat that never answers must fail, not hang — at the run level, the observable is that the run ends and says
+// why. The mechanics (attempt reasons, the advance) live in `test/seat-deadline.test.mjs`; this is the wiring.
+// The race is the check's own bound: `runPipeline` has no bound of its own here, so a defect that removes the
+// seat deadline must fail this check with a message rather than hang the suite until someone kills it.
+const hanging = (args) => new Promise((_, reject) => {
+  args?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+});
+const hungRace = await Promise.race([
+  runPipeline({
+    config, sources,
+    fusion: { ...config.fusions["review-quick"], id: "review-quick", seatTimeoutMs: 50, candidates: { skeptic: ["deepseek-pro", "kimi"], "review-synth": ["deepseek-pro"] } },
+    prompt: "a packet", callModel: hanging, decide, emit: silent, registry,
+  }),
+  new Promise((resolve) => setTimeout(() => resolve({ details: { seats: [] }, neverSettled: true }), 5000)),
+]);
+const hangingSeats = hungRace.details.seats ?? [];
+check("a run whose seats never answer ends, with every seat reported as a timeout",
+  !hungRace.neverSettled && hangingSeats.length === 2 && hangingSeats.every((s) => s.degraded && s.reason === "timeout"),
+  hungRace.neverSettled ? "the run never settled: the seat deadline did not fire"
+    : JSON.stringify(hangingSeats.map((s) => ({ persona: s.persona, reason: s.reason, degraded: s.degraded }))));
 
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

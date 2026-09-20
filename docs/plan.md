@@ -665,6 +665,7 @@ async function runSeat(
    | text matches `/not found|unknown model|\b404\b/i` | advance | `"missing model"` | both |
    | transport failure, 5xx, or a 429 without quota semantics | retry same candidate once after 2000 ms, then advance | `"transient"` | both |
    | a decision candidate answered, but `sufficientWhen` did not hold | advance at once, keeping the answer | `"insufficient"` | seat cascade |
+   | the caller stopped the run, or the seat's own deadline passed | advance at once, no retry | `"aborted"` / `"timeout"` | seat cascade |
    | any delta already streamed to the caller | do not advance; end with emitted text, `degraded: true` | — | — |
 
    `"insufficient"` is not a failure and must not be reported as one. Its line names the answer and
@@ -1228,6 +1229,87 @@ roster so the two faces are legible together. Phase 2 — a per-task verdict wit
 a session ledger of decisions that carries no content — is designed in #9 and deferred; the fallback
 when a classifier is unreachable, and whether route observations influence a verdict, stay open there.
 
+### Step 10 — The review route: a class decides which models review
+
+Reviews are a second kind of traffic, not a fusion of a task. A review does not act on a repository and its
+input is a *packet* — a diff, the acceptance criteria it was written against, and the validation evidence — so
+its rungs are configured for judging rather than doing, and the class of the change decides which rung runs.
+
+| class | what it means | rung |
+|---|---|---|
+| `mechanical` | docs, comments, formatting, a config value with no behaviour change — nothing a test could catch instead | `review-quick` (one adversarial seat, then the disposition) |
+| `standard` | an ordinary behaviour change, contained within one component | `review-check` (committee, cascaded, disposition) |
+| `high` | a boundary: auth, authorization, tenancy, payments, schema or data migration, a public API contract, release tooling, anything irreversible, or a blast radius the packet cannot bound | `smrt-review`'s own mode — the deep committee, with the boundary question in its verification |
+
+`smrt-review` is a `route` fusion in the shape of `default-smrt`, with two deliberate differences:
+
+- **its own mode is the deep review.** A route that declines runs the fusion's own stages, so an unsure class
+  escalates to the deepest review instead of quietly taking the cheap one — and a route option that matches but
+  declares no `then` is recorded as `routing.escalated`, not as a decline, because a deliberate escalation that
+  reads as a decline is a lie in the audit trail;
+- **an option may carry no target on purpose.** The `high` class is that option: it means "run this fusion".
+
+**`execute: false` — a rung that is never a session model.** Pinning a reviewer is the whole point (a `task`
+agent whose model is `fusion-matrix/smrt-review`), and an execute face breaks it: a tool-bearing turn to a
+fusion with an executor *proxies to its writing seat*, so the panel never runs and the review silently becomes
+one model's opinion. A rung that declares `execute: false` runs its pipeline instead, whatever tools the turn
+carries. Load errors, because each one is a silent degradation waiting to happen:
+
+- `execute: false` together with a `proxy` block (a proxy is answered by the writing seat the fusion has
+  declared it never uses);
+- `review: true` with `execute` anything but `false` (the reviewer runs the rung as its model);
+- `review: true` without a `route` (the class is what selects the rung);
+- a `review: true` route whose target does not itself declare `execute: false` (a pinned reviewer would proxy);
+- a fusion whose writing seat answers in JSON (`output: "json"`) without `execute: false`. A disposition is not
+  an agent turn, and the failure this prevents is silent: a proxy to a JSON seat answers perfectly well — with a
+  review where work was asked for. Every packaged rung declares `execute: false` by hand; the rule is what keeps
+  the next one from having to remember.
+
+**The disposition is data.** A review rung's last seat is the `review-synth` persona (`output: "json"`), and its
+answer is recorded on the run as `details.dispositionBy` (the persona whose answer stands), `details.verdict`,
+`details.findings` (`{severity, path, line, criterion, claim}` each) and `details.severityCounts`.
+
+**A parseable answer is not a disposition.** The schema judges an answer that *claims* to be one — it carries
+`verdict` or `findings` — because another JSON persona's answer (a classifier's label, a summariser's object) is
+a valid answer to a different contract, and failing it here would be one seat's schema applied to somebody
+else's promise. The claim is read from the answer rather than from a list of personas, so a new JSON seat is
+judged by the schema it actually answers to. Whatever the claim, the answer is still recovered as data for the
+next stage.
+
+Every field of a claimed disposition is checked, and a flaw — a verdict outside `clean | findings`, a `findings`
+that is not a list, a finding without a `severity` from `blocking | major | minor | editorial`, without a `path`,
+with a `line` that is neither an integer nor `null`, without a `criterion` or without a `claim`, a `clean`
+verdict with findings, or a `findings` verdict with none — is recorded as `details.malformedAnswer` with the
+reason, and records *no* verdict and *no* findings. So is an answer that is not a JSON object at all: a JSON seat
+was asked for an object, and prose (or a top-level array) is a broken contract however readable it is.
+`{"verdict":"clean"}` is not a clean review; it is an answer that claims the contract and fails it, and it reads
+as exactly that.
+
+**One writer, in order, and nothing is overwritten.** `details.malformedAnswers` is a chain: one entry per answer
+that failed its contract, in the order they arrived, each naming the seat that superseded it. A valid disposition
+supersedes an earlier malformed answer; a malformed answer supersedes either kind, and takes the standing position
+outright — that ordering is the one that must never read as clean. Superseding is not deleting, and it is not
+overwriting either: a run that produced three bad answers before a good one produced three, and a record that kept
+only the last would have lost two failures. The answer that stands is the one `dispositionBy` names; when no valid
+answer landed, it is the last entry in the chain. A finding's `line` keeps an explicit `null` — the persona prompt
+allows a null line for a finding about the change as a whole, and dropping the key would lose a field the contract
+says is always present.
+
+Severity is what decides whether another review is bought: an `editorial` finding never does, and a run whose
+findings are all `editorial` is visible as such.
+
+A finding's `path` is the reviewer's claim, not a fact: the cheap rung names files in a diff it has only read as
+text, and a run whose findings all name a path that does not exist is a hallucination the *report* has to be able
+to show. `session-report.mjs` checks each recorded path against the session's working directory and prints
+`[path not found]` beside it — as of *that run of the report*, so a file a later commit deleted is not presented
+as a hallucination — and marks a path that does not resolve inside that tree `[path outside the session]` rather
+than resolving it, since resolving one would let a hallucinated `/etc/passwd` read as found on any machine that has
+one, and a relative `../../etc/passwd` do the same while looking innocent.
+
+Two limits, stated rather than discovered later: the *class decision* sees the packet truncated to the decision
+backend's state budget (its head and tail — the panel gets it whole), and a review rung has no tools, so a packet
+that does not contain the diff is not a review.
+
 ## Critical files & anchors
 
 Reference-only — read from the vendored copy of upstream `@quarkos/pi-fusion` (referred to below as
@@ -1585,6 +1667,31 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     tools table and `2 call(s) made through omp's xd:// device` in the accounting — where before the fix the
     same store reported no deliberation records at all. Each must fail when the unwrap, the attribution, the
     result naming, the unwrapped count or the single-count rule is mutated.
+
+30. **The review route** — `npm test` passes 7/7 unit tests (`test/seat-deadline.test.mjs`,
+    `test/disposition.test.mjs`: the seat deadline with its advance and its abort cases, and the disposition
+    schema judged only where it applies). `node scripts/interp-check.mjs` passes 60/60, the new ones covering:
+    a mechanical class routing to `review-quick`, a standard one to `review-check`, the boundary class
+    escalating to `smrt-review`'s own mode with `routing.escalated` (not `declined`), an unsure answer
+    escalating rather than routing cheap; an `execute: false` rung deliberating on a *tool-bearing* turn with
+    no `details.proxied`; a run whose seats never answer ending with every seat reported as a `timeout`; a
+    review run recording `dispositionBy`, `verdict`, `findings`, their `severityCounts` and a `null` line kept;
+    seven schema-violating answers each recorded as malformed rather than as a clean review; a malformed final
+    answer leaving no earlier verdict standing; a valid answer after a malformed one naming what it superseded;
+    a second bad answer not erasing the first; and a JSON answer that claims no disposition being left unjudged.
+    Six are mutation-proven — the seat deadline disabled, the claim discriminator removed, `supersededBy`
+    dropped, the chain collapsed to a slot, the path guard bypassed, and the schema check removed — and each red
+    names the check it fails. A seventh covers the path guard's escape case: with containment dropped,
+    `../outside/secret.ts` is reported as `[path not found]` instead of `[path outside the session]`, which is how
+    an automated reviewer found it. The five load errors are the `config` rules: `execute: false` with `proxy`,
+    `review` without `execute: false`, `review` without `route`, a review route target that is an executor, and a
+    JSON-writing seat without `execute: false`. `node scripts/session-report.mjs --check` passes 87/87, six of
+    them reading a disposition out of a session: its verdict, the persona that stands, its severities, and its
+    finding paths — one under the session's cwd, one that does not exist (so `[path not found]`), one absolute
+    (so `[path outside the session]`, never resolved) — a malformed answer a later one superseded, and a chain
+    of two bad answers counted entry by entry. Then live: a packet reviewed through
+    `omp -p --model fusion-matrix/smrt-review`, which chose the `high` class, ran its own committee mode,
+    reported three substitutions as they happened, and returned a disposition with severities.
 
 ## Assumptions & contingencies
 
