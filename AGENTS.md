@@ -92,6 +92,7 @@ Run before shipping, from the repository root:
 
 ```bash
 npm test                                                                # unit tests
+npm run lint:commits                                                    # conventional commits
 ```
 
 ```bash
@@ -111,5 +112,9 @@ calls, `TYPESAFE_API_KEY`.
 
 ## Conventions
 
-- Conventional Commits, no scope unless the repository's own commitlint allows it.
+- Conventional Commits, with a scope from the closed list in `commitlint.config.js` — a module of this
+  package, or the concern the change belongs to. `npm run lint:commits` checks every commit a branch adds over
+  the default branch, and `npm run lint:commits -- --message "<title>"` checks one message, which is how a pull
+  request's title is checked. An unknown scope is a failure, not a preference: the log is the only index this
+  repository keeps for free.
 - `docs/plan.md` changes only as part of the change that invalidates it.

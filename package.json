@@ -12,13 +12,17 @@
     ]
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "lint:commits": "node scripts/lint-commits.mjs"
   },
-  "dependencies": {},
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.3",
+    "@commitlint/config-conventional": "^21.2.3"
+  }
 }
