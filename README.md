@@ -543,14 +543,18 @@ answer stands), `details.verdict`, `details.findings` (`severity` from `blocking
 `path`, `line`, `criterion`, `claim`) and `details.severityCounts`. Severity is what decides whether another
 review is worth buying — an `editorial` finding never is — which is the point of recording it at all.
 
-A schema violation is recorded as `details.malformedDisposition` with the reason, and records no verdict and no
-findings: `{"verdict":"clean"}` is an answer that answered nothing, and a run that returns one is not a clean
-review. A malformed final answer also clears any verdict an earlier seat had recorded, so the two can never
-appear together. A finding's `line` keeps an explicit `null`.
+A schema violation is recorded as `details.malformedAnswer` with the reason, and records no verdict and no
+findings: `{"verdict":"clean"}` is an answer that claims the contract and fails it, and a run that returns one
+is not a clean review. The schema judges an answer that *claims* to be a disposition (it carries `verdict` or
+`findings`) — another JSON persona's answer is a valid answer to a different contract — and a malformed answer
+that arrives after a valid one displaces it, while one that a valid answer supersedes stays in the record with
+`supersededBy` naming the seat that answered instead. A finding's `line` keeps an explicit `null`.
 
 `path` is the reviewer's claim, not a fact — the cheap rung names files it has only read as text — so
 `session-report.mjs` checks each recorded path against the session's working directory and prints
-`[path not found]` beside the ones that do not exist.
+`[path not found]` beside the ones that do not exist *as of that run of the report*. An absolute path is marked
+`[path outside the session]` rather than resolved: resolving one would let a hallucinated `/etc/passwd` read as
+found on any machine that has one.
 
 `execute: false` on these rungs is not decoration: with an execute face, a tool-bearing turn to a review rung
 would *proxy to its writing seat*, so the panel would never run and the review would be one model's opinion.

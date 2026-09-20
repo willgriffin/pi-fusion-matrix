@@ -196,17 +196,25 @@ function dispositionFlaw(value) {
 /**
  * A JSON seat's answer as both *text for the next stage* and *the disposition it declared*. The record is the
  * point: a review whose findings exist only as prose cannot be counted, and a verdict the model never stated is
- * not invented here — `findings` is always present, `verdict` only when it said one, and a parse failure is
- * recorded as malformed rather than wrapped into something that reads like a clean review.
+ * not invented here — `findings` is always present, `verdict` only when it said one, and an answer that does not
+ * satisfy the contract it was asked for is recorded as malformed rather than wrapped into something that reads
+ * like a clean review.
+ *
+ * Exported because this *is* a unit: the schema is the whole contract of a review rung's last seat, and it is
+ * testable without running a pipeline.
  */
-function dispositionOf(persona, text) {
+export function dispositionOf(persona, text) {
   if (persona?.output !== "json") return { text };
   const { ok, value } = parseJsonOutput(text);
-  if (!ok) return { text: normaliseJsonSeat(text), malformed: "the disposition was not JSON" };
+  if (!ok) return { text: normaliseJsonSeat(text), malformed: "the answer was not a JSON object" };
+  // Only an answer that *claims* to be a disposition is judged by the disposition's schema. Another JSON
+  // persona's answer — a classifier's label, a summariser's object — is a valid answer to a different promise,
+  // and failing it here would be this seat's schema applied to somebody else's contract. The claim is read from
+  // the answer, not from a list of personas, so a new JSON seat is judged by the schema it actually answers to.
+  const claimsDisposition = isObject(value) && ("verdict" in value || "findings" in value);
+  if (!claimsDisposition) return { text: JSON.stringify(value, null, 2) };
   const flaw = dispositionFlaw(value);
   if (flaw) return { text: normaliseJsonSeat(text), malformed: flaw };
-  // Every JSON seat's answer is still recovered for the next stage unchanged; only *review* answers carry the
-  // disposition keys, and a malformed one carries nothing but the flaw.
   return {
     text: JSON.stringify(value, null, 2),
     disposition: { verdict: value.verdict, summary: typeof value.summary === "string" ? value.summary : undefined, findings: value.findings.map(normaliseFinding) },
@@ -575,7 +583,23 @@ export async function runPipeline({
   const seatRecords = [];
   const runStartedAt = Date.now();
   let lastDisposition = null;
-  let malformedDisposition = null;
+  let malformedAnswer = null;
+  /**
+   * One writer, in order. A valid disposition supersedes an earlier malformed answer — but superseding it is not
+   * deleting it: the malformed answer is a fact about the run, so it stays in the record, named as superseded, and
+   * a consumer can never read a standing verdict beside an unexplained flaw. A malformed answer that arrives
+   * *after* a valid one wins outright, which is the ordering that must not read as clean.
+   */
+  const noteDisposition = (seat) => {
+    if (seat.disposition) {
+      lastDisposition = { persona: seat.persona, ...seat.disposition };
+      if (malformedAnswer) malformedAnswer.supersededBy = seat.persona;
+    }
+    if (seat.malformed) {
+      malformedAnswer = { persona: seat.persona, reason: seat.malformed };
+      lastDisposition = null;
+    }
+  };
   const rounds = [];
   const substitutions = [];
   const cascades = [];
@@ -646,10 +670,7 @@ export async function runPipeline({
         record.calls += roundSeats.reduce((total, seat) => total + (seat.calls ?? 0), 0);
         stagesRun += 1;
         for (const seat of roundSeats) {
-          if (seat.disposition) lastDisposition = { persona: seat.persona, ...seat.disposition };
-          // A later malformed disposition *replaces* whatever stood before it: a verdict from an earlier seat
-          // beside a malformed final answer is exactly the ambiguous record a consumer would read as clean.
-          if (seat.malformed) { malformedDisposition = { persona: seat.persona, reason: seat.malformed }; lastDisposition = null; }
+          noteDisposition(seat);
           accumulateUsage(usage, seat.usage);
           if (seat.decisionUsage) accumulateUsage(decisionUsage, seat.decisionUsage);
           seatRecords.push({
@@ -688,8 +709,7 @@ export async function runPipeline({
       });
       record.calls = seat.calls ?? 0;
       stagesRun += 1;
-      if (seat.disposition) lastDisposition = { persona: seat.persona, ...seat.disposition };
-      if (seat.malformed) { malformedDisposition = { persona: seat.persona, reason: seat.malformed }; lastDisposition = null; }
+      noteDisposition(seat);
       accumulateUsage(usage, seat.usage);
       if (seat.decisionUsage) accumulateUsage(decisionUsage, seat.decisionUsage);
       seatRecords.push({
@@ -815,11 +835,13 @@ export async function runPipeline({
     // `seatErrors` is always present, empty array included: a run that degraded quietly is a wrong answer.
     details: { fusion: fusion.id, mode: fusion.mode, stages, seats: seatRecords, seatErrors, rounds, substitutions,
       cascades: [...cascades, ...cascadeRecords], durationMs: Date.now() - runStartedAt,
-      // A review's numbers live here: the deciding seat's verdict and findings with their severities, the count
-      // per severity (so a run whose findings are all `editorial` is visible as such), and — when a JSON seat
-      // produced something unparseable — that fact, because a malformed disposition must not read as clean.
+      // A review's numbers live here: the deciding seat's verdict and findings with their severities, and the
+      // count per severity, so a run whose findings are all `editorial` is visible as such. A JSON answer that
+      // did not satisfy the contract it was asked for is recorded as `malformedAnswer` — the name a classifier's
+      // broken JSON deserves as much as a review's — because an answer that failed its own contract must never
+      // read as a clean result.
       ...(lastDisposition ? { dispositionBy: lastDisposition.persona, verdict: lastDisposition.verdict, severityCounts: countSeverities(lastDisposition.findings), findings: lastDisposition.findings } : {}),
-      ...(malformedDisposition ? { malformedDisposition } : {}) },
+      ...(malformedAnswer ? { malformedAnswer } : {}) },
     stagesRun,
   };
 }

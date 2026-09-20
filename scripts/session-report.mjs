@@ -475,8 +475,8 @@ export function aggregate(sessions) {
         cascades: 0, cascadesSufficient: 0, cascadesAdvanced: 0, cascadeSeats: new Map(), substitutions: 0, rounds: 0,
         verify: 0, route: 0, saved: 0, failedWrites: 0, failures: 0, routed: undefined,
         runMs: 0, runsTimed: 0, timedSeats: 0, slowestSeat: undefined,
-        review: { runs: 0, malformed: 0, verdicts: new Map(), severities: new Map(), by: new Map(), reasons: new Map(),
-          findings: [], paths: 0, pathsMissing: 0, more: 0 },
+        review: { runs: 0, malformed: 0, superseded: 0, verdicts: new Map(), severities: new Map(), by: new Map(), reasons: new Map(),
+          findings: [], paths: 0, pathsMissing: 0, pathsOutside: 0, more: 0 },
       });
       record.runs = (record.runs ?? 0) + 1;
       record.carriers.set(entry.carrier, (record.carriers.get(entry.carrier) ?? 0) + 1);
@@ -485,14 +485,17 @@ export function aggregate(sessions) {
       // hallucinated location is worth *seeing* rather than trusting, and a path that does not exist is the
       // cheapest evidence that a finding was not read off the diff.
       const review = record.review;
-      if (details.verdict || details.malformedDisposition) {
+      if (details.verdict || details.malformedAnswer) {
         review.runs += 1;
         if (typeof details.dispositionBy === "string") review.by.set(details.dispositionBy, (review.by.get(details.dispositionBy) ?? 0) + 1);
         if (typeof details.verdict === "string") review.verdicts.set(details.verdict, (review.verdicts.get(details.verdict) ?? 0) + 1);
-        if (details.malformedDisposition) {
+        if (details.malformedAnswer) {
           review.malformed += 1;
-          const reason = details.malformedDisposition.reason ?? "no reason recorded";
+          const reason = details.malformedAnswer.reason ?? "no reason recorded";
           review.reasons.set(reason, (review.reasons.get(reason) ?? 0) + 1);
+          // Superseded is not the same as absent: the answer failed its contract and a later one answered, and a
+          // reader that cannot tell those apart is reading a record that hides a failure.
+          if (typeof details.malformedAnswer.supersededBy === "string") review.superseded += 1;
         }
         for (const finding of Array.isArray(details.findings) ? details.findings : []) {
           const severity = typeof finding?.severity === "string" ? finding.severity : "unknown";
@@ -501,8 +504,14 @@ export function aggregate(sessions) {
           let found;
           if (where !== undefined) {
             review.paths += 1;
-            found = fs.existsSync(path.isAbsolute(where) ? where : path.join(session.cwd ?? ".", where));
-            if (!found) review.pathsMissing += 1;
+            // The claim has to be *inside* the session's tree to be checkable at all. Resolving an absolute path
+            // would let a hallucinated `/etc/passwd` report as found simply because this machine has one — the
+            // laundering this check exists to prevent — so an absolute path is marked unchecked, not verified.
+            if (path.isAbsolute(where)) { review.pathsOutside += 1; }
+            else {
+              found = fs.existsSync(path.join(session.cwd ?? ".", where));
+              if (!found) review.pathsMissing += 1;
+            }
           }
           // Bounded: the report is a summary, and a run with hundreds of findings must not become the file.
           if (review.findings.length < 40) review.findings.push({ severity, where, line: finding?.line ?? null, found, claim: typeof finding?.claim === "string" ? finding.claim : undefined });
@@ -612,17 +621,21 @@ export function render(report, { limit = 12 } = {}) {
   lines.push("");
   const reviewRows = [...report.deliberation.values()].filter((row) => (row.review?.runs ?? 0) > 0).sort((a, b) => (b.review.runs - a.review.runs));
   if (reviewRows.length > 0) {
-    lines.push("review dispositions (details.verdict / details.malformedDisposition)");
+    lines.push("review dispositions (details.verdict / details.malformedAnswer)");
     for (const row of reviewRows) {
       const { review } = row;
       const counts = (map) => [...map].map(([k, v]) => `${k} ${v}`).join(", ") || "—";
       lines.push(`  ${row.key.padEnd(20)} ${review.runs} run(s) with a disposition · verdict ${counts(review.verdicts)} · by ${counts(review.by)}`);
-      lines.push(`  ${"".padEnd(20)} severities ${counts(review.severities)} · ${review.paths} path(s), ${review.pathsMissing} not found in the session cwd`);
-      // A malformed disposition is the reason no verdict is recorded, so the reason is the whole finding.
-      if (review.malformed > 0) lines.push(`  ${"".padEnd(20)} malformed ${review.malformed} ×: ${[...review.reasons].map(([k, v]) => `${k} (${v})`).join(" | ")}`);
+      // "not found" is as of *this* run of the report against this filesystem: a file the finding named and a
+      // later commit deleted is not a hallucination, and the wording has to leave room for that.
+      lines.push(`  ${"".padEnd(20)} severities ${counts(review.severities)} · ${review.paths} path(s): ${review.pathsMissing} not in the session cwd now, ${review.pathsOutside} absolute (not checkable)`);
+      // A malformed answer is why no verdict is recorded — unless a later one answered, in which case saying so
+      // is the difference between a record and a covered-up failure.
+      if (review.malformed > 0) lines.push(`  ${"".padEnd(20)} malformed ${review.malformed} ×${review.superseded > 0 ? ` (${review.superseded} superseded by a later answer)` : ""}: ${[...review.reasons].map(([k, v]) => `${k} (${v})`).join(" | ")}`);
       for (const finding of review.findings) {
         const line = finding.line === null || finding.line === undefined ? "" : `:${finding.line}`;
-        lines.push(`  ${"".padEnd(20)} ${finding.found === false ? "[path not found] " : finding.found === undefined ? "[no path] " : ""}${finding.severity} ${finding.where ?? "?"}${line} — ${(finding.claim ?? "").split("\n")[0].slice(0, 120)}`);
+        const mark = finding.found === false ? "[path not found] " : finding.found === undefined && finding.where ? "[path outside the session] " : finding.found === undefined ? "[no path] " : "";
+        lines.push(`  ${"".padEnd(20)} ${mark}${finding.severity} ${finding.where ?? "?"}${line} — ${(finding.claim ?? "").split("\n")[0].slice(0, 120)}`);
       }
       if (review.more > 0) lines.push(`  ${"".padEnd(20)} … ${review.more} further finding(s) not listed`);
     }
@@ -1245,7 +1258,15 @@ function check() {
     { type: "message", message: { role: "assistant", api: FUSION_API, provider: "fusion-matrix", model: "review-quick",
       usage: usage(400, 60, 0.003), content: [{ type: "text", text: "I could not read the diff." }],
       details: { fusion: "review-quick", seats: [], seatErrors: [], usage: usage(400, 60, 0.003),
-        malformedDisposition: { persona: "review-synth", reason: "the disposition was not JSON" } } } },
+        malformedAnswer: { persona: "review-synth", reason: "the answer was not a JSON object" } } } },
+    // A malformed answer that a later one superseded, and a finding naming an absolute path — which is outside
+    // the session's tree by construction and therefore cannot be verified at all, let alone "found".
+    { type: "message", message: { role: "assistant", api: FUSION_API, provider: "fusion-matrix", model: "review-single",
+      usage: usage(300, 40, 0.002), content: [{ type: "text", text: "{\"verdict\":\"clean\"}" }],
+      details: { fusion: "review-single", seats: [], seatErrors: [], usage: usage(300, 40, 0.002),
+        dispositionBy: "review-synth", verdict: "clean", severityCounts: {},
+        malformedAnswer: { persona: "judge", reason: "the answer was not a JSON object", supersededBy: "review-synth" },
+        findings: [{ severity: "minor", path: "/etc/passwd", line: null, criterion: "c", claim: "a path outside the tree" }] } } },
   ], { file: "review.jsonl", harness: "pi" });
   const reviewReport = buildReport({ sessions: [reviewSession], roots: [], unreadable: [] });
   const reviewRow = reviewReport.deliberation.get("pi/review-check");
@@ -1255,16 +1276,30 @@ function check() {
   ok("a review disposition is counted: verdict, the persona that stands, severities and paths",
     reviewRow?.review.runs === 1 && reviewRow?.review.verdicts.get("findings") === 1 && reviewRow?.review.by.get("review-synth") === 1
       && reviewRow?.review.severities.get("blocking") === 1 && reviewRow?.review.severities.get("editorial") === 1
-      && reviewRow?.review.paths === 2 && reviewRow?.review.pathsMissing === 1 && reviewRow?.review.malformed === 0,
+      && reviewRow?.review.paths === 2 && reviewRow?.review.pathsMissing === 1 && reviewRow?.review.pathsOutside === 0
+      && reviewRow?.review.malformed === 0,
     JSON.stringify({ runs: reviewRow?.review.runs, paths: reviewRow?.review.paths, missing: reviewRow?.review.pathsMissing, malformed: reviewRow?.review.malformed }));
   ok("a finding whose path is not in the session cwd is marked, and a real one is not",
     /\[path not found\] editorial src\/disposition\.ts/.test(reviewText) && !/\[path not found\] blocking extensions\/pi-fusion-matrix\/run\.js/.test(reviewText)
       && /blocking extensions\/pi-fusion-matrix\/run\.js:42/.test(reviewText),
     reviewText.split("\n").filter((l) => l.includes("blocking") || l.includes("editorial")).slice(0, 3).join(" // "));
-  ok("a malformed disposition is reported by reason, with no verdict beside it",
-    reviewReport.deliberation.get("pi/review-quick")?.review.malformed === 1 && /malformed 1 ×: the disposition was not JSON/.test(reviewText)
+  ok("a malformed answer is reported by reason, with no verdict beside it",
+    reviewReport.deliberation.get("pi/review-quick")?.review.malformed === 1 && /malformed 1 ×: the answer was not a JSON object/.test(reviewText)
       && reviewRow?.review.reasons.size === 0,
     reviewText.split("\n").find((l) => l.includes("malformed 1 ×")) ?? "no malformed line");
+  // An absolute path is outside the session's tree by construction, so it is reported as *unchecked*: resolving
+  // it would let a hallucinated `/etc/passwd` read as found on any machine that has one, which is the laundering
+  // the check exists to prevent.
+  ok("an absolute finding path is marked unchecked rather than resolved",
+    /\[path outside the session\] minor \/etc\/passwd/.test(reviewText)
+      && reviewReport.deliberation.get("pi/review-single")?.review.pathsOutside === 1
+      && reviewReport.deliberation.get("pi/review-single")?.review.pathsMissing === 0,
+    reviewText.split("\n").find((l) => l.includes("passwd")) ?? "no absolute-path line");
+  ok("a superseded malformed answer is named as superseded, not hidden",
+    /malformed 1 × \(1 superseded by a later answer\)/.test(reviewText)
+      && reviewReport.deliberation.get("pi/review-single")?.review.superseded === 1
+      && reviewReport.deliberation.get("pi/review-single")?.review.verdicts.get("clean") === 1,
+    reviewText.split("\n").find((l) => l.includes("superseded")) ?? "no superseded line");
   fs.rmSync(reviewDir, { recursive: true, force: true });
 
   const failures = results.filter((r) => !r.pass);

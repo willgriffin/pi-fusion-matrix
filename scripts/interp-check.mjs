@@ -285,29 +285,52 @@ for (const [name, payload] of flawedDispositions) {
     flawResults.push([name, false, `the run threw: ${error.message}`]);
     continue;
   }
-  flawResults.push([name, Boolean(run.details.malformedDisposition) && run.details.findings === undefined && run.details.verdict === undefined, run.details.malformedDisposition?.reason]);
+  flawResults.push([name, Boolean(run.details.malformedAnswer) && run.details.findings === undefined && run.details.verdict === undefined, run.details.malformedAnswer?.reason]);
 }
 check("a disposition that violates the schema is recorded as malformed, never as a clean review",
   flawResults.every(([, ok]) => ok),
   flawResults.filter(([, ok]) => !ok).map(([name]) => name).join(", ") || flawResults.map(([, , reason]) => reason).slice(0, 3).join(" | "));
 
 const malformedRun = await runReview(dispositionModel("I could not read the diff, sorry."));
-check("a disposition that is not JSON is recorded as malformed, not as a clean review",
-  malformedRun.details.malformedDisposition?.persona === "review-synth" && malformedRun.details.findings === undefined
+check("an answer that is not a JSON object is recorded as malformed, not as a clean review",
+  malformedRun.details.malformedAnswer?.persona === "review-synth" && malformedRun.details.findings === undefined
     && malformedRun.details.verdict === undefined,
-  JSON.stringify(malformedRun.details.malformedDisposition));
+  JSON.stringify(malformedRun.details.malformedAnswer));
 
-// Two JSON seats in one run: the judge (a valid disposition) then the disposition seat (garbage). The earlier
-// verdict must not stand beside the malformed one — that pairing is the record a consumer reads as clean.
-const perPersona = async (args) => {
-  const payload = args?.persona?.name === "judge" ? { verdict: "clean", findings: [] } : "not a disposition at all";
+// Three JSON seats, three answers, one record. `review-committee` ends in `judge` then `review-synth`, so a
+// per-persona model can put a different kind of answer in each seat and the run-level record has to stay
+// unambiguous: a valid disposition from an earlier seat, a *different* persona's JSON that claims nothing, and
+// a malformed answer that arrives last.
+const perPersonaModel = (answers) => async (args) => {
+  const payload = answers[args?.persona?.name] ?? { verdict: "clean", findings: [] };
   return { text: typeof payload === "string" ? payload : JSON.stringify(payload),
     usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", toolCalls: [] };
 };
-const shadowed = await runPipeline({ config, sources, fusion: { ...config.fusions["review-check"], id: "review-check" }, prompt: "a packet", callModel: perPersona, decide, emit: silent, registry });
+const runReviewCheck = (answers) => runPipeline({ config, sources, fusion: { ...config.fusions["review-check"], id: "review-check" }, prompt: "a packet", callModel: perPersonaModel(answers), decide, emit: silent, registry });
+
+// The case that made the schema global: a classifier's answer, or any JSON persona answering a different
+// contract, is recovered as data and recorded against nothing.
+const foreignJson = await runReviewCheck({ judge: { label: "mechanical", confidence: 0.95 }, "review-synth": { verdict: "clean", findings: [] } });
+check("a JSON answer that does not claim to be a disposition is not judged by its schema",
+  foreignJson.details.malformedAnswer === undefined && foreignJson.details.verdict === "clean"
+    && foreignJson.details.dispositionBy === "review-synth",
+  JSON.stringify({ malformed: foreignJson.details.malformedAnswer, verdict: foreignJson.details.verdict }));
+
+// A malformed answer that arrives *after* a valid one wins outright; that ordering is the one that must never
+// read as clean.
+const shadowed = await runReviewCheck({ judge: { verdict: "clean", findings: [] }, "review-synth": "not a disposition at all" });
 check("a malformed final disposition leaves no earlier verdict standing",
-  shadowed.details.malformedDisposition?.persona === "review-synth" && shadowed.details.verdict === undefined && shadowed.details.findings === undefined,
-  JSON.stringify({ malformed: shadowed.details.malformedDisposition, verdict: shadowed.details.verdict }));
+  shadowed.details.malformedAnswer?.persona === "review-synth" && shadowed.details.malformedAnswer?.supersededBy === undefined
+    && shadowed.details.verdict === undefined && shadowed.details.findings === undefined,
+  JSON.stringify({ malformed: shadowed.details.malformedAnswer, verdict: shadowed.details.verdict }));
+
+// The other order: a malformed answer, then one that answers. The failure is not deleted by being superseded —
+// it is named as superseded, so no reader can call the pairing ambiguous.
+const superseded = await runReviewCheck({ judge: "not a disposition at all", "review-synth": { verdict: "clean", findings: [] } });
+check("a valid disposition after a malformed answer names the answer it superseded",
+  superseded.details.verdict === "clean" && superseded.details.dispositionBy === "review-synth"
+    && superseded.details.malformedAnswer?.persona === "judge" && superseded.details.malformedAnswer?.supersededBy === "review-synth",
+  JSON.stringify({ verdict: superseded.details.verdict, malformed: superseded.details.malformedAnswer }));
 
 // 7. proxy: the harness's context goes to the writing seat's alias verbatim, and its events come back
 const seen = [];
