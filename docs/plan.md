@@ -1073,6 +1073,17 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
   and their cost, and counts a session that produced runs without a label as **unlabelled** rather than
   assuming it went well. A hand-written label missing either half is named as an unrecognised shape, not
   counted;
+- **it reads what omp recorded, rather than what omp's record looks like.** omp invokes an extension tool
+  through its `xd://` device protocol: the call is stored as `write` (or `read`, for reading a tool's docs)
+  with `arguments.path = "xd://<tool>"`, and the result's record is wrapped one level in, as
+  `details.xdev.inner`. A reader that looked only at the outer object dropped every such run — measured
+  2026-09-20: one plain deliberation record in the store against two wrapped and invisible, with a session
+  that ran two fusions reporting none. The reader unwraps it, attributes the invocation to the tool it
+  invoked (`read` of `xd://<tool>` stays a `read`: reading docs is not calling), names the result by the tool
+  that ran, and **counts the unwrapped calls** so the quirk is reported rather than quietly repaired;
+- **a run's tokens are counted once.** `details.usage` already sums the run's seats — verified against the
+  store, where a one-seat run's `details.usage.input` equals that seat's — so the seats are not added again.
+  They *were*, which doubled every deliberation's tokens and cost from the reader's first version;
 - **filters select rows, never the accounting.** `--cwd`/`--since` decide which sessions are totalled; the
   files read, the unparsed lines and any session a filter could not attribute (a truncated header has no
   `cwd` to compare, and a malformed timestamp cannot be placed) are reported either way, and the exit
@@ -1081,7 +1092,7 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
 
 Exit status: `0` report produced, `1` the store could not be accounted for (missing or empty `--dir`,
 unreadable `--session`, an unreadable file or directory, a line that did not parse, or a session a filter
-could not attribute), `2` `--check` failed. `--check` is the reader's own accounting, checked against fixtures (71 checks as a normal
+could not attribute), `2` `--check` failed. `--check` is the reader's own accounting, checked against fixtures (77 checks as a normal
 user; 44 as root, where the permission-dependent cases are printed as skipped rather than passed — the
 printed `N/N` is always the real total) — and, as
 for the interpreter contracts, each of those checks is verified the same way it is written: by temporarily
@@ -1463,7 +1474,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     prints its snippet while leaving every tracked file byte-identical (asserted by hash).
 
 22. **The run record survives, and the report reads it** — `node scripts/session-report.mjs --check`
-    passes 71/71 (44/44 as root, the permission cases printed as skipped once), each check having been shown
+    passes 77/77 (44/44 as root, the permission cases printed as skipped once), each check having been shown
     to fail under a temporary mutation of the reader, then in a scratch `cwd` (Step 8's prerequisites):
     `node scripts/session-report.mjs --cwd <scratch> --json` on the store *before* a `/matrix` run shows
     zero deliberation records, and after `/matrix quick "…"` in **both** pi and omp it shows one, with the
@@ -1556,6 +1567,17 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     `/matrix-label` was recorded. Each of those must fail when the reader, the command or the seat clock is
     mutated (the label not read, the first label kept instead of the latest, a half-written label counted,
     unlabelled runs uncounted, a sums object merged as a usage, a seat clock dropped).
+
+28. **The device protocol and the run's own token count** — `node scripts/session-report.mjs --check` passes
+    77/77, the new ones covering: a record omp wrapped as `details.xdev.inner` is read as a deliberation run
+    with its fusion, seats and usage; a `write` to `xd://matrix` counts as a `matrix` call while `read` of the
+    same path stays a `read`; the result row names the tool that ran; the unwrapped count is reported; and a
+    run's tokens equal its own `usage`, not that plus its seats. Then live: the two `matrix` runs made through
+    omp's device protocol on 2026-09-20 (the `cline-pass` wiring probes) appear in the report as
+    `omp/cline-glm 1 runs (toolResult×1)` and `omp/cline-muse …`, with `omp/matrix 2 calls · 2 results` in the
+    tools table and `2 call(s) made through omp's xd:// device` in the accounting — where before the fix the
+    same store reported no deliberation records at all. Each must fail when the unwrap, the attribution, the
+    result naming, the unwrapped count or the single-count rule is mutated.
 
 ## Assumptions & contingencies
 

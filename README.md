@@ -570,6 +570,12 @@ work item, latest outcome, evidence, the runs and fusion turns behind it, and th
 Money always states its basis: a cost is `$X reported`, with the messages whose provider reported no price
 counted beside it, never folded into a single total that reads as free.
 
+It reads what each harness actually recorded: omp invokes an extension tool through its `xd://` device
+protocol, so a `matrix` run arrives as a `write` with the record wrapped one level in — the reader unwraps it,
+attributes the call to the tool it invoked, names the result by the tool that ran, and counts the unwrapped
+calls rather than repairing them silently. A run's tokens are counted once (its `usage` already sums its
+seats).
+
 It totals turns, tokens, cost, tool calls and tool errors per fusion, per model **and per harness** — the
 two harnesses record different things, so folding them together would average a fact with a silence — and for each
 deliberation: seats, degraded seats, seat errors, cascades split sufficient/advanced, substitutions,

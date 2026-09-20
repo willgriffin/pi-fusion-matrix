@@ -52,6 +52,31 @@ const DEFAULT_ROOTS = [
 const FUSION_API = "fusion-matrix";
 /** The custom message type a `/matrix-label` writes: a work item, an outcome, and optional evidence. */
 const LABEL_TYPE = "matrix-label";
+
+/**
+ * omp invokes an extension tool through its `xd://` device protocol, and stores the result as
+ * `details = { xdev: { tool, mode, args, tier, inner: <the real record> } }` — so the record the extension
+ * returned is one level in, and a reader that only looks at the outer object drops the run entirely
+ * (measured 2026-09-20: one plain deliberation record in the store against two wrapped and invisible, with a
+ * session that ran two fusions reporting none). pi does not wrap, and neither does the command path.
+ */
+const unwrapDetails = (details) => (details && typeof details === "object" && details.xdev && typeof details.xdev === "object" && details.xdev.inner && typeof details.xdev.inner === "object"
+  ? details.xdev.inner
+  : details);
+
+/**
+ * The tool a `toolCall` part actually invokes. omp records an `xd://` invocation as `write` with
+ * `arguments.path = "xd://<tool>"`, while `read` of the same path is discovery — reading a tool's docs is
+ * not calling it — so only the write form is attributed to the invoked tool.
+ */
+function invokedTool(part) {
+  const path = part?.arguments?.path;
+  if (typeof path === "string" && path.startsWith("xd://") && part?.name === "write") return path.slice("xd://".length);
+  return part?.name ?? "?";
+}
+
+/** The tool a result belongs to: the invoked one when omp wrapped it, else the name the harness recorded. */
+const resultTool = (message) => message?.details?.xdev?.tool ?? message?.toolName ?? "?";
 // The same closed vocabulary the command enforces: a store is editable by hand, and a report that accepted
 // `shipped` would count an outcome nobody defined.
 import { isOutcome } from "../extensions/pi-fusion-matrix/labels.js";
@@ -230,7 +255,7 @@ export function extractSession(entries, meta = {}) {
         usage,
         priced,
         durationMs: Number.isFinite(message.duration) ? message.duration : undefined,
-        toolCalls: (message.content ?? []).filter((part) => part?.type === "toolCall").map((part) => part.name ?? "?"),
+        toolCalls: (message.content ?? []).filter((part) => part?.type === "toolCall").map(invokedTool),
         at: message.timestamp ?? entry.timestamp,
       };
       session.turns.push(current);
@@ -251,8 +276,9 @@ export function extractSession(entries, meta = {}) {
     }
 
     if (message.role === "toolResult") {
-      session.toolResults.push({ toolName: message.toolName ?? "?", isError: message.isError === true, after: current, at: message.timestamp ?? entry.timestamp });
-      const details = message.details;
+      const wrapped = message?.details?.xdev?.tool !== undefined;
+      session.toolResults.push({ toolName: resultTool(message), isError: message.isError === true, wrapped, after: current, at: message.timestamp ?? entry.timestamp });
+      const details = unwrapDetails(message.details);
       if (typeof details?.fusion === "string") {
         session.records.push({ kind: "deliberation", carrier: "toolResult", fusion: details.fusion, details, at: session.toolResults.at(-1).at });
       } else if (isRecordShape(details)) {
@@ -288,7 +314,7 @@ export function aggregate(sessions) {
     deliberation: new Map(),
     tools: new Map(),
     toolCalls: new Map(),
-    gaps: { noDuration: 0, unpriced: 0, sessionsWithoutHeader: 0, unreadable: [], toolAttribution: "most recent assistant turn" },
+    gaps: { noDuration: 0, unpriced: 0, sessionsWithoutHeader: 0, unreadable: [], wrappedCalls: 0, toolAttribution: "most recent assistant turn" },
     store: undefined,
   };
 
@@ -305,6 +331,7 @@ export function aggregate(sessions) {
     for (const unknown of session.unknown) {
       report.unknownShapes.push({ file: session.file, harness: session.harness, carrier: unknown.carrier, keys: unknown.keys, at: unknown.at });
     }
+    for (const result of session.toolResults) if (result.wrapped) report.gaps.wrappedCalls += 1;
 
     for (const t of session.turns) {
       const key = turnKey(t);
@@ -428,7 +455,9 @@ export function aggregate(sessions) {
       record.seats += seats.length;
       for (const seat of seats) {
         if (seat?.degraded) record.degradedSeats += 1;
-        addUsage(record.sums, seat?.usage);
+        // Deliberately **not** added to `record.sums`: `details.usage` is already the sum of the seats
+        // (verified against the store — a one-seat run's `details.usage.input` equals that seat's), so adding
+        // each seat again doubled every deliberation's tokens and cost.
       }
       record.seatErrors += seatErrors.length;
       const survived = seats.filter((seat) => !seat?.degraded).length;
@@ -570,6 +599,10 @@ export function render(report, { limit = 12 } = {}) {
   for (const unreadable of report.gaps.unreadable.slice(0, 10)) lines.push(`    ${unreadable.path}: ${unreadable.reason}`);
   if (report.gaps.unreadable.length > 10) lines.push(`    … ${report.gaps.unreadable.length - 10} more, all in the JSON output`);
   lines.push(`  tool calls are attributed by ${report.gaps.toolAttribution} — the format carries no caller`);
+  if (report.gaps.wrappedCalls > 0) {
+    lines.push(`  ${report.gaps.wrappedCalls} call(s) made through omp's \`xd://\` device, counted under the tool they invoked:`);
+    lines.push("  omp records such a call as `write` with `path: xd://<tool>`, and wraps the result's record one level in.");
+  }
   for (const unknown of report.unknownShapes.slice(0, 10)) {
     lines.push(`    ${unknown.file ?? "?"} (${unknown.harness ?? "?"}) ${unknown.carrier}: ${unknown.keys.join(", ")}${unknown.at ? ` at ${unknown.at}` : ""}`);
   }
@@ -681,7 +714,12 @@ function check() {
   ok("degraded seats and seat errors counted", delib?.seats === 3 && delib?.degradedSeats === 2 && delib?.seatErrors === 2, JSON.stringify({ seats: delib?.seats, degraded: delib?.degradedSeats, errors: delib?.seatErrors }));
   ok("cascades split sufficient from advanced", delib?.cascades === 3 && delib?.cascadesSufficient === 2 && delib?.cascadesAdvanced === 1, JSON.stringify({ total: delib?.cascades, sufficient: delib?.cascadesSufficient, advanced: delib?.cascadesAdvanced }));
   ok("cascades are attributed to their seat", delib?.cascadeSeats.get("stage") === 1 && delib?.cascadeSeats.get("panel") === 1, JSON.stringify([...(delib?.cascadeSeats ?? [])]));
-  ok("seat usage is added to the run's tokens", delib?.sums.input === 80 + 20 + 30 + 7 + 3 && delib?.sums.output === 8 + 2 + 3 + 1, JSON.stringify(delib?.sums));
+  ok("a run's tokens are counted once, from its own usage (its seats are inside it)",
+    delib?.sums.input === 80 + 7 + 3 && delib?.sums.output === 8 + 1 + 0,
+    JSON.stringify(delib?.sums));
+  ok("a seat's usage is not added a second time",
+    delib?.seats === 3 && delib?.sums.input < 80 + 20 + 30 + 7 + 3,
+    `input=${delib?.sums.input} seat usages=${JSON.stringify((delib && [20, 30]) || [])}`);
   ok("decision usage is kept apart from seat usage", delib?.decisionUsage.input === 5 && delib?.decisionUsage.output === 1);
   ok("route, verification checks and saved files are read", delib?.route === 1 && delib?.verify === 1 && delib?.saved === 1, JSON.stringify({ route: delib?.route, verify: delib?.verify, saved: delib?.saved }));
   ok("a failed deliberation is counted, thrown or degraded", delib?.failures === 2 && report.records.deliberation === 4, JSON.stringify({ failures: delib?.failures, records: report.records.deliberation }));
@@ -1017,6 +1055,39 @@ function check() {
   ok("a recorded 0 ms run still prints its clock",
     /run time 0\.0s/.test(zeroText) && /1 seat\(s\) timed/.test(zeroText),
     zeroText.split("\n").find((l) => l.includes("run time")) ?? "no run-time line");
+
+  // ---- omp's device protocol: the record one level in, and the call recorded as `write` -----------------
+  const wrappedRecord = { fusion: "quick", mode: "single", seats: [{ persona: "technical", provider: "cline-pass", model: "z-ai/glm-5.3-flash", degraded: false, usage: usage(117, 6, 0.0000138), durationMs: 1710 }],
+    cascades: [], seatErrors: [], usage: usage(117, 6, 0.0000138), durationMs: 1710 };
+  const deviceSession = extractSession([sessionMeta,
+    { type: "message", message: { role: "assistant", api: "openai-completions", provider: "cline-pass", model: "z-ai/glm-5.3-flash",
+      usage: usage(50, 5, 0.001), content: [
+        { type: "toolCall", id: "c0", name: "read", arguments: { path: "xd://matrix", i: "Reading matrix tool docs" } },
+        { type: "toolCall", id: "c1", name: "write", arguments: { path: "xd://matrix", content: "{\"prompt\": \"x\", \"fusion\": \"quick\"}" } },
+      ] } },
+    { type: "message", message: { role: "toolResult", toolName: "read", isError: false, content: [], details: { xdev: { tool: "matrix", mode: "read", args: { path: "xd://matrix" } } } } },
+    { type: "message", message: { role: "toolResult", toolName: "write", isError: false, content: [{ type: "text", text: "PANEL-OK" }],
+      details: { xdev: { tool: "matrix", mode: "execute", tier: "exec", args: { prompt: "x", fusion: "quick" }, inner: wrappedRecord } } } },
+  ], { file: "device.jsonl", harness: "omp" });
+  const deviceReport = aggregate([deviceSession]);
+  ok("a record omp wrapped in its device protocol is read, not dropped",
+    deviceReport.records.deliberation === 1 && deviceReport.deliberation.get("omp/quick")?.runs === 1
+      && deviceReport.unknownShapes.length === 0,
+    JSON.stringify({ records: deviceReport.records, unknown: deviceReport.unknownShapes.length }));
+  ok("the unwrapped record keeps its fusion, seats and usage",
+    deviceReport.deliberation.get("omp/quick")?.seats === 1 && Math.abs((deviceReport.deliberation.get("omp/quick")?.sums.costReported ?? 0) - 0.0000138) < 1e-12
+      && deviceReport.deliberation.get("omp/quick")?.slowestSeat?.durationMs === 1710,
+    JSON.stringify({ seats: deviceReport.deliberation.get("omp/quick")?.seats, sums: deviceReport.deliberation.get("omp/quick")?.sums }));
+  ok("a call through the device is attributed to the tool it invoked, and reading its docs is not a call",
+    deviceSession.turns[0].toolCalls.join(",") === "read,matrix" && deviceReport.toolCalls.get("omp/matrix") === 1 && (deviceReport.toolCalls.get("omp/write") ?? 0) === 0,
+    JSON.stringify({ calls: deviceSession.turns[0].toolCalls, counted: Object.fromEntries(deviceReport.toolCalls) }));
+  ok("the result row names the tool that ran, not the write that carried it",
+    deviceSession.toolResults.map((r) => r.toolName).join(",") === "matrix,matrix" && (deviceReport.tools.get("omp/matrix")?.turns ?? 0) === 2,
+    JSON.stringify({ rows: deviceSession.toolResults.map((r) => r.toolName), tools: [...deviceReport.tools.keys()] }));
+  ok("the reader says it unwrapped, rather than doing it quietly",
+    deviceReport.gaps.wrappedCalls === 2 && /through omp's `xd:\/\/` device/.test(render(buildReport({ sessions: [deviceSession], roots: [], unreadable: [],
+      store: { read: 1, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }))),
+    String(deviceReport.gaps.wrappedCalls));
 
   const failures = results.filter((r) => !r.pass);
   for (const r of results) console.log(`  ${r.pass ? "ok  " : "FAIL"} ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);
