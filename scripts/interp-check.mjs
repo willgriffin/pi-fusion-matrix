@@ -17,7 +17,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadMatrixConfig, mergeConfig, validateConfig } from "../extensions/pi-fusion-matrix/config.js";
+import { loadMatrixConfig, validateConfig } from "../extensions/pi-fusion-matrix/config.js";
 import { runPipeline } from "../extensions/pi-fusion-matrix/pipeline.js";
 import { createDecide } from "../extensions/pi-fusion-matrix/decide.js";
 import { routeFusion, verifyRun, createFusionStream } from "../extensions/pi-fusion-matrix/run.js";
@@ -1378,69 +1378,13 @@ check(
 
 // Every proxy rule the loader enforces, asserted where it is enforced rather than only through a harness.
 const { config: fresh } = loadMatrixConfig({ cwd: process.cwd(), layers: ["packaged"] });
-const errorsFor = (patch) => validateConfig(mergeConfig(JSON.parse(JSON.stringify(fresh)), patch), {});
-const proxyRules = [
-  ["an unknown alias", { fusions: { best: { proxy: { alias: "no-such-alias" } } } }, /proxy alias "no-such-alias" is not an alias/],
-  ["an empty proxy block", { fusions: { best: { proxy: {} } } }, /proxy needs an alias/],
-  ["a null proxy block", { fusions: { best: { proxy: null } } }, /proxy is not an object/],
-  ["proxy with route", { fusions: { "default-smrt": { proxy: { alias: "qwen-flash" } } } }, /proxy and route cannot both be declared/],
-  [
-    "a writing seat that is not the writer",
-    { fusions: { best: { thinking: { judge: "harness" } } } },
-    /"harness" is only legal for the writing seat "synth"/,
-  ],
-  ["proxy on a mode that writes nothing", { fusions: { opinions: { proxy: { alias: "kimi" } } } }, /proxy needs a writing seat/],
-  ["a non-integer alias contextWindow", { aliases: { "glm-flash": { contextWindow: 0 } } }, /contextWindow must be a positive integer/],
-];
-const ruleResults = proxyRules.map(([, patch, re]) => re.test(errorsFor(patch).join("\n")));
+// The loader's rule book is `test/config.test.mjs`'s subject — every rule there is a named load error, with
+// the fixtures that make it fire. This runner keeps the wiring, and the one thing only a whole run can show:
+// that the config every check below runs against is the packaged one, and that it loads clean.
 check(
-  "config: every proxy rule is a named load error",
-  ruleResults.every(Boolean) && errorsFor({}).length === 0,
-  proxyRules
-    .filter((_, i) => !ruleResults[i])
-    .map(([name]) => name)
-    .join(", ") || `${proxyRules.length} rules, packaged config clean`,
-);
-
-// The review route's rules, each one a silent degradation if it were allowed to load: a reviewer pinned to a
-// rung with an execute face proxies to its writer and the panel never runs.
-const reviewRules = [
-  [
-    "execute: false with a proxy block",
-    { fusions: { best: { execute: false, proxy: { alias: "glm-flash" } } } },
-    /proxy and execute: false cannot both be declared/,
-  ],
-  // `best` is an ordinary work rung (it has an executor), so these two patches exercise the rule rather than
-  // merging into a rung that already declares `execute: false`.
-  ["review without execute: false", { fusions: { best: { review: true } } }, /review requires execute: false/],
-  ["review without a route", { fusions: { best: { review: true, execute: false } } }, /review requires route/],
-  [
-    "a review route to an executor",
-    {
-      fusions: { "smrt-review": { route: { criteria: { mechanical: { description: "x", then: "quick" }, high: { description: "y" } } } } },
-    },
-    /declares no execute: false/,
-  ],
-];
-const reviewResults = reviewRules.map(([, patch, re]) => re.test(errorsFor(patch).join("\n")));
-check(
-  "config: every review-route rule is a named load error",
-  reviewResults.every(Boolean),
-  reviewRules
-    .filter((_, i) => !reviewResults[i])
-    .map(([name]) => name)
-    .join(", ") || `${reviewRules.length} rules`,
-);
-
-// A writing seat that answers in JSON is a disposition, not an agent turn. Every packaged rung already declares
-// `execute: false` by hand, and the rule is what keeps the next one from having to remember: the failure it
-// prevents is silent, because a proxy to a JSON seat answers perfectly well — with a review instead of work.
-const jsonWriter = errorsFor({ fusions: { "review-check": { execute: true } } }).join("\n");
-check(
-  "a fusion whose writing seat answers in JSON must declare execute: false",
-  /the writing seat "review-synth" answers in JSON, so this fusion must declare execute: false/.test(jsonWriter) &&
-    errorsFor({}).length === 0,
-  jsonWriter.split("\n")[0] || "no error raised",
+  "config: the packaged config every check here runs against loads clean",
+  validateConfig(JSON.parse(JSON.stringify(fresh)), {}).length === 0,
+  `${validateConfig(JSON.parse(JSON.stringify(fresh)), {}).length} error(s)`,
 );
 
 // A seat that never answers must fail, not hang — at the run level, the observable is that the run ends and says

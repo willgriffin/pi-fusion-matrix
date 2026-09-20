@@ -86,7 +86,6 @@ async function postJson(fetchImpl, url, body, { apiKey, timeoutMs, signal, log }
       throw new Error(`decision backend ${url} failed: response was not JSON (${text.slice(0, 120)})`);
     }
   }
-  throw new Error(`decision backend ${url} failed: rate limited twice`);
 }
 
 function normaliseTypeSafeAnswers(payload, expectedIds) {
