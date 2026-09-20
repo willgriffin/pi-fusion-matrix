@@ -50,6 +50,19 @@ const DEFAULT_ROOTS = [
 
 /** The api id every fusion model is registered under, so a turn names the fusion that served it. */
 const FUSION_API = "fusion-matrix";
+/**
+ * The harness a session file belongs to, from where it lives. Reading one file explicitly (`--session <file>`)
+ * must not lose it: the device-protocol rewrite is gated on omp, and a file handed to the reader from omp's
+ * store has to keep that, or the same session reports its `matrix` runs as `write`s depending on how it was
+ * selected.
+ */
+function harnessOfPath(file) {
+  const candidate = String(file ?? "");
+  if (candidate.includes(`${path.sep}.omp${path.sep}`)) return "omp";
+  if (candidate.includes(`${path.sep}.pi${path.sep}`)) return "pi";
+  return "session";
+}
+
 /** The custom message type a `/matrix-label` writes: a work item, an outcome, and optional evidence. */
 const LABEL_TYPE = "matrix-label";
 
@@ -1137,6 +1150,23 @@ function check() {
     noResultReport.gaps.wrappedCalls === 1 && noResultReport.toolCalls.get("omp/matrix") === 1 && noResult.toolResults.length === 0,
     JSON.stringify({ device: noResultReport.gaps.wrappedCalls, calls: Object.fromEntries(noResultReport.toolCalls), results: noResult.toolResults.length }));
 
+  // Reading one file explicitly must keep the harness it came from: the device rewrite is gated on omp, and a
+  // file selected by path is the same session whether it was found through the root or handed over directly.
+  const ompDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-report-"));
+  fs.mkdirSync(path.join(ompDir, ".omp", "agent", "sessions", "--slug--"), { recursive: true });
+  const ompFile = path.join(ompDir, ".omp", "agent", "sessions", "--slug--", "one.jsonl");
+  fs.writeFileSync(ompFile, lines([sessionMeta,
+    { type: "message", message: { role: "assistant", api: "openai-completions", provider: "cline-pass", model: "z-ai/glm-5.3-flash",
+      usage: usage(10, 2, 0.001), content: [{ type: "toolCall", id: "s1", name: "write", arguments: { path: "xd://matrix", content: "{}" } }] } },
+  ]));
+  const byPath = readStore({ sessionFile: ompFile });
+  const byPathReport = aggregate(byPath.sessions);
+  ok("a session read by path keeps the harness it lives in",
+    byPath.sessions[0]?.harness === "omp" && byPathReport.toolCalls.get("omp/matrix") === 1
+      && byPathReport.gaps.wrappedCalls === 1 && (byPathReport.toolCalls.get("omp/write") ?? 0) === 0,
+    JSON.stringify({ harness: byPath.sessions[0]?.harness, calls: Object.fromEntries(byPathReport.toolCalls), device: byPathReport.gaps.wrappedCalls }));
+  fs.rmSync(ompDir, { recursive: true, force: true });
+
   const piWrite = extractSession([sessionMeta,
     { type: "message", message: { role: "assistant", api: "anthropic-messages", provider: "opencode-go", model: "glm-5.3-flash",
       usage: usage(10, 2, 0.001), content: [{ type: "toolCall", id: "p1", name: "write", arguments: { path: "xd://matrix", content: "hi" } }] } },
@@ -1165,7 +1195,7 @@ export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceM
   const unreadable = [];
   const store = { read: 0, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 };
   if (sessionFile) {
-    files.push({ harness: "session", root: path.dirname(path.resolve(sessionFile)), file: path.resolve(sessionFile) });
+    files.push({ harness: harnessOfPath(sessionFile), root: path.dirname(path.resolve(sessionFile)), file: path.resolve(sessionFile) });
   } else {
     for (const { harness, root } of roots) {
       if (harnessFilter && harness !== harnessFilter) {
@@ -1234,7 +1264,7 @@ export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceM
 
 export function buildReport(read, { sessionFile } = {}) {
   const report = aggregate(read.sessions);
-  report.roots = sessionFile ? [{ harness: "session", root: path.dirname(path.resolve(sessionFile)), files: 1, missing: false }] : read.roots;
+  report.roots = sessionFile ? [{ harness: harnessOfPath(sessionFile), root: path.dirname(path.resolve(sessionFile)), files: 1, missing: false }] : read.roots;
   report.gaps.unreadable = read.unreadable;
   report.store = read.store;
   return report;
