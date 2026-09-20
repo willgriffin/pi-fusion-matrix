@@ -557,9 +557,10 @@ position outright. A finding's `line` keeps an explicit `null`.
 
 `path` is the reviewer's claim, not a fact — the cheap rung names files it has only read as text — so
 `session-report.mjs` checks each recorded path against the session's working directory and prints
-`[path not found]` beside the ones that do not exist *as of that run of the report*. An absolute path is marked
-`[path outside the session]` rather than resolved: resolving one would let a hallucinated `/etc/passwd` read as
-found on any machine that has one.
+`[path not found]` beside the ones that do not exist *as of that run of the report*. A path that does not resolve
+inside the session's tree is marked `[path outside the session]` rather than resolved: resolving one would let a
+hallucinated `/etc/passwd` read as found on any machine that has one, and `../../outside/secret.ts` do the same
+while looking innocent.
 
 `execute: false` on these rungs is not decoration: with an execute face, a tool-bearing turn to a review rung
 would *proxy to its writing seat*, so the panel would never run and the review would be one model's opinion.

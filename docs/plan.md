@@ -1302,8 +1302,9 @@ A finding's `path` is the reviewer's claim, not a fact: the cheap rung names fil
 text, and a run whose findings all name a path that does not exist is a hallucination the *report* has to be able
 to show. `session-report.mjs` checks each recorded path against the session's working directory and prints
 `[path not found]` beside it — as of *that run of the report*, so a file a later commit deleted is not presented
-as a hallucination — and marks an absolute path `[path outside the session]` rather than resolving it, since
-resolving one would let a hallucinated `/etc/passwd` read as found on any machine that has one.
+as a hallucination — and marks a path that does not resolve inside that tree `[path outside the session]` rather
+than resolving it, since resolving one would let a hallucinated `/etc/passwd` read as found on any machine that has
+one, and a relative `../../etc/passwd` do the same while looking innocent.
 
 Two limits, stated rather than discovered later: the *class decision* sees the packet truncated to the decision
 backend's state budget (its head and tail — the panel gets it whole), and a review rung has no tools, so a packet
@@ -1680,7 +1681,9 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     a second bad answer not erasing the first; and a JSON answer that claims no disposition being left unjudged.
     Six are mutation-proven — the seat deadline disabled, the claim discriminator removed, `supersededBy`
     dropped, the chain collapsed to a slot, the path guard bypassed, and the schema check removed — and each red
-    names the check it fails. The five load errors are the `config` rules: `execute: false` with `proxy`,
+    names the check it fails. A seventh covers the path guard's escape case: with containment dropped,
+    `../outside/secret.ts` is reported as `[path not found]` instead of `[path outside the session]`, which is how
+    an automated reviewer found it. The five load errors are the `config` rules: `execute: false` with `proxy`,
     `review` without `execute: false`, `review` without `route`, a review route target that is an executor, and a
     JSON-writing seat without `execute: false`. `node scripts/session-report.mjs --check` passes 87/87, six of
     them reading a disposition out of a session: its verdict, the persona that stands, its severities, and its

@@ -505,12 +505,15 @@ export function aggregate(sessions) {
           let found;
           if (where !== undefined) {
             review.paths += 1;
-            // The claim has to be *inside* the session's tree to be checkable at all. Resolving an absolute path
-            // would let a hallucinated `/etc/passwd` report as found simply because this machine has one — the
-            // laundering this check exists to prevent — so an absolute path is marked unchecked, not verified.
-            if (path.isAbsolute(where)) { review.pathsOutside += 1; }
+            // The claim has to *resolve inside* the session's tree to be checkable at all. An absolute path never
+            // is, and a relative one can leave the tree while looking innocent — `../../etc/passwd` joins to a
+            // real file outside the session, and reporting that as found is the same laundering the absolute case
+            // is refused for. Both are counted as unchecked; neither is resolved against the real filesystem.
+            const root = path.resolve(session.cwd ?? ".");
+            const within = path.resolve(root, where);
+            if (within !== root && !within.startsWith(root + path.sep)) { review.pathsOutside += 1; }
             else {
-              found = fs.existsSync(path.join(session.cwd ?? ".", where));
+              found = fs.existsSync(within);
               if (!found) review.pathsMissing += 1;
             }
           }
@@ -1267,7 +1270,10 @@ function check() {
       details: { fusion: "review-single", seats: [], seatErrors: [], usage: usage(300, 40, 0.002),
         dispositionBy: "review-synth", verdict: "clean", severityCounts: {},
         malformedAnswers: [{ persona: "judge", reason: "the answer was not a JSON object", supersededBy: "review-synth" }],
-        findings: [{ severity: "minor", path: "/etc/passwd", line: null, criterion: "c", claim: "a path outside the tree" }] } } },
+        findings: [
+          { severity: "minor", path: "/etc/passwd", line: null, criterion: "c", claim: "a path outside the tree" },
+          { severity: "major", path: "../outside/secret.ts", line: 3, criterion: "c", claim: "a relative path that leaves the tree" },
+        ] } } },
   ], { file: "review.jsonl", harness: "pi" });
   const reviewReport = buildReport({ sessions: [reviewSession], roots: [], unreadable: [] });
   const reviewRow = reviewReport.deliberation.get("pi/review-check");
@@ -1288,14 +1294,15 @@ function check() {
     reviewReport.deliberation.get("pi/review-quick")?.review.malformed === 1 && /malformed 1 ×: the answer was not a JSON object/.test(reviewText)
       && reviewRow?.review.reasons.size === 0,
     reviewText.split("\n").find((l) => l.includes("malformed 1 ×")) ?? "no malformed line");
-  // An absolute path is outside the session's tree by construction, so it is reported as *unchecked*: resolving
-  // it would let a hallucinated `/etc/passwd` read as found on any machine that has one, which is the laundering
-  // the check exists to prevent.
-  ok("an absolute finding path is marked unchecked rather than resolved",
+  // An absolute path never resolves inside the session's tree, and a relative one can leave it while looking
+// innocent: `../outside/secret.ts` joins to a real file outside. Both are reported *unchecked*, because resolving
+// either would let a hallucinated path read as found — the laundering the check exists to prevent.
+  ok("an absolute or escaping finding path is marked unchecked rather than resolved",
     /\[path outside the session\] minor \/etc\/passwd/.test(reviewText)
-      && reviewReport.deliberation.get("pi/review-single")?.review.pathsOutside === 1
+      && /\[path outside the session\] major \.\.\/outside\/secret\.ts/.test(reviewText)
+      && reviewReport.deliberation.get("pi/review-single")?.review.pathsOutside === 2
       && reviewReport.deliberation.get("pi/review-single")?.review.pathsMissing === 0,
-    reviewText.split("\n").find((l) => l.includes("passwd")) ?? "no absolute-path line");
+    reviewText.split("\n").filter((l) => l.includes("passwd") || l.includes("secret")).join(" // "));
   ok("a superseded malformed answer is named as superseded, not hidden",
     /malformed 1 × \(1 superseded by a later answer\)/.test(reviewText)
       && reviewReport.deliberation.get("pi/review-single")?.review.superseded === 1
