@@ -10,22 +10,28 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createDecide, truncateState } from "../extensions/pi-fusion-matrix/decide.js";
 
+/**
+ * The default backend is **loopback**, and that is the point: a loopback backend needs no credential, so the
+ * behavioural tests exercise their own path in any environment. A fixture pointing at a remote url makes the
+ * whole file depend on a key being exported on the machine running it — a test that passes for a reason nobody
+ * wrote down, and fails the moment it runs somewhere clean. The two credential tests name a remote backend.
+ */
 const backendConfig = (over = {}) => ({
   decide: { defaultBackend: "typesafe" },
   backends: {
     typesafe: {
       kind: "typesafe",
-      url: "https://backend.test/v1/systemone",
+      url: "http://127.0.0.1:8793/v1/systemone",
       apiKeyEnv: "TYPESAFE_API_KEY",
       model: "jev-1.13.0",
       timeoutMs: 5000,
       ...over,
     },
-    local: {
+    remote: {
       kind: "typesafe",
-      url: "http://127.0.0.1:8793/v1/systemone",
+      url: "https://backend.test/v1/systemone",
       apiKeyEnv: "TYPESAFE_API_KEY",
-      model: "jev-stub",
+      model: "jev-1.13.0",
       timeoutMs: 5000,
     },
     semif: { kind: "semif", url: "http://127.0.0.1:8791/score", model: "qwen3.5-4b", timeoutMs: 5000 },
@@ -67,13 +73,14 @@ test("the credential is read through the backend's own `apiKeyEnv`, and only whe
   try {
     let headers;
     const decide = createDecide({
+      // The remote backend: the one the credential rule is about.
       config: backendConfig(),
       fetchImpl: async (_url, init) => {
         headers = init.headers;
         return ok(answers)();
       },
     });
-    await decide(spec, { prompt: "x" });
+    await decide({ ...spec, backend: "remote" }, { prompt: "x" });
     assert.equal(headers.authorization, "Bearer fixture-value-not-a-real-key");
   } finally {
     if (previous === undefined) delete process.env.TYPESAFE_API_KEY;
@@ -93,7 +100,7 @@ test("a non-loopback backend with no key is refused before any request is made",
         return ok(answers)();
       },
     });
-    await assert.rejects(() => decide(spec, { prompt: "x" }), /needs env var TYPESAFE_API_KEY/);
+    await assert.rejects(() => decide({ ...spec, backend: "remote" }, { prompt: "x" }), /needs env var TYPESAFE_API_KEY/);
     assert.equal(called, false, "a backend that cannot be authenticated is not called");
   } finally {
     if (previous !== undefined) process.env.TYPESAFE_API_KEY = previous;
@@ -112,8 +119,8 @@ test("a local backend needs no credential, and gets no Authorization header", as
         return ok(answers)();
       },
     });
-    // `loopback` is the local backend, whose url is 127.0.0.1 — the validator's own rule, honoured here.
-    await decide({ ...spec, backend: "local" }, { prompt: "x" });
+    // The default backend is loopback: the validator's own rule, honoured here — no key, no Authorization header.
+    await decide(spec, { prompt: "x" });
     assert.equal("authorization" in headers, false, "a stub is never handed someone else's key");
   } finally {
     if (previous !== undefined) process.env.TYPESAFE_API_KEY = previous;
@@ -159,7 +166,10 @@ test("a refusal to connect is retried once and then named with the url", async (
       throw new Error("fetch failed");
     },
   });
-  await assert.rejects(() => decide(spec, { prompt: "x" }), /decision backend https:\/\/backend\.test\/v1\/systemone failed: fetch failed/);
+  await assert.rejects(
+    () => decide(spec, { prompt: "x" }),
+    /decision backend http:\/\/127\.0\.0\.1:8793\/v1\/systemone failed: fetch failed/,
+  );
   assert.equal(calls, 2);
 });
 
