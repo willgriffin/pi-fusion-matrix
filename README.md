@@ -533,10 +533,14 @@ goes in, and a *disposition* — a verdict and findings with severities — come
 by blast radius, and each rung is a deliberating rung that can never be a session model:
 
 ```bash
-omp -p "@/tmp/packet.md" --model fusion-matrix/smrt-review      # routed: cheap, committee, or deep
-omp -p "@/tmp/packet.md" --model fusion-matrix/review-check     # the committee, unrouted
-omp -p "@/tmp/packet.md" --model fusion-matrix/review-quick     # one adversarial seat, then the disposition
+omp -p "@/tmp/packet.md" --model fusion-matrix/smrt-review --no-tools   # routed: cheap, committee, or deep
+omp -p "@/tmp/packet.md" --model fusion-matrix/review-check --no-tools  # the committee, unrouted
+omp -p "@/tmp/packet.md" --model fusion-matrix/review-quick --no-tools  # one adversarial seat, then the disposition
 ```
+
+`--no-tools` is not required — an `execute: false` rung deliberates with tools present, which is what
+`execute: false` is for — but a review packet carries the diff as text, and leaving the tool schemas out of the
+request makes every seat cheaper.
 
 The last seat of a review rung answers in JSON, and the run records it: `details.dispositionBy` (which persona's
 answer stands), `details.verdict`, `details.findings` (`severity` from `blocking | major | minor | editorial`,
