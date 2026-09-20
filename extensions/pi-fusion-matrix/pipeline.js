@@ -396,7 +396,7 @@ async function runSeatInner({
       const seat = await seatRequest(registry, resolved);
       if (!seat.ok) {
         const to = nextRouteLabel(candidateIndex, resolvedList, resolvedIndex);
-        attempts.push({ alias: resolved.alias, seat: label(resolved), reason: seat.reason, detail: seat.detail });
+        attempts.push({ alias: resolved.alias, seat: label(resolved), provider: resolved.provider, model: resolved.model, reason: seat.reason, detail: seat.detail });
         emit.substitution({ seat: personaName, from: label(resolved), to, reason: seat.reason, detail: seat.detail });
         substitutions.push({ seat: personaName, from: label(resolved), to, reason: seat.reason });
         continue;
@@ -472,7 +472,7 @@ async function runSeatInner({
         const reason = failed.timedOut ? "timeout"
           : signal?.aborted ? "aborted"
             : QUOTA.test(text) ? "quota" : CREDENTIAL.test(text) ? "credential" : MISSING_MODEL.test(text) ? "missing model" : "transient";
-        attempts.push({ alias: resolved.alias, seat: label(resolved), reason, detail: text, durationMs: failed.durationMs });
+        attempts.push({ alias: resolved.alias, seat: label(resolved), provider: resolved.provider, model: resolved.model, reason, detail: text, durationMs: failed.durationMs });
         return { text, reason };
       };
 
