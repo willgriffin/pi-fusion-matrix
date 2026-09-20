@@ -70,7 +70,7 @@ async function postJson(fetchImpl, url, body, { apiKey, timeoutMs, signal, log }
         await new Promise((resolve) => setTimeout(resolve, 2000));
         continue;
       }
-      throw new Error(`decision backend ${url} failed: ${detail}`);
+      throw new Error(`decision backend ${url} failed: ${detail}`, { cause: error });
     }
     if (response.status === 429 && attempt === 1) {
       const wait = retryAfterMs(response) ?? 2000;

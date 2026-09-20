@@ -100,7 +100,7 @@ function readJson(file) {
     return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch (error) {
     if (error?.code === "ENOENT") return null;
-    throw new Error(`${file}: ${error.message}`);
+    throw new Error(`${file}: ${error.message}`, { cause: error });
   }
 }
 

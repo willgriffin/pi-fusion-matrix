@@ -15,7 +15,8 @@
     "test": "node --test",
     "lint:commits": "node scripts/lint-commits.mjs",
     "format": "prettier --write extensions scripts test",
-    "format:check": "prettier --check extensions scripts test"
+    "format:check": "prettier --check extensions scripts test",
+    "lint": "eslint ."
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -29,6 +30,9 @@
   "devDependencies": {
     "@commitlint/cli": "^21.2.3",
     "@commitlint/config-conventional": "^21.2.3",
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.11.0",
+    "globals": "^17.12.0",
     "prettier": "^3.9.8"
   }
 }

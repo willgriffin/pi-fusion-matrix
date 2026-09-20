@@ -211,18 +211,7 @@ check(
 // 5. verify: a low noul warns, a gate reports its exit, neither blocks
 await setMode("ambiguous");
 const warnings = [];
-run = await runPipeline({
-  config,
-  sources,
-  fusion: { ...config.fusions["review-check"], id: "review-check" },
-  prompt: "x",
-  callModel,
-  decide,
-  emit: silent,
-  registry,
-});
 const verification = await verifyRun({
-  config,
   fusion: config.fusions["review-check"],
   vars: { prompt: "x", synthesis: "an answer" },
   decide,
@@ -457,7 +446,7 @@ check(
 
 // The disposition is data: severities counted, verdict as stated, findings recorded — and a malformed one is
 // recorded as malformed rather than wrapped into something that reads like a clean review.
-const dispositionModel = (payload) => async (args) => ({
+const dispositionModel = (payload) => async (_args) => ({
   text: typeof payload === "string" ? payload : JSON.stringify(payload),
   usage: {
     input: 1,
@@ -824,7 +813,7 @@ check(
 
 const brokenSeen = [];
 const brokenPeer = {
-  streamSimple: (model, context, options) => {
+  streamSimple: (model, _context, _options) => {
     brokenSeen.push(model.provider);
     const partial = {
       role: "assistant",
@@ -866,7 +855,7 @@ check(
 // 14. the seat path keeps its side of the same rule: a level the harness enforces is retried once without
 // one, reported by a status line, and the seat still answers.
 const seatLevels = [];
-const refusingSeatCallModel = async ({ persona, reasoning }) => {
+const refusingSeatCallModel = async ({ persona: _persona, reasoning }) => {
   seatLevels.push(reasoning ?? null);
   const usage = {
     input: 1,
@@ -1040,7 +1029,7 @@ check(
 );
 // A call that fails spent time too, and that time is the attempt's: the seat's clock covers the seat.
 let failedCallSaw = 0;
-const failingCallModel = async (args) => {
+const failingCallModel = async (_args) => {
   failedCallSaw += 1;
   await new Promise((resolve) => setTimeout(resolve, 5));
   return {
@@ -1254,7 +1243,7 @@ check(
 // A seat that fails twice — once on a temperature override, then again on the retry — is two attempts, each
 // with its own time. Keeping only the last call's figure understates what the route spent.
 let retryCalls = 0;
-const temperatureThenFail = async (args) => {
+const temperatureThenFail = async (_args) => {
   retryCalls += 1;
   await new Promise((resolve) => setTimeout(resolve, 4));
   return retryCalls === 1

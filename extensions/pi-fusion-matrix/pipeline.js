@@ -467,7 +467,7 @@ async function runSeatInner({
       // JSON before any later stage sees it — so `{{judge}}` is data, not a fenced blob.
       const seatPersona =
         persona.output === "json" ? { ...persona, prompt: `${persona.prompt ?? ""}\n\n${JSON_INSTRUCTION}`.trim() } : persona;
-      let temperature = temperatureFor(persona, resolved.model, undefined);
+      const temperature = temperatureFor(persona, resolved.model, undefined);
       let emitted = "";
       // A thrown transport error is an attempt like any other: classified, retried once when transient,
       // then a substitution. Only text already streamed to the caller is sacred — if any went out, the
