@@ -602,7 +602,15 @@ node scripts/session-report.mjs --cwd my-project --since 2026-09-19
 node scripts/session-report.mjs --verbose                # one line per record, with its timestamp
 node scripts/session-report.mjs --json                   # the same numbers, for a spreadsheet
 node scripts/session-report.mjs --harness pi             # one harness's store (the other is named, not omitted)
+node scripts/session-report.mjs --no-plans               # skip omp's plan ledger (read-only when it is read)
 ```
+
+The report also opens omp's own plan ledger read-only (`~/.omp/agent/agent.db`) and prints the quota windows
+it recorded — used fraction, status, reset, and the **age of each reading**, with stale ones marked, and
+`no reset stated` where the provider reported none. It then joins those windows to our own `quota` refusals: a
+refusal is only called explained by a reading taken *before* it whose reset has not passed, so a window read
+after the fact can never be turned into a cause. `--plans <path>` points it at another ledger, `--no-plans`
+skips it, and a missing ledger, a missing `node:sqlite` or an unknown schema is stated rather than shown empty.
 
 The one thing a run cannot know about itself is whether the work landed, so that is a label rather than an
 inference: `/matrix-label` writes a `matrix-label` message, and the report prints an `outcomes` section —

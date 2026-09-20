@@ -1089,6 +1089,18 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
   knows which harness a file came from, derived from where the file lives, so `--session <file>` does not lose
   the device protocol: the same omp session reports its `matrix` runs as such whether it was found through the
   store root or handed over by path;
+- **it reads the harness's plan ledger, and says what it read.** omp keeps every quota reading in its own
+  `agent.db` (`usage_history`: provider, limit, label, used fraction, status, resets, recorded at); the reader
+  opens it **read-only** with `node:sqlite`, takes the latest reading per `(provider, limit)`, and prints the
+  windows with **the age of each reading** — a stale row is not the current state, and one older than six hours
+  is marked. `resets_at = 0` (the provider stated none) prints as "no reset stated", never as 1970. The join to
+  our own runs is deliberately narrow: a `quota` refusal is only *explained* by a reading taken **before** it
+  whose reset has not passed, so a window read afterwards cannot turn a coincidence into a cause; refusals no
+  reading covers are counted separately, as are providers we used that the ledger never recorded. Every absence
+  is named — no ledger, no `node:sqlite`, a schema this build does not know, `--no-plans` — because "no windows"
+  and "no readings" mean different things to a reader judging whether a failure was the plan or the model.
+  (*Persisting* these facts — `plan`, `plan_window`, `quota_event`, the `list_equivalent` costing basis — belongs
+  to the metrics store, #14; this is the reader's view of them.)
 - **a run's tokens are counted once.** `details.usage` already sums the run's seats — verified against the
   store, where a one-seat run's `details.usage.input` equals that seat's — so the seats are not added again.
   They *were*, which doubled every deliberation's tokens and cost from the reader's first version;
@@ -1563,7 +1575,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     prints its snippet while leaving every tracked file byte-identical (asserted by hash).
 
 22. **The run record survives, and the report reads it** — `node scripts/session-report.mjs --check`
-    passes 81/81 (measured; seven cases are permission-dependent and print as skipped under root), each check having been shown
+    passes 86/86 (measured; seven cases are permission-dependent and print as skipped under root), each check having been shown
     to fail under a temporary mutation of the reader, then in a scratch `cwd` (Step 8's prerequisites):
     `node scripts/session-report.mjs --cwd <scratch> --json` on the store *before* a `/matrix` run shows
     zero deliberation records, and after `/matrix quick "…"` in **both** pi and omp it shows one, with the
@@ -1667,6 +1679,19 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     tools table and `2 call(s) made through omp's xd:// device` in the accounting — where before the fix the
     same store reported no deliberation records at all. Each must fail when the unwrap, the attribution, the
     result naming, the unwrapped count or the single-count rule is mutated.
+
+29. **Plan windows, and the join to our refusals** — `node scripts/session-report.mjs --check` passes 86/86, the
+    new ones covering: the ledger read read-only with the *latest* reading standing for each window; a reset the
+    provider never stated printed as "no reset stated" and never as 1970; a missing ledger named as an absence;
+    and the join counting a refusal as explained only by a reading that covers its moment (exhausted versus ok),
+    with refusals no reading covers counted separately and a provider we used with no window named. Live, on the
+    implementing machine: the section prints `~/.omp/agent/agent.db · 638 reading(s) · 14 window(s)`, marking
+    `kimi-code`'s August readings stale, showing `opencode-go Weekly limit exhausted 100% used` and
+    `zai ZAI Weekly Token Quota exhausted`, and `no reset stated` for the windows whose provider reports none.
+    **No live quota refusal exists in the fusion store yet**, so the join's live evidence is pending its first
+    real refusal — the fixtures above verify it until then, and the report says "nothing to join" rather than
+    implying otherwise. Each of those must fail when the latest-reading rule, the reset rendering, the
+    time-coverage rule or the named absence is mutated.
 
 30. **The review route** — `npm test` passes 7/7 unit tests (`test/seat-deadline.test.mjs`,
     `test/disposition.test.mjs`: the seat deadline with its advance and its abort cases, and the disposition
