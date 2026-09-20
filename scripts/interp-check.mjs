@@ -727,6 +727,21 @@ check("config: every proxy rule is a named load error",
   ruleResults.every(Boolean) && errorsFor({}).length === 0,
   proxyRules.filter((_, i) => !ruleResults[i]).map(([name]) => name).join(", ") || `${proxyRules.length} rules, packaged config clean`);
 
+// The review route's rules, each one a silent degradation if it were allowed to load: a reviewer pinned to a
+// rung with an execute face proxies to its writer and the panel never runs.
+const reviewRules = [
+  ["execute: false with a proxy block", { fusions: { best: { execute: false, proxy: { alias: "glm-flash" } } } }, /proxy and execute: false cannot both be declared/],
+  // `best` is an ordinary work rung (it has an executor), so these two patches exercise the rule rather than
+  // merging into a rung that already declares `execute: false`.
+  ["review without execute: false", { fusions: { best: { review: true } } }, /review requires execute: false/],
+  ["review without a route", { fusions: { best: { review: true, execute: false } } }, /review requires route/],
+  ["a review route to an executor", { fusions: { "smrt-review": { route: { criteria: { mechanical: { description: "x", then: "quick" }, high: { description: "y" } } } } } }, /declares no execute: false/],
+];
+const reviewResults = reviewRules.map(([, patch, re]) => re.test(errorsFor(patch).join("\n")));
+check("config: every review-route rule is a named load error",
+  reviewResults.every(Boolean),
+  reviewRules.filter((_, i) => !reviewResults[i]).map(([name]) => name).join(", ") || `${reviewRules.length} rules`);
+
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 process.exit(failed.length ? 1 : 0);
