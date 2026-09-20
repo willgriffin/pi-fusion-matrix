@@ -379,7 +379,7 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
   for (const resolved of resolveCandidates(config, executor.route)) {
     const seat = await seatRequest(registry, resolved);
     if (!seat.ok) {
-      attempts.push({ alias: resolved.alias, seat: label(resolved), reason: seat.reason, detail: seat.detail });
+      attempts.push({ alias: resolved.alias, seat: label(resolved), provider: resolved.provider, model: resolved.model, reason: seat.reason, detail: seat.detail });
       continue;
     }
 
@@ -437,7 +437,7 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
       // `usage` only when this route spent something before it failed: an attempt that never reached a model
       // has no tokens to report, and writing zeros there would read as "it cost nothing" rather than "nothing
       // was spent".
-      attempts.push({ alias: resolved.alias, seat: label(resolved), reason: classifyFailure(detail), detail, ...(lastUsage ? { usage: lastUsage } : {}) });
+      attempts.push({ alias: resolved.alias, seat: label(resolved), provider: resolved.provider, model: resolved.model, reason: classifyFailure(detail), detail, ...(lastUsage ? { usage: lastUsage } : {}) });
     };
 
     // The usage of the last partial the caller saw: a route that streamed then failed spent those tokens, and

@@ -76,7 +76,7 @@ const PLAN_LEDGER = path.join(os.homedir(), ".omp", "agent", "agent.db");
  * was the plan or the model.
  */
 export async function readPlanWindows({ dbPath = PLAN_LEDGER, now = Date.now() } = {}) {
-  const result = { path: dbPath, available: false, reason: undefined, readings: 0, windows: [], readAt: new Date(now).toISOString() };
+  const result = { path: dbPath, available: false, reason: undefined, readings: 0, windows: [], history: [], readAt: new Date(now).toISOString() };
   let sqlite;
   try {
     sqlite = await import("node:sqlite");
@@ -97,6 +97,20 @@ export async function readPlanWindows({ dbPath = PLAN_LEDGER, now = Date.now() }
   }
   try {
     result.readings = db.prepare("SELECT count(*) AS n FROM usage_history").get()?.n ?? 0;
+    // Every reading, for the join: a refusal is only explained by what the ledger read *before* it, so the
+    // latest row per window is the display's answer (`windows`) and the history is the join's. Selecting only
+    // the latest would let a reading taken after a refusal shadow the one that actually covered it.
+    const history = db.prepare(`SELECT provider, limit_id, label, window_label, used_fraction, status, resets_at, recorded_at
+      FROM usage_history`).all().map((row) => ({
+      provider: String(row.provider ?? "?"),
+      limitId: String(row.limit_id ?? "?"),
+      label: String(row.label ?? row.window_label ?? row.limit_id ?? "?"),
+      usedFraction: typeof row.used_fraction === "number" ? row.used_fraction : undefined,
+      status: String(row.status ?? "?"),
+      resetsAt: Number(row.resets_at ?? 0) > 0 ? Number(row.resets_at) : 0,
+      recordedAt: Number(row.recorded_at ?? 0) > 0 ? Number(row.recorded_at) : 0,
+    }));
+    result.history = history;
     const rows = db.prepare(`SELECT provider, limit_id, label, window_label, used_fraction, status, resets_at, recorded_at
       FROM usage_history WHERE id IN (SELECT max(id) FROM usage_history GROUP BY provider, limit_id)`).all();
     // The latest reading per window. `resets_at` is 0 when the provider stated none, which is not 1970.
@@ -395,7 +409,7 @@ export function aggregate(sessions) {
     turns: new Map(),
     labels: new Map(),
     unlabelled: { sessions: 0, runs: 0, fusionTurns: 0, sums: emptySums() },
-    providers: new Set(),
+    providers: new Map(),
     quotaRefusals: [],
     proxy: new Map(),
     deliberation: new Map(),
@@ -408,6 +422,17 @@ export function aggregate(sessions) {
   const turn = (map, key, seed) => {
     if (!map.has(key)) map.set(key, { key, turns: 0, sums: emptySums(), timed: 0, missingDuration: 0, durations: [], errors: 0, toolCalls: 0, toolErrors: 0, ...seed });
     return map.get(key);
+  };
+
+  /**
+   * A provider this store actually ran, kept per harness. Only omp keeps a plan ledger, so "a provider with no
+   * window" is a fact about omp's ledger and a pi provider would be reported as an absence it cannot be: a pi
+   * session's provider is not missing from omp's ledger, it was never meant to be in it.
+   */
+  const usedProvider = (harness, provider) => {
+    if (typeof provider !== "string") return;
+    if (!report.providers.has(harness)) report.providers.set(harness, new Set());
+    report.providers.get(harness).add(provider);
   };
 
   for (const session of sessions) {
@@ -430,7 +455,7 @@ export function aggregate(sessions) {
       // A fusion turn's `provider` is this extension's own api id, not a provider a plan ledger could ever
       // record: adding it made the join report `fusion-matrix` as "a provider we used with no window", which is
       // a structural fact dressed up as an absence.
-      if (t.provider && t.api !== FUSION_API) report.providers.add(t.provider);
+      if (t.provider && t.api !== FUSION_API) usedProvider(session.harness, t.provider);
       // `t.usage` is always an object: `extractSession` normalises a message the harness stored without one,
       // so a turn priced by nobody still reaches the counter instead of being reported as neither priced nor
       // unpriced (measured 2026-09-19 on a streamed fusion turn, which stores no `usage` at all).
@@ -514,7 +539,7 @@ export function aggregate(sessions) {
           dropped: 0, failures: 0, sums: emptySums(), attemptsSpent: emptySums() });
         record.turns += 1;
         if (typeof proxied.alias === "string") record.aliases.set(proxied.alias, (record.aliases.get(proxied.alias) ?? 0) + 1);
-        if (typeof proxied.provider === "string") report.providers.add(proxied.provider);
+        if (typeof proxied.provider === "string") usedProvider(session.harness, proxied.provider);
         // `thinking: null` is a turn that ran at no level; an absent key is a record that did not say, and
         // reading the second as the first would overstate the drops.
         const recorded = Object.hasOwn(proxied, "thinking");
@@ -523,8 +548,13 @@ export function aggregate(sessions) {
         const attempts = Array.isArray(proxied.attempts) ? proxied.attempts : [];
         for (const attempt of attempts) {
           record.attempts.set(attempt?.reason ?? "?", (record.attempts.get(attempt?.reason ?? "?") ?? 0) + 1);
-          // A refusal is a *moment*: kept with its time so the plan windows can be asked what they read then.
-          if (attempt?.reason === "quota") report.quotaRefusals.push({ at: Date.parse(entry.at ?? ""), provider: proxied.provider ?? "unknown", fusion: entry.fusion, carrier: "proxy" });
+          // A refusal is a *moment*, kept with its time so the plan windows can be asked what they read then —
+          // and with the provider of *this attempt*, not of the record: when a route is refused for quota and
+          // the next one answers, the record's provider is the survivor, so attributing every attempt to it
+          // would ask the ledger about the wrong plan.
+          if (attempt?.reason === "quota") report.quotaRefusals.push({
+            at: Date.parse(entry.at ?? ""), provider: attempt.provider ?? proxied.provider ?? "unknown",
+            harness: session.harness, fusion: entry.fusion, carrier: "proxy" });
           // The tokens a route burned before it failed: only present when the target actually spent them.
           if (attempt?.usage) addUsage(record.attemptsSpent, attempt.usage);
         }
@@ -595,14 +625,16 @@ export function aggregate(sessions) {
       const seatErrors = Array.isArray(details.seatErrors) ? details.seatErrors : [];
       for (const seat of (Array.isArray(details.seats) ? details.seats : [])) {
         for (const attempt of (Array.isArray(seat?.attempts) ? seat.attempts : [])) {
-          // A seat whose candidates all failed before resolution has no provider: named "unknown" rather than
-          // printing `undefined` as if it were one.
-          if (attempt?.reason === "quota") report.quotaRefusals.push({ at: Date.parse(entry.at ?? ""), provider: seat.provider ?? "unknown", fusion: entry.fusion, carrier: "deliberation" });
+          // The attempt's own provider, for the same reason as the proxy path: the seat's provider is the one
+          // that answered, and a refusal belongs to the route that was refused.
+          if (attempt?.reason === "quota") report.quotaRefusals.push({
+            at: Date.parse(entry.at ?? ""), provider: attempt.provider ?? seat.provider ?? "unknown",
+            harness: session.harness, fusion: entry.fusion, carrier: "deliberation" });
         }
       }
       record.seats += seats.length;
       for (const seat of seats) {
-        if (typeof seat?.provider === "string") report.providers.add(seat.provider);
+        usedProvider(session.harness, seat?.provider);
         if (seat?.degraded) record.degradedSeats += 1;
         // Deliberately **not** added to `record.sums`: `details.usage` is already the sum of the seats
         // (verified against the store — a one-seat run's `details.usage.input` equals that seat's), so adding
@@ -674,23 +706,47 @@ function renderTurns(title, records, { limit = Infinity } = {}) {
 export function joinPlanWindows(report, plans) {
   const refusals = report.quotaRefusals ?? [];
   const byProvider = new Map();
-  // Providers the store actually ran, collected where they are known — a turn row's key carries a *fusion* id
-  // for a fusion turn, so scraping it reported `fusion:quick` as a provider we had no window for.
-  const usedProviders = report.providers ?? new Set();
-  for (const record of refusals) {
-    if (!byProvider.has(record.provider)) byProvider.set(record.provider, { provider: record.provider, refusals: 0, exhausted: 0, ok: 0, uncovered: 0 });
+  // Providers the store actually ran, collected where they are known and *per harness* — a turn row's key
+  // carries a *fusion* id for a fusion turn, so scraping it reported `fusion:quick` as a provider we had no
+  // window for, and a pi provider is absent from omp's ledger by construction rather than by omission.
+  const usedProviders = report.providers ?? new Map();
+  // Only omp keeps this ledger, so only a refusal from an omp session can be joined to it. A pi session's
+  // refusal is not "uncovered" — there is nothing to cover it with, and reporting it as unexplained would
+  // misstate the reason.
+  const joinable = refusals.filter((record) => record.harness === "omp");
+  const withoutLedger = refusals.filter((record) => record.harness !== "omp");
+  // The latest reading *before* the refusal, within each window the provider has: a reading taken afterwards
+  // says nothing about what the provider thought at the time, and letting it stand for the window would report
+  // a covered refusal as uncovered and vice versa.
+  const readingAt = (provider, limitId, at) => (plans.history ?? plans.windows ?? [])
+    .filter((window) => window.provider === provider && window.limitId === limitId && windowCovers(window, at))
+    .reduce((best, window) => (best === undefined || window.recordedAt > best.recordedAt ? window : best), undefined);
+  const windowsOf = (provider) => [...new Set((plans.history ?? plans.windows ?? []).filter((window) => window.provider === provider).map((window) => window.limitId))];
+  for (const record of joinable) {
+    if (!byProvider.has(record.provider)) byProvider.set(record.provider, { provider: record.provider, refusals: 0, exhausted: 0, ok: 0, uncovered: 0, undated: 0, byStatus: new Map() });
     const row = byProvider.get(record.provider);
     row.refusals += 1;
-    const covering = (plans.windows ?? []).filter((window) => window.provider === record.provider && windowCovers(window, record.at));
+    // A refusal with no placeable time cannot be joined to anything, and folding it into "uncovered" would
+    // report a record's missing clock as the ledger's failure to cover the moment.
+    if (!Number.isFinite(record.at)) { row.undated += 1; continue; }
+    const covering = windowsOf(record.provider).map((limitId) => readingAt(record.provider, limitId, record.at)).filter(Boolean);
+    if (covering.length === 0) { row.uncovered += 1; continue; }
+    // Every covering reading is kept by the status it actually had. Collapsing `warning` into `ok` would report
+    // a refusal as happening while a window read fine, which is a different claim from the one the ledger makes.
+    for (const window of covering) row.byStatus.set(window.status, (row.byStatus.get(window.status) ?? 0) + 1);
     if (covering.some((window) => window.status === "exhausted")) row.exhausted += 1;
-    else if (covering.length > 0) row.ok += 1;
-    else row.uncovered += 1;
+    if (covering.some((window) => window.status === "ok")) row.ok += 1;
   }
   const windowed = new Set((plans.windows ?? []).map((window) => window.provider));
+  // Only the providers an *omp* session used can be missing from omp's ledger.
+  const ompProviders = usedProviders.get?.("omp") ?? new Set();
   return {
     total: refusals.length,
     byProvider: [...byProvider.values()],
-    uncoveredProviders: plans.available ? [...usedProviders].filter((provider) => !windowed.has(provider)).sort() : [],
+    withoutLedger: withoutLedger.length,
+    // Named whether or not any refusal was recorded: a provider absent from the ledger is a fact about the
+    // ledger, and printing only "nothing to join" would present that absence as completeness.
+    uncoveredProviders: plans.available ? [...ompProviders].filter((provider) => !windowed.has(provider)).sort() : [],
   };
 }
 
@@ -711,13 +767,23 @@ function renderPlanWindows(report) {
   lines.push("  what the windows read when our runs were refused");
   if (!join || join.total === 0) {
     lines.push("    no quota refusal recorded in these sessions — nothing to join");
+  } else if (join.total === join.withoutLedger) {
+    // Saying "nothing to join" over refusals that *did* happen would read as no refusals at all.
+    lines.push(`    all ${join.total} refusal(s) come from sessions with no plan ledger (only omp records one)`);
   } else {
     for (const row of [...join.byProvider].sort((a, b) => b.refusals - a.refusals)) {
       const covered = row.exhausted + row.ok;
-      lines.push(`    ${row.provider.padEnd(16)} ${row.refusals} refusal(s) · ${row.exhausted} while a window read exhausted · ${row.ok} while one read ok · ${row.uncovered} with no reading covering that moment${covered === 0 ? "  ← the ledger cannot explain these" : ""}`);
+      // The statuses the ledger actually reported, not a bucket: a refusal covered only by a `warning` reading
+      // did not happen while the window read fine, and collapsing the two would say that it did.
+      const statuses = [...(row.byStatus ?? [])].map(([status, count]) => `${count} read ${status}`).join(", ");
+      const undated = row.undated > 0 ? ` · ${row.undated} with no recorded time` : "";
+      lines.push(`    ${row.provider.padEnd(16)} ${row.refusals} refusal(s) · ${statuses || "no reading covered that moment"} · ${row.uncovered} with no reading covering that moment${undated}${covered === 0 && row.uncovered > 0 ? "  ← the ledger cannot explain these" : ""}`);
     }
-    if (join.uncoveredProviders.length) lines.push(`    providers we used with no window in the ledger: ${join.uncoveredProviders.join(", ")}`);
+    if (join.withoutLedger > 0) lines.push(`    ${join.withoutLedger} refusal(s) from sessions with no plan ledger (only omp records one)`);
   }
+  // Named whether or not a refusal was recorded: a provider absent from the ledger is a fact about the ledger,
+  // and printing only "nothing to join" presents that absence as completeness.
+  if (join?.uncoveredProviders?.length) lines.push(`    providers we used with no window in the ledger: ${join.uncoveredProviders.join(", ")}`);
   return lines;
 }
 
@@ -1504,25 +1570,60 @@ async function check() {
       { provider: "kimi-code", limitId: "1w", label: "weekly", status: "ok", usedFraction: 0.2, resetsAt: Date.parse("2026-09-24T00:00:00Z"), recordedAt: Date.parse("2026-08-05T13:00:00Z") },
     ];
     // A fusion row is present on purpose: scraping providers from row keys would report `fusion:quick` as one.
-    const refusalReport = { providers: new Set(["opencode-go", "zai", "kimi-code", "bifrost"]),
+    const refusalReport = { providers: new Map([["omp", new Set(["opencode-go", "zai", "kimi-code", "bifrost"])]]),
       turns: new Map([["omp/fusion:quick", { key: "omp/fusion:quick", fusion: true }]]),
       quotaRefusals: [
-        { at: T, provider: "opencode-go" },        // covered, exhausted
-        { at: T, provider: "zai" },                // covered, ok
-        { at: Date.parse("2026-08-01T00:00:00Z"), provider: "kimi-code" },  // before its only reading: uncovered
-        { at: Date.parse("2026-09-25T00:00:00Z"), provider: "kimi-code" },  // after that window reset: uncovered
-        { at: T, provider: "bifrost" },            // no window at all
+        { at: T, provider: "opencode-go", harness: "omp" },        // covered, exhausted
+        { at: T, provider: "zai", harness: "omp" },                // covered, ok
+        { at: Date.parse("2026-08-01T00:00:00Z"), provider: "kimi-code", harness: "omp" },  // before its only reading: uncovered
+        { at: Date.parse("2026-09-25T00:00:00Z"), provider: "kimi-code", harness: "omp" },  // after that window reset: uncovered
+        { at: T, provider: "bifrost", harness: "omp" },            // no window at all
       ] };
-    const join = joinPlanWindows(refusalReport, { available: true, windows });
+    const history = [
+      { provider: "opencode-go", limitId: "weekly", label: "Weekly", status: "exhausted", usedFraction: 1, resetsAt: Date.parse("2026-09-21T00:00:00Z"), recordedAt: T - 600000 },
+      // read again *after* the refusal, and reading ok: the moment is still the exhausted one, so the later
+      // reading must not be allowed to stand for the window and call the refusal unexplained.
+      { provider: "opencode-go", limitId: "weekly", label: "Weekly", status: "ok", usedFraction: 0.1, resetsAt: Date.parse("2026-09-21T00:00:00Z"), recordedAt: T + 600000 },
+      { provider: "zai", limitId: "5h", label: "5h", status: "ok", usedFraction: 0, resetsAt: 0, recordedAt: T - 60000 },
+      // a status that is neither ok nor exhausted: kept as what it read, not folded into `ok`
+      { provider: "warning-co", limitId: "5h", label: "5h", status: "warning", usedFraction: 0.8, resetsAt: 0, recordedAt: T - 60000 },
+      { provider: "kimi-code", limitId: "1w", label: "weekly", status: "ok", usedFraction: 0.2, resetsAt: Date.parse("2026-09-24T00:00:00Z"), recordedAt: Date.parse("2026-08-05T13:00:00Z") },
+      // a pi session's provider: only omp keeps this ledger, so a refusal from pi is not "uncovered"
+      { provider: "pi-only", limitId: "5h", label: "5h", status: "ok", usedFraction: 0, resetsAt: 0, recordedAt: T - 60000 },
+    ];
+    const join = joinPlanWindows({ ...refusalReport, quotaRefusals: [...refusalReport.quotaRefusals,
+      { at: T, provider: "warning-co", harness: "omp" },
+      { at: T, provider: "pi-only", harness: "pi" }] }, { available: true, windows, history });
     const byProvider = Object.fromEntries(join.byProvider.map((r) => [r.provider, r]));
     ok("a refusal is explained only by a reading that covers its moment, and what it read then",
-      join.total === 5 && byProvider["opencode-go"]?.exhausted === 1 && byProvider["zai"]?.ok === 1
+      join.total === 7 && byProvider["opencode-go"]?.exhausted === 1 && byProvider["zai"]?.ok === 1
         && byProvider["kimi-code"]?.uncovered === 2 && byProvider["bifrost"]?.uncovered === 1
         && join.uncoveredProviders.join(",") === "bifrost",
       JSON.stringify(join));
     ok("a window that resets before the refusal does not explain it",
       byProvider["kimi-code"]?.ok === 0 && byProvider["kimi-code"]?.exhausted === 0,
       JSON.stringify(byProvider["kimi-code"]));
+    // The reading a refusal is joined to is the latest one *before* it: taking the window's latest row would let
+    // a reading taken afterwards shadow the one that actually covered the moment.
+    ok("a reading taken after the refusal does not stand for the window",
+      byProvider["opencode-go"]?.exhausted === 1 && byProvider["opencode-go"]?.ok === 0,
+      JSON.stringify(byProvider["opencode-go"]));
+    // Every covering reading is kept by the status it actually had: `warning` is not `ok`.
+    ok("a covering reading keeps its own status", byProvider["warning-co"]?.byStatus.get("warning") === 1
+      && byProvider["warning-co"]?.ok === 0 && byProvider["warning-co"]?.uncovered === 0,
+      JSON.stringify([...(byProvider["warning-co"]?.byStatus ?? [])]));
+    // A pi session has no plan ledger, so its refusal is reported as exactly that rather than as unexplained.
+    ok("a refusal from a store with no plan ledger is named, not counted as uncovered",
+      join.withoutLedger === 1 && byProvider["pi-only"] === undefined,
+      JSON.stringify({ withoutLedger: join.withoutLedger, piOnly: byProvider["pi-only"] }));
+    // A provider absent from the ledger is a fact about the ledger, and it is named whether or not any refusal
+    // was recorded.
+    const noRefusalJoin = joinPlanWindows({ providers: new Map([["omp", new Set(["opencode-go", "ghost"])]]), quotaRefusals: [] }, { available: true, windows, history });
+    const noRefusalText = render({ ...aggregate([]), plans, planJoin: noRefusalJoin, roots: [], store: { unreadable: [], skippedRoots: [], unattributable: [], parseFailures: [], unparsed: 0, read: 0 } });
+    ok("a provider with no window is named even when no refusal was recorded",
+      noRefusalJoin.total === 0 && noRefusalJoin.uncoveredProviders.join(",") === "ghost"
+        && /providers we used with no window in the ledger: ghost/.test(noRefusalText),
+      noRefusalText.split("\n").filter((l) => l.includes("no window") || l.includes("nothing to join")).join(" // "));
   }
 
   if (sqlite !== null) {
@@ -1535,8 +1636,27 @@ async function check() {
     ], { file: "providers.jsonl", harness: "omp" })]);
     const providersJoin = joinPlanWindows(fusionTurn, { available: true, windows: [{ provider: "cline-pass", limitId: "5h", label: "5h", status: "ok", usedFraction: 0, resetsAt: 0, recordedAt: now - 60000 }] });
     ok("this extension's own api id is not a provider we failed to find a window for",
-      providersJoin.uncoveredProviders.length === 0 && fusionTurn.providers.has("cline-pass") && !fusionTurn.providers.has("fusion-matrix"),
-      JSON.stringify({ uncovered: providersJoin.uncoveredProviders, providers: [...fusionTurn.providers] }));
+      providersJoin.uncoveredProviders.length === 0 && fusionTurn.providers.get("omp")?.has("cline-pass") === true
+        && [...(fusionTurn.providers.get("omp") ?? [])].includes("fusion-matrix") === false,
+      JSON.stringify({ uncovered: providersJoin.uncoveredProviders, providers: [...(fusionTurn.providers.get("omp") ?? [])] }));
+
+    // A refusal belongs to the route that was refused, not to the provider that ended up answering: a record
+    // whose surviving route is the fallback still carries each attempt's own provider.
+    const attributed = aggregate([extractSession([sessionMeta,
+      { type: "message", message: { role: "assistant", api: FUSION_API, provider: "fusion-matrix", model: "quick", timestamp: "2026-09-20T10:00:00Z",
+        usage: usage(5, 1, 0.001), content: [], details: { proxied: { alias: "qwen-max", provider: "alibaba-token-plan", model: "qwen3.8-max",
+          thinking: "low", attempts: [
+            { alias: "qwen-max", seat: "qwen-max@opencode-go", provider: "opencode-go", model: "qwen3.8-max", reason: "quota", detail: "429 usage limit" },
+          ] } } } },
+    ], { file: "attempts.jsonl", harness: "omp" })]);
+    const attemptJoin = joinPlanWindows(attributed, { available: true, windows: [
+      { provider: "opencode-go", limitId: "weekly", label: "Weekly", status: "exhausted", usedFraction: 1, resetsAt: 0, recordedAt: now - 60000 },
+      { provider: "alibaba-token-plan", limitId: "5h", label: "5h", status: "ok", usedFraction: 0, resetsAt: 0, recordedAt: now - 60000 },
+    ] });
+    ok("a quota refusal is attributed to the route that was refused, not to the one that answered",
+      attributed.quotaRefusals[0]?.provider === "opencode-go" && attemptJoin.byProvider[0]?.provider === "opencode-go"
+        && attemptJoin.byProvider[0]?.exhausted === 1,
+      JSON.stringify({ refusals: attributed.quotaRefusals, join: attemptJoin.byProvider }));
 
     // A seat that never resolved a provider names the gap rather than printing `undefined`.
     const unresolvedSeat = aggregate([extractSession([sessionMeta,
