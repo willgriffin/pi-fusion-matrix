@@ -789,6 +789,27 @@ check("a fusion whose writing seat answers in JSON must declare execute: false",
     && errorsFor({}).length === 0,
   jsonWriter.split("\n")[0] || "no error raised");
 
+// A seat that never answers must fail, not hang — at the run level, the observable is that the run ends and says
+// why. The mechanics (attempt reasons, the advance) live in `test/seat-deadline.test.mjs`; this is the wiring.
+// The race is the check's own bound: `runPipeline` has no bound of its own here, so a defect that removes the
+// seat deadline must fail this check with a message rather than hang the suite until someone kills it.
+const hanging = (args) => new Promise((_, reject) => {
+  args?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+});
+const hungRace = await Promise.race([
+  runPipeline({
+    config, sources,
+    fusion: { ...config.fusions["review-quick"], id: "review-quick", seatTimeoutMs: 50, candidates: { skeptic: ["deepseek-pro", "kimi"], "review-synth": ["deepseek-pro"] } },
+    prompt: "a packet", callModel: hanging, decide, emit: silent, registry,
+  }),
+  new Promise((resolve) => setTimeout(() => resolve({ details: { seats: [] }, neverSettled: true }), 5000)),
+]);
+const hangingSeats = hungRace.details.seats ?? [];
+check("a run whose seats never answer ends, with every seat reported as a timeout",
+  !hungRace.neverSettled && hangingSeats.length === 2 && hangingSeats.every((s) => s.degraded && s.reason === "timeout"),
+  hungRace.neverSettled ? "the run never settled: the seat deadline did not fire"
+    : JSON.stringify(hangingSeats.map((s) => ({ persona: s.persona, reason: s.reason, degraded: s.degraded }))));
+
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 process.exit(failed.length ? 1 : 0);

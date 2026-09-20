@@ -288,10 +288,21 @@ export async function runSeat(args) {
   return { ...seat, durationMs: Date.now() - startedAt };
 }
 
+/**
+ * How long one seat call may take before it is treated as a failed attempt.
+ *
+ * A seat that hangs is worse than a seat that fails: a failure advances the cascade and is reported, while a
+ * hang is a silent run — no answer, no error, nothing to report — for as long as the harness waits, which is
+ * forever. Observed seat calls on a full-diff packet run 12–80 s, so this leaves room for a slow provider and
+ * still turns a stall into a substitution. A fusion may tighten or loosen it with `seatTimeoutMs`.
+ */
+const SEAT_TIMEOUT_MS = 300000;
+
 async function runSeatInner({
   personaName, persona, candidates, fusion, config, registry, callModel, decide, emit, signal, vars, maxAdvance = 3,
   onDelta, fusionSource,
 }) {
+  const seatTimeoutMs = Number.isInteger(fusion?.seatTimeoutMs) && fusion.seatTimeoutMs > 0 ? fusion.seatTimeoutMs : SEAT_TIMEOUT_MS;
   // A fusion may override one persona's prompt. Inline text, or a path beside the layer that declared
   // the fusion — the packaged `review` synthesis override depends on this. `resolvePrompt` decides by
   // "contains a newline": right for a persona, whose prompt is normally a file, but wrong for a
@@ -407,16 +418,36 @@ async function runSeatInner({
       const call = async (withTemperature, withThinking = true) => {
         calls += 1;
         const callStartedAt = Date.now();
+        // Per call, not per seat: each attempt gets the bound, and the attempts are counted, so a seat that
+        // spent three deadlines has spent three attempts' worth of time in the record rather than one.
+        const deadline = AbortSignal.timeout(seatTimeoutMs);
+        const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
+        // A call started after the run was already stopped must not be *made*: a transport that only listens
+        // for the abort event never sees one that has already been dispatched, so the request would be sent
+        // after cancellation and its answer waited for indefinitely.
+        if (signal?.aborted) {
+          return {
+            text: "", usage: emptyUsage(), stopReason: "error", toolCalls: [], durationMs: 0, timedOut: false,
+            errorMessage: "the run was already aborted before this call",
+          };
+        }
         try {
           const message = await callModel({
             model: seat.model, apiKey: seat.apiKey, headers: seat.headers, messages,
             temperature: withTemperature ? temperature : undefined,
-            reasoning: withThinking ? thinking : undefined, signal, persona: seatPersona,
+            reasoning: withThinking ? thinking : undefined, signal: bounded, persona: seatPersona,
             onDelta: onDelta ? (chunk) => { emitted += chunk; onDelta(chunk); } : undefined,
           });
           return { ...message, durationMs: Date.now() - callStartedAt };
         } catch (error) {
-          return { text: "", usage: emptyUsage(), stopReason: "error", errorMessage: error?.message ?? String(error), toolCalls: [], durationMs: Date.now() - callStartedAt };
+          // The deadline and the caller's abort are different facts: one is the provider failing to answer
+          // in time (a substitution), the other is the user stopping the run (which must propagate as such).
+          const timedOut = deadline.aborted && !signal?.aborted;
+          return {
+            text: "", usage: emptyUsage(), stopReason: "error", toolCalls: [], durationMs: Date.now() - callStartedAt,
+            errorMessage: timedOut ? `no answer within ${seatTimeoutMs} ms` : error?.message ?? String(error),
+            timedOut,
+          };
         }
       };
 
@@ -425,7 +456,8 @@ async function runSeatInner({
       // keep only the final figure.
       const noteFailure = (failed) => {
         const text = failed.errorMessage ?? "unknown error";
-        const reason = QUOTA.test(text) ? "quota" : CREDENTIAL.test(text) ? "credential" : MISSING_MODEL.test(text) ? "missing model" : "transient";
+        const reason = failed.timedOut ? "timeout"
+          : QUOTA.test(text) ? "quota" : CREDENTIAL.test(text) ? "credential" : MISSING_MODEL.test(text) ? "missing model" : "transient";
         attempts.push({ alias: resolved.alias, seat: label(resolved), reason, detail: text, durationMs: failed.durationMs });
         return { text, reason };
       };
@@ -461,7 +493,9 @@ async function runSeatInner({
             degraded: true, error: text, reason, calls,
           };
         }
-        const isTransient = reason === "transient";
+        // A retry is for a failure that might not repeat. When the *caller* stopped the run, the next attempt
+        // is not a second chance, it is two seconds of dead time per seat on a run nobody is waiting for.
+        const isTransient = reason === "transient" && !signal?.aborted;
         if (isTransient) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
           const retried = await call(!noTemperature.has(key));

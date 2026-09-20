@@ -11,6 +11,9 @@
       "./extensions"
     ]
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {},
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
