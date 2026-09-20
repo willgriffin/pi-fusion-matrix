@@ -33,7 +33,7 @@ post-synthesis check, or a routing gate — TypeSafe (`https://api.typesafe.ai/v
 alternative; (4) every substitution, decision, and cascade observable in the transcript and in tool
 details; (5) credentials and endpoints remain entirely pi-owned; (6) the maps when they are asked for
 and one competent model the rest of the time — a fusion that declares an executor answers a
-tool-bearing turn itself (Step 8), so a rung can be a session's model and code with the harness's own
+tool-bearing turn itself (Step 9), so a rung can be a session's model and code with the harness's own
 tools rather than describing what it would do with them.
 
 Decisions run conservatively: they never replace a frontier pipeline call. They only (a) verify a
@@ -234,7 +234,7 @@ export type FusionSpec = {
   /** Picker label for the registered model. Default `Fusion · <id>`. */
   name?: string;
   /**
-   * Metadata for the registered model, used where the executor alias declares none (Step 8). The
+   * Metadata for the registered model, used where the executor alias declares none (Step 9). The
    * pipeline itself is unaffected.
    */
   model?: { contextWindow?: number; maxTokens?: number };
@@ -244,7 +244,7 @@ export type FusionSpec = {
   candidates: Record<string, SlotCandidate[]>;
   /**
    * Per-fusion thinking-level override by persona. `"harness"` is legal for the writing seat alone: a
-   * proxied turn then runs at whatever level the harness sent (Step 8).
+   * proxied turn then runs at whatever level the harness sent (Step 9).
    */
   thinking?: Record<string, Persona["thinking"] | "harness">;
   fileAgent?: false | { alias: string };
@@ -264,7 +264,7 @@ export type FusionSpec = {
    */
   route?: RouteSpec;
   /**
-   * The execute face (Step 8). Without it the executor is the writing seat — the persona of the mode's
+   * The execute face (Step 9). Without it the executor is the writing seat — the persona of the mode's
    * final `single` stage — so re-pointing that seat re-points what codes under this rung. `alias`
    * re-points which model that seat acts as, when the writer is not the model you want acting; a fusion
    * whose mode writes nothing has no writing seat, so a `proxy` on one is a load error rather than an
@@ -506,10 +506,10 @@ pi.registerProvider(providerId, {
   apiKey: "unused",                        // provider-composer requires apiKey or oauth
   api: "fusion-matrix",
   // The fusion key is the model id, verbatim: no prefixing, no reserved "default" id. A fusion with an
-  // execute face advertises that executor's numbers and thinking capability (Step 8) — registration runs
+  // execute face advertises that executor's numbers and thinking capability (Step 9) — registration runs
   // before any session exists, so there is no catalogue to consult and the alias declares them.
   models: Object.entries(config.fusions).map(([id, fusion]) => {
-    const executor = executorOf(config, fusion);            // Step 8: the writing seat, or `proxy.alias`
+    const executor = executorOf(config, fusion);            // Step 9: the writing seat, or `proxy.alias`
     const alias = executor ? config.aliases[executor.alias] : undefined;
     // `reasoning` follows the alias's declaration and defaults to the executor being a reasoning model;
     // nothing reads `fusion.model.reasoning`, so an operator cannot half-configure it.
@@ -1006,7 +1006,7 @@ their own file without touching this repository. The packaged prompts were trans
 |---|---|---|
 | `config` | schema, stage dataflow, roster/shape agreement, prompt paths — the Step 1 rules, re-run outside a session | no |
 | `connect` | an alias routing through a provider pi does not know, or one with no configured credential (`hasConfiguredAuth`), and an alias with only one route (no fallback to fall back to) | no |
-| `metadata` | a fusion whose executor alias declares no `contextWindow`/`maxTokens`, so its registered model advertises the package default rather than the executor's numbers (Step 8) — informational, and never a repair | no |
+| `metadata` | a fusion whose executor alias declares no `contextWindow`/`maxTokens`, so its registered model advertises the package default rather than the executor's numbers (Step 9) — informational, and never a repair | no |
 | `reach` | a vendor id the provider **no longer serves** (retired or renamed) as distinct from one it serves but pi does not catalogue — the latter is expected and fine | yes, one `GET /models` per provider |
 | `drift` | an id that disappeared upstream while `matrix.json` still names it, and a catalogued id that is newer than what an alias pins | yes |
 
@@ -1026,7 +1026,57 @@ Rules, all following from the no-silent-degradation invariant:
 - **The doctor never guesses intent.** The alias table is a curated decision about what to run. The
   doctor's job is to say when reality has moved, not to pick a replacement for you.
 
-### Step 8 — Proxy mode: a fusion that answers agent turns
+### Step 8 — The run record, and the report that reads it back
+
+A run record is worth exactly what it survives. Both entry points write the same `details` into the
+session, on the two carriers the harness persists:
+
+| Path | Carrier | Why it survives |
+|---|---|---|
+| the `matrix` tool | the tool result's `details` | `execute` returns it, and tool results keep `details` |
+| `/matrix` | a `custom_message` answer's `details` | `pi.sendMessage` keeps `details` (`appendCustomMessageEntry`) |
+| a proxying fusion's turn | the assistant message's `details.proxied` | the record rides the terminal event's message |
+
+The command path was the one that hid the record: it sent the answer text and dropped `result.details`,
+so measured 2026-09-19 over the 46 sessions on the implementing machine there were **zero** deliberation
+records — the deliberate face was unobservable once a turn ended. Both paths now persist the record, and
+a failed run records its failure rather than only raising a notification: a run whose seats all failed
+keeps its degraded seats, `seatErrors` and substitutions, and a run that threw records `{ fusion, error }`.
+
+`scripts/session-report.mjs` is the reader, and the reason the record stays honest:
+
+- it reads both harnesses' session JSONL (`~/.pi/agent/sessions`, `~/.omp/agent/sessions`), with no
+  network, no keys, no model calls, and no writes;
+- per fusion and per model it totals turns, tokens, cost, tool calls and tool errors; for deliberation
+  runs, seats, degraded seats, seat errors, cascades split sufficient/advanced, substitutions, decision
+  tokens, routes, verification and saved files; for proxied turns, the alias that answered, the level the
+  turn ran at, the levels it had to drop, and every route it tried, by reason;
+- **it refuses to read an absence as a zero.** A message whose harness records no duration, and one whose
+  provider reports no price, are counted as *unrecorded*, not as `0` — pi records no duration at all, omp
+  records `duration`/`ttft`, and a subscription provider reports no cost. "We did not record it" and "it
+  cost nothing" are different facts, and only one of them is true. Money is therefore printed as
+  `$X reported` with its unpriced messages counted beside it, never as one total that absorbed both;
+- **it names what it does not recognise.** A `details` shape carrying a record key but no fusion id is
+  printed with its full path, carrier and keys — and never counted as a run; a line that does not parse is
+  counted *and* named with its file, line number and reason, and the first ten of every diagnostic list are
+  followed by an omitted-count marker. A reader that silently skipped any of these would make a missing
+  record look like a clean run;
+- **filters select rows, never the accounting.** `--cwd`/`--since` decide which sessions are totalled; the
+  files read, the unparsed lines and any session a filter could not attribute (a truncated header has no
+  `cwd` to compare, and a malformed timestamp cannot be placed) are reported either way, and the exit
+  status is non-zero whenever something could not be accounted for — so a filtered report cannot present a
+  short total as a fact about the fusions, and a file that cannot be read is never a quiet omission.
+
+Exit status: `0` report produced, `1` the store could not be accounted for (missing or empty `--dir`,
+unreadable `--session`, an unreadable file or directory, a line that did not parse, or a session a filter
+could not attribute), `2` `--check` failed. `--check` is the reader's own accounting, checked against fixtures (51 checks as a normal
+user; 44 as root, where the permission-dependent cases are printed as skipped rather than passed — the
+printed `N/N` is always the real total) — and, as
+for the interpreter contracts, each of those checks is verified the same way it is written: by temporarily
+mutating the reader and watching the check fail (a manual pass run with a throwaway script, not a committed
+harness). The instrument is therefore held to the standard of the pipeline it reads.
+
+### Step 9 — Proxy mode: a fusion that answers agent turns
 
 A fusion otherwise happens *beside* a coding session: `matrix`, `/matrix`, and a pinned rung deliberate
 and hand back prose. A pinned rung cannot be the session's model, because the provider path drops the
@@ -1174,7 +1224,7 @@ pi-side references:
   stream this extension returns; defines what `partial` and `done.message` must contain.
 - `dist/core/agent-session.js` (`_checkCompaction`, pi 0.85.1) — the `sameModel` comparison of
   `provider`/`model` against the session's own model, which is why a proxied turn's forwarded events are
-  re-labelled as the fusion's registered model (Step 8).
+  re-labelled as the fusion's registered model (Step 9).
 - `node_modules/@earendil-works/pi-ai/dist/types.d.ts:382-440` (event union), `:255-278` (`Usage`) —
   the exact event and usage shapes to emit.
 - `docs/custom-provider.md`, `docs/packages.md`, `docs/extensions.md` in
@@ -1390,9 +1440,9 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     the stage it gates with no judge call; an ambiguous one calls the judge and records a prior containing
     the cheap read's answer; debate makes 3 seats × 3 rounds with peers' opinions; a `score` stage issues
     **one** batched request for three seats; `verify` warns without blocking; a confident route redirects
-    and an unconfident one declines. The twenty-one added with Step 8: the proxy contracts of item 22, the
-    seat's half of the shared thinking-refusal rule, the registration/`matrix-info` surfaces of item 24,
-    and the loader rules of item 25. This is the check that must run when a provider's quota blocks the live items — and it caught a
+    and an unconfident one declines. The twenty-six added with Step 9: the proxy contracts of item 23, the
+    seat's half of the shared thinking-refusal rule, the registration/`matrix-info` surfaces of item 25, the
+    loader rules of item 26, and the two contracts for a rejecting `result()`. This is the check that must run when a provider's quota blocks the live items — and it caught a
     real gap on first use: stage-level `sufficientWhen` was unimplemented, so a converged panel still paid
     for the judge.
 21. **Doctor exit codes and non-mutation** — with an injected registry and catalogue: clean config exits
@@ -1400,12 +1450,26 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     with `--online` exits 3; a single-route alias is reported rather than passed silently; and `--repair`
     prints its snippet while leaving every tracked file byte-identical (asserted by hash).
 
-22. **Proxy: offline contracts** — the same `node scripts/interp-check.mjs` run. The proxy cases are
+22. **The run record survives, and the report reads it** — `node scripts/session-report.mjs --check`
+    passes 51/51 (44/44 as root, the permission cases printed as skipped once), each check having been shown
+    to fail under a temporary mutation of the reader, then in a scratch `cwd` (Step 8's prerequisites):
+    `node scripts/session-report.mjs --cwd <scratch> --json` on the store *before* a `/matrix` run shows
+    zero deliberation records, and after `/matrix quick "…"` in **both** pi and omp it shows one, with the
+    answer message carrying `details.fusion` — then `--verbose` names that run. A failed run records itself:
+    an alias pointed at a provider nobody knows (`{"providers": ["nope"]}`) records the degraded seat, a
+    named `seatErrors` entry and the substitution, which the report counts as `1 failed` — where before the
+    run left no record at all (the thrown-failure shape `{ fusion, error }` is covered by the fixtures).
+    Change one stored `usage.cost.total` to `0` in a copy of a session file and the
+    report moves that message from priced to unpriced without changing its token totals. Delete the
+    `details` from a copy of the answer entry and the run disappears from the totals *and* the record is
+    reported as missing rather than as a clean run.
+
+23. **Proxy: offline contracts** — the same `node scripts/interp-check.mjs` run. The proxy cases are
     the ones that matter here: a stub peer records `context.messages`/`tools`/`systemPrompt`
     byte-identical and the target's `toolcall_end` reaching the caller; the message holds the model's
     output and no ` ├─ ` line; no seat call happens; the `done` event's message — not just `result()` —
     carries `details.proxied`, because that is the copy the harness keeps; `"harness"` and an absent
-    level resolve per Step 8's table; a rung with no writing seat (`opinions`) still deliberates with
+    level resolve per Step 9's table; a rung with no writing seat (`opinions`) still deliberates with
     tools present; an unresolvable route advances to the next with the attempt recorded and no
     decoration; a level the target refuses is dropped once and the turn continues; a route that fails
     before any event advances while one that fails after `start` ends the turn; and an unreachable
@@ -1422,7 +1486,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     to the pipeline after the proxy returns, or attaching `details` only to `result()` — which is the
     check's own acceptance.
 
-23. **Proxy: a rung codes (live, both harnesses)** — pin a rung and give the turn real work:
+24. **Proxy: a rung codes (live, both harnesses)** — pin a rung and give the turn real work:
 
     ```bash
     cd /tmp/fusion-matrix-check
@@ -1446,7 +1510,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     level is refused must recover (verified live: with `deepseek-flash` re-pointed at
     `alibaba-token-plan`, which supports only `high, max`, the turn dropped the level and answered).
 
-24. **Proxy: registered metadata** — `pi --list-models fusion` (and omp's equivalent) must show the
+25. **Proxy: registered metadata** — `pi --list-models fusion` (and omp's equivalent) must show the
     executor's numbers for a proxying rung: `quick` and `default-smrt` at `1M / 384K`, `best`, `cheap`,
     and `good` at `1M / 131.1K`, `review-check` at `1.0M / 131.1K` — not `128000`/`8192`, which the two
     render-only rungs keep because they have no execute face. **Verified live 2026-09-19** on pi 0.85.1.
@@ -1456,7 +1520,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     `[metadata] fusion "best" executes as "muse", which declares no contextWindow and no maxTokens …` and
     still exits 0, because it is a decision, not a fault.
 
-25. **Proxy: config validation** — three project-layer files, each expected to fail at load with the
+26. **Proxy: config validation** — three project-layer files, each expected to fail at load with the
     named message: `{"fusions": {"best": {"proxy": {"alias": "no-such-alias"}}}}` →
     `proxy alias "no-such-alias" is not an alias`; `{"fusions": {"default-smrt": {"proxy": {"alias":
     "qwen-flash"}}}}` → `proxy and route cannot both be declared`; `{"fusions": {"best": {"thinking":
@@ -1552,7 +1616,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
   rules. That line is deliberate: a config language expressive enough to need interpreter branches of its
   own is a language whose validity nobody can check.
 - **Two faces, one definition, and the branch that picks between them is invocation.** Proxy mode
-  (Step 8) adds no classifier: a fusion with an executor answers a tool-bearing turn, and everything
+  (Step 9) adds no classifier: a fusion with an executor answers a tool-bearing turn, and everything
   else behaves as it always has. The conceptual cost is stated rather than hidden — the same id answers a
   question one way and an agent turn another, and `matrix-info` prints the execute face beside the roster
   — and the deliberate part is total: `proxy` and `route` on one fusion is a load error, a proxied turn
@@ -1575,7 +1639,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
 - **Three shapes from [`disler/fusion-harness`](https://github.com/disler/fusion-harness) are out of
   scope, and that absence is a boundary rather than a gap.** Its sole-writer FUSION agent
   (`/fh-fusion`) writes to disk through a subprocess with tools: that is not a deliberation stage, and
-  it is served instead by proxy mode (Step 8), where one model holds the harness's tools and the
+  it is served instead by proxy mode (Step 9), where one model holds the harness's tools and the
   harness keeps the loop, the approval gates, and the writes. Its gate-first loop
   (`/fh-auto-validate`) iterates until green and needs loop constructs and a feedback channel; and its
   plan-then-DAG-then-execute collaboration (`/fh-collaborate`) is a task scheduler, not a deliberation
