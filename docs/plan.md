@@ -1081,9 +1081,10 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
   that ran two fusions reporting none. The reader unwraps it, attributes the invocation to the tool it
   invoked (`read` of `xd://<tool>` stays a `read`: reading docs is not calling, and the rewrite is gated on
   the harness, so a pi session saving a file whose relative path happens to be `xd://matrix` stays a write),
-  names the result by the tool that ran — paired to its call by `toolCallId`, because a device call that
-  *fails* is stored with empty `details` and would otherwise be charged to the `write` that carried it — and
-  **counts the invocations** so the quirk is reported rather than quietly repaired;
+  names the result by the tool that ran — paired to its call through a session-level index by `toolCallId`,
+  because a device call that *fails* is stored with empty `details` and a result row is not guaranteed to follow
+  its calling turn — and **counts the invocations** from the calls rather than from the results, so a device
+  call whose result never reached the store still counts and the line agrees with the tools table;
 - **a run's tokens are counted once.** `details.usage` already sums the run's seats — verified against the
   store, where a one-seat run's `details.usage.input` equals that seat's — so the seats are not added again.
   They *were*, which doubled every deliberation's tokens and cost from the reader's first version;
@@ -1095,7 +1096,7 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
 
 Exit status: `0` report produced, `1` the store could not be accounted for (missing or empty `--dir`,
 unreadable `--session`, an unreadable file or directory, a line that did not parse, or a session a filter
-could not attribute), `2` `--check` failed. `--check` is the reader's own accounting, checked against fixtures (78 checks as a normal
+could not attribute), `2` `--check` failed. `--check` is the reader's own accounting, checked against fixtures (80 checks as a normal
 user; 44 as root, where the permission-dependent cases are printed as skipped rather than passed — the
 printed `N/N` is always the real total) — and, as
 for the interpreter contracts, each of those checks is verified the same way it is written: by temporarily
@@ -1477,7 +1478,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     prints its snippet while leaving every tracked file byte-identical (asserted by hash).
 
 22. **The run record survives, and the report reads it** — `node scripts/session-report.mjs --check`
-    passes 78/78 (44/44 as root, the permission cases printed as skipped once), each check having been shown
+    passes 80/80 (44/44 as root, the permission cases printed as skipped once), each check having been shown
     to fail under a temporary mutation of the reader, then in a scratch `cwd` (Step 8's prerequisites):
     `node scripts/session-report.mjs --cwd <scratch> --json` on the store *before* a `/matrix` run shows
     zero deliberation records, and after `/matrix quick "…"` in **both** pi and omp it shows one, with the

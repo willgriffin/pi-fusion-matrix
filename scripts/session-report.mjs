@@ -212,6 +212,10 @@ export function extractSession(entries, meta = {}) {
   };
 
   let current = null;
+  // Every call this session made, by id. omp does not guarantee that a result row follows its calling turn
+  // immediately — the store has no caller field at all — so pairing through a session-level index is what keeps
+  // a *failed* device call (stored with empty `details`) from being charged to the `write` that carried it.
+  const callIndex = new Map();
   for (const entry of entries) {
     if (entry?.type === "session") {
       session.id = entry.id ?? session.id;
@@ -264,6 +268,7 @@ export function extractSession(entries, meta = {}) {
         at: message.timestamp ?? entry.timestamp,
       };
       session.turns.push(current);
+      for (const part of current.toolCallParts) if (part.id !== undefined) callIndex.set(String(part.id), part);
       const details = message.details;
       if (isRecordShape(details)) {
         if (typeof details.proxied === "object" && details.proxied !== null) {
@@ -284,7 +289,7 @@ export function extractSession(entries, meta = {}) {
       // omp does not wrap every device result: a *failed* device call is stored with `details: {}`, so the
       // invoked tool has to come from the call that made it, paired by `toolCallId` — otherwise the call row
       // says `matrix` while its error is charged to the `write` that carried it.
-      const call = (current?.toolCallParts ?? []).find((part) => part.id !== undefined && part.id === message.toolCallId);
+      const call = callIndex.get(String(message.toolCallId));
       const toolName = message?.details?.xdev?.tool ?? call?.name ?? message?.toolName ?? "?";
       session.toolResults.push({ toolName, isError: message.isError === true, device: call?.device === true, after: current, at: message.timestamp ?? entry.timestamp });
       const details = unwrapDetails(message.details);
@@ -340,7 +345,10 @@ export function aggregate(sessions) {
     for (const unknown of session.unknown) {
       report.unknownShapes.push({ file: session.file, harness: session.harness, carrier: unknown.carrier, keys: unknown.keys, at: unknown.at });
     }
-    for (const result of session.toolResults) if (result.device) report.gaps.wrappedCalls += 1;
+    // Counted from the calls, not from the results: a device invocation whose result row never reached the
+    // store (a truncated tail) is still an invocation, and counting results made the accounting disagree with
+    // the tools table's own call count.
+    for (const t of session.turns) for (const part of t.toolCallParts ?? []) if (part.device) report.gaps.wrappedCalls += 1;
 
     for (const t of session.turns) {
       const key = turnKey(t);
@@ -1106,13 +1114,36 @@ function check() {
     deviceReport.gaps.wrappedCalls === 2 && /2 call\(s\) made through omp's `xd:\/\/` device/.test(deviceRender),
     `${deviceReport.gaps.wrappedCalls}`);
   // pi has no device protocol: a file whose relative path happens to be `xd://matrix` is a write, nothing more.
+  // The calling turn is not guaranteed to be the last one before its result, and a result row can be missing
+  // entirely (a truncated tail): pairing must survive the first, and the count must survive the second.
+  const nonAdjacent = extractSession([sessionMeta,
+    { type: "message", message: { role: "assistant", api: "openai-completions", provider: "cline-pass", model: "z-ai/glm-5.3-flash",
+      usage: usage(10, 2, 0.001), content: [{ type: "toolCall", id: "n1", name: "write", arguments: { path: "xd://propose", content: "{}" } }] } },
+    { type: "message", message: { role: "assistant", api: "openai-completions", provider: "cline-pass", model: "z-ai/glm-5.3-flash",
+      usage: usage(10, 2, 0.001), content: [] } },
+    { type: "message", message: { role: "toolResult", toolCallId: "n1", toolName: "write", isError: true, content: [{ type: "text", text: "refused" }], details: {} } },
+  ], { file: "non-adjacent.jsonl", harness: "omp" });
+  const nonAdjacentReport = aggregate([nonAdjacent]);
+  ok("a device result is paired with its call even when another turn intervenes",
+    nonAdjacent.toolResults[0]?.toolName === "propose" && (nonAdjacentReport.tools.get("omp/propose")?.errors ?? 0) === 1
+      && (nonAdjacentReport.tools.get("omp/write")?.errors ?? 0) === 0 && nonAdjacentReport.gaps.wrappedCalls === 1,
+    JSON.stringify({ named: nonAdjacent.toolResults[0]?.toolName, tools: Object.fromEntries([...nonAdjacentReport.tools].map(([k, v]) => [k, v.errors])), device: nonAdjacentReport.gaps.wrappedCalls }));
+  const noResult = extractSession([sessionMeta,
+    { type: "message", message: { role: "assistant", api: "openai-completions", provider: "cline-pass", model: "z-ai/glm-5.3-flash",
+      usage: usage(10, 2, 0.001), content: [{ type: "toolCall", id: "d1", name: "write", arguments: { path: "xd://matrix", content: "{}" } }] } },
+  ], { file: "no-result.jsonl", harness: "omp" });
+  const noResultReport = aggregate([noResult]);
+  ok("an invocation whose result never reached the store is still counted as a device call",
+    noResultReport.gaps.wrappedCalls === 1 && noResultReport.toolCalls.get("omp/matrix") === 1 && noResult.toolResults.length === 0,
+    JSON.stringify({ device: noResultReport.gaps.wrappedCalls, calls: Object.fromEntries(noResultReport.toolCalls), results: noResult.toolResults.length }));
+
   const piWrite = extractSession([sessionMeta,
     { type: "message", message: { role: "assistant", api: "anthropic-messages", provider: "opencode-go", model: "glm-5.3-flash",
       usage: usage(10, 2, 0.001), content: [{ type: "toolCall", id: "p1", name: "write", arguments: { path: "xd://matrix", content: "hi" } }] } },
     { type: "message", message: { role: "toolResult", toolCallId: "p1", toolName: "write", isError: false, content: [], details: { diff: "…", op: "create", path: "xd://matrix" } } },
   ], { file: "pi-write.jsonl", harness: "pi" });
   const piReport = aggregate([piWrite]);
-  ok("only omp has a device protocol: a pi write to`xd://…` is a write",
+  ok("only omp has a device protocol: a pi write to `xd://…` is a write",
     piWrite.turns[0].toolCalls.join(",") === "write" && piReport.toolCalls.get("pi/write") === 1
       && (piReport.toolCalls.get("pi/matrix") ?? 0) === 0 && piReport.gaps.wrappedCalls === 0,
     JSON.stringify({ calls: piWrite.turns[0].toolCalls, counted: Object.fromEntries(piReport.toolCalls), device: piReport.gaps.wrappedCalls }));
