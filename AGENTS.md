@@ -96,6 +96,8 @@ Run before shipping, from the repository root:
 
 ```bash
 npm test                                                                # unit tests
+npm run lint                                                            # eslint, and the two repo guards
+npm run format:check                                                    # prettier, code only
 npm run lint:commits                                                    # conventional commits
 ```
 

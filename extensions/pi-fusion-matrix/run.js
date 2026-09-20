@@ -262,7 +262,7 @@ async function decideOverRoute({ route, prompt, decide, signal }) {
  * backend failure is reported as skipped rather than as a run failure. A `gate` entry runs a command
  * once — no loop, no feedback into a stage.
  */
-export async function verifyRun({ config, fusion, vars, decide, emit, signal, runGate }) {
+export async function verifyRun({ fusion, vars, decide, emit, signal, runGate }) {
   const results = [];
   for (const entry of fusion.verify ?? []) {
     if (entry?.gate) {
@@ -611,7 +611,6 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
  */
 export function createFusionStream({ config, sources, getRegistry, decide, callModel, getPi, getWriteParameters }) {
   return function fusionStream(model, context, options) {
-    let outer;
     const events = [];
     const pending = [];
     // Deliver to a waiting consumer OR queue for a later one — never both, or every event arrives
@@ -636,7 +635,7 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
     };
     const message = (text, extra = {}) => ({ ...base, content: [{ type: "text", text }], ...extra });
 
-    outer = {
+    const outer = {
       push,
       end(finalResult) {
         finished = true;
@@ -718,10 +717,9 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
           return;
         }
 
-        let routing;
         const routed = await routeFusion({ config, fusion, prompt, decide, emit, signal: options?.signal });
         fusion = routed.fusion;
-        routing = routed.routing;
+        const routing = routed.routing;
 
         const run = await runPipeline({
           config,
@@ -755,7 +753,6 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
         accumulateUsage(usage, run.decisionUsage);
 
         const verification = await verifyRun({
-          config,
           fusion,
           vars,
           decide,

@@ -13,7 +13,7 @@ import fs from "node:fs";
 import { LABEL_OUTCOMES, isOutcome } from "./labels.js";
 import path from "node:path";
 import process from "node:process";
-import { loadMatrixConfig, validateConfig, harnessName, executorOf, executorThinking, HARNESS_THINKING, REPO_ROOT } from "./config.js";
+import { loadMatrixConfig, validateConfig, harnessName, executorOf, executorThinking, HARNESS_THINKING } from "./config.js";
 import { loadPi, loadTypebox, makeCallModel, createFusionStream } from "./run.js";
 import { createDecide } from "./decide.js";
 import { runDoctor, formatFindings, repairSnippet, EXIT } from "./doctor.js";
