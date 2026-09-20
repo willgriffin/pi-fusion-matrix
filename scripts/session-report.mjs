@@ -52,6 +52,9 @@ const DEFAULT_ROOTS = [
 const FUSION_API = "fusion-matrix";
 /** The custom message type a `/matrix-label` writes: a work item, an outcome, and optional evidence. */
 const LABEL_TYPE = "matrix-label";
+// The same closed vocabulary the command enforces: a store is editable by hand, and a report that accepted
+// `shipped` would count an outcome nobody defined.
+import { isOutcome } from "../extensions/pi-fusion-matrix/labels.js";
 /** Keys that only ever appear in a fusion run record: a shape carrying one of these is ours to explain. */
 const RECORD_KEYS = ["fusion", "proxied", "cascades", "seats", "seatErrors"];
 
@@ -197,7 +200,7 @@ export function extractSession(entries, meta = {}) {
       // run cannot know about itself. A hand-written label missing either half is named as unrecognised
       // rather than counted, because a label nothing can be joined to is worse than no label.
       if (entry.customType === LABEL_TYPE) {
-        if (typeof details?.workItem === "string" && typeof details?.outcome === "string") {
+        if (typeof details?.workItem === "string" && isOutcome(details?.outcome)) {
           session.labels.push({ workItem: details.workItem, outcome: details.outcome, evidence: details.evidence, at: entry.timestamp });
         } else {
           session.unknown.push({ carrier: "custom_message", keys: Object.keys(details ?? {}).sort(), at: entry.timestamp });
@@ -510,7 +513,9 @@ export function render(report, { limit = 12 } = {}) {
     lines.push(`  ${row.key.padEnd(20)} ${String(row.runs ?? 0).padStart(3)} runs (${carriers}) · ${row.seats} seats, ${row.degradedSeats} degraded, ${row.seatErrors} seat error(s)`);
     const slowest = row.slowestSeat ? ` · slowest seat ${row.slowestSeat.persona ?? "?"} ${ms(row.slowestSeat.durationMs)}` : "";
     lines.push(`  ${"".padEnd(20)} cascades ${row.cascades} (sufficient ${row.cascadesSufficient}, advanced ${row.cascadesAdvanced}) · substitutions ${row.substitutions} · decision tokens ${num(row.decisionUsage.totalTokens)} (${money(row.decisionUsage.costReported)} reported${row.decisionUsage.unpricedMessages ? `, ${row.decisionUsage.unpricedMessages} unpriced` : ""})`);
-    if (row.runMs) lines.push(`  ${"".padEnd(20)} run time ${ms(row.runMs)}${slowest} · ${row.timedSeats} seat(s) timed`);
+    // A fast run's clock can legitimately be 0 ms: keyed on the count of timed runs, not on truthiness, so a
+    // recorded zero is distinguishable from an absent clock.
+    if (row.runsTimed > 0) lines.push(`  ${"".padEnd(20)} run time ${ms(row.runMs)}${slowest} · ${row.timedSeats} seat(s) timed`);
     const unpriced = row.sums.unpricedMessages ? ` (${row.sums.unpricedMessages} unpriced)` : "";
     lines.push(`  ${"".padEnd(20)} turns ${money(row.sums.costReported)} reported${unpriced} · ${num(row.sums.input)} in / ${num(row.sums.output)} out · ${row.failures} failed · routes ${row.route} · verify ${row.verify} check(s) · saved ${row.saved}${row.failedWrites ? `, ${row.failedWrites} write failure(s)` : ""}`);
   }
@@ -993,6 +998,25 @@ function check() {
   ok("the text report prints the outcome, the evidence and the unlabelled count",
     /#12\s+landed/.test(text) && /https:\/\/example\.test\/pull\/1/.test(text) && /2 label\(s\), latest wins/.test(text),
     text.split("\n").find((l) => l.includes("#12")) ?? "no label line");
+
+  // A store is editable by hand: an outcome nobody defined must not become the current one.
+  const handWritten = extractSession([sessionMeta,
+    { type: "custom_message", customType: "matrix-label", content: "#12 — shipped", display: true, timestamp: "2026-09-19T10:00:00.000Z", details: { workItem: "#12", outcome: "shipped" } },
+  ], { file: "hand-written.jsonl", harness: "pi" });
+  ok("a hand-written outcome outside the vocabulary is unrecognised, not a label",
+    handWritten.labels.length === 0 && handWritten.unknown.length === 1 && aggregate([handWritten]).labels.size === 0,
+    JSON.stringify({ labels: handWritten.labels.length, unknown: handWritten.unknown.length }));
+
+  // A fast run can legitimately record 0 ms; that is not the same as no clock at all.
+  const zeroClock = extractSession([sessionMeta,
+    { type: "custom_message", customType: "matrix-answer", content: "answer", display: true, timestamp: "2026-09-19T10:00:00.000Z",
+      details: { fusion: "quick", mode: "single", seats: [{ persona: "technical", degraded: false, usage: usage(1, 1, 0.0001), durationMs: 0 }], cascades: [], seatErrors: [], durationMs: 0, usage: usage(1, 1, 0.0001) } },
+  ], { file: "zero-clock.jsonl", harness: "pi" });
+  const zeroText = render(buildReport({ sessions: [zeroClock], roots: [], unreadable: [],
+    store: { read: 1, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }));
+  ok("a recorded 0 ms run still prints its clock",
+    /run time 0\.0s/.test(zeroText) && /1 seat\(s\) timed/.test(zeroText),
+    zeroText.split("\n").find((l) => l.includes("run time")) ?? "no run-time line");
 
   const failures = results.filter((r) => !r.pass);
   for (const r of results) console.log(`  ${r.pass ? "ok  " : "FAIL"} ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);

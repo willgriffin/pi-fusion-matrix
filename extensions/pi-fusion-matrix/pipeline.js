@@ -349,11 +349,23 @@ async function runSeatInner({
         }
       };
 
+      // Every failed call is recorded as its own attempt, with its own time: a seat that spent four seconds on
+      // a temperature retry and then failed has spent twice what the last call took, and the record used to
+      // keep only the final figure.
+      const noteFailure = (failed) => {
+        const text = failed.errorMessage ?? "unknown error";
+        const reason = QUOTA.test(text) ? "quota" : CREDENTIAL.test(text) ? "credential" : MISSING_MODEL.test(text) ? "missing model" : "transient";
+        attempts.push({ alias: resolved.alias, seat: label(resolved), reason, detail: text, durationMs: failed.durationMs });
+        return { text, reason };
+      };
+
       let message = await call(!noTemperature.has(key));
+      let lastFailure = message.stopReason === "error" ? noteFailure(message) : null;
       if (message.stopReason === "error" && MODELS_REJECT_TEMPERATURE.test(message.errorMessage ?? "") && !noTemperature.has(key)) {
         noTemperature.add(key);
         emit.delta(` ├─ ⚠️ ${key} rejects a temperature override; retrying without it.\n`);
         message = await call(false);
+        if (message.stopReason === "error") lastFailure = noteFailure(message);
       }
       // A harness may enforce a model's supported thinking efforts instead of passing the level through.
       // The seat is retried once at no reasoning level rather than at a guess — a level the config did
@@ -365,12 +377,11 @@ async function runSeatInner({
         rememberThinkingRefusal(resolved.provider, resolved.model, thinking);
         emit.delta(` ├─ ️ ${key} does not support thinking "${thinking}"; retrying that seat without a reasoning level.\n`);
         message = await call(!noTemperature.has(key), false);
+        if (message.stopReason === "error") lastFailure = noteFailure(message);
       }
 
       if (message.stopReason === "error") {
-        const text = message.errorMessage ?? "unknown error";
-        const reason = QUOTA.test(text) ? "quota" : CREDENTIAL.test(text) ? "credential" : MISSING_MODEL.test(text) ? "missing model" : "transient";
-        attempts.push({ alias: resolved.alias, seat: label(resolved), reason, detail: text, durationMs: message.durationMs });
+        const { text, reason } = lastFailure ?? noteFailure(message);
         if (emitted) {
           emit.delta(` ├─ ⚠️ ${personaName}: streamed ${emitted.length} chars then failed (${reason}); ending with what was emitted\n`);
           return {

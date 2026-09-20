@@ -10,6 +10,7 @@
  */
 
 import fs from "node:fs";
+import { LABEL_OUTCOMES, isOutcome } from "./labels.js";
 import path from "node:path";
 import process from "node:process";
 import { loadMatrixConfig, validateConfig, harnessName, executorOf, executorThinking, HARNESS_THINKING, REPO_ROOT } from "./config.js";
@@ -194,18 +195,12 @@ export default async function (pi) {
     },
   });
 
-  /**
-   * The outcomes a work item can be labelled with. Closed on purpose: a free-text outcome cannot be counted,
-   * and the point of the label is to be joined to the cost of the runs that produced it.
-   */
-  const LABEL_OUTCOMES = ["landed", "review", "findings", "ci-red", "blocked", "abandoned"];
-
   pi.registerCommand("matrix-label", {
     description: `Record what a session's fusion runs were for and how they ended: /matrix-label <work-item> <${LABEL_OUTCOMES.join("|")}> [evidence]`,
     handler: async (args, ctx) => {
       const text = String(args ?? "").trim();
       const [workItem, outcome, ...rest] = text.split(/\s+/);
-      if (!workItem || !LABEL_OUTCOMES.includes(outcome)) {
+      if (!workItem || !isOutcome(outcome)) {
         ctx.ui.notify(`usage: /matrix-label <work-item> <${LABEL_OUTCOMES.join("|")}> [evidence]`, "error");
         return;
       }

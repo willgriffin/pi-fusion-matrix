@@ -570,6 +570,48 @@ check("proxy: an error event before any event recovers like a throw",
     && eventRecovered.final.details?.proxied?.attempts?.length === 3,
   `attempts=${JSON.stringify(eventAttempts)}, provider=${eventRecovered.final.details?.proxied?.provider}, recorded=${eventRecovered.final.details?.proxied?.attempts?.length}`);
 
+// A seat that fails twice — once on a temperature override, then again on the retry — is two attempts, each
+// with its own time. Keeping only the last call's figure understates what the route spent.
+let retryCalls = 0;
+const temperatureThenFail = async (args) => {
+  retryCalls += 1;
+  await new Promise((resolve) => setTimeout(resolve, 4));
+  return retryCalls === 1
+    ? { text: "", usage: { input: 1, output: 0, totalTokens: 1, cost: { total: 0 } }, stopReason: "error", errorMessage: "this model rejects a temperature override", toolCalls: [] }
+    : { text: "", usage: { input: 1, output: 0, totalTokens: 1, cost: { total: 0 } }, stopReason: "error", errorMessage: "the provider said no", toolCalls: [] };
+};
+const retryRun = await runPipeline({ config, sources, fusion: { ...config.fusions.quick, id: "quick" }, prompt: "retry and fail", callModel: temperatureThenFail, decide, emit: silent, registry });
+const retrySeat = retryRun.details.seats?.[0];
+check("both failed calls of one seat are attempts, each with its own time",
+  retryCalls >= 2 && retrySeat?.attempts?.length === 2   // the alias may walk on to its next provider after
+    && retrySeat.attempts.every((a) => Number.isFinite(a.durationMs) && a.durationMs >= 1)
+    && retrySeat.attempts[0].reason === "transient" && retrySeat.attempts[1].reason === "transient",
+  `calls=${retryCalls} attempts=${JSON.stringify(retrySeat?.attempts)}`);
+
+// A partial whose usage is the harness's zero-valued placeholder is not a spend: recording it would report a
+// route that never reached a model as one that cost something unpriced.
+const makeZeroUsageFailingPeer = (seen) => ({
+  streamSimple: (model, context, options) => {
+    seen.push({ model, context, options });
+    const empty = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+    const partial = { role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [], usage: empty, stopReason: "stop", timestamp: Date.now() };
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield { type: "start", partial };
+        yield { type: "text_delta", contentIndex: 0, delta: "half", partial };
+        throw new Error("the stream broke before any token was priced");
+      },
+      result: async () => partial,
+    };
+  },
+});
+const zeroSeen = [];
+const zeroUsageRun = await driveStream(fusionStream(makeZeroUsageFailingPeer(zeroSeen))(fusionModel("proxy-eventful"), harnessContext, harnessOptions));
+const zeroAttempts = zeroUsageRun.final.details?.proxied?.attempts ?? [];
+check("a zero-valued partial usage is not recorded as a spend",
+  zeroAttempts.length >= 1 && zeroAttempts.every((a) => a.usage === undefined),
+  `attempts=${JSON.stringify(zeroAttempts)}`);
+
 // A peer whose stream cannot even be created: the failure is a route that never began, and it must not take
 // the reader of the run's own bookkeeping down with it.
 const makeThrowingPeer = (seen) => ({

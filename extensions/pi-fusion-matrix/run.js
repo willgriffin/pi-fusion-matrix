@@ -71,6 +71,10 @@ export function classifyFailure(text) {
  */
 const PEER_WALK_LEVELS = 6;
 
+/** A usage that spent something: the tokens or the priced total, not the presence of the object. */
+const spentSomething = (usage) => ((usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) > 0)
+  || (usage.cost?.total ?? 0) > 0;
+
 const PEERS = [
   { harness: "pi", subpath: "node_modules/@earendil-works/pi-ai/dist/compat.js", bare: "@earendil-works/pi-ai/compat" },
   { harness: "omp", subpath: "node_modules/@oh-my-pi/pi-ai/src/index.ts", bare: "@oh-my-pi/pi-ai" },
@@ -458,7 +462,9 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
             beforeStart = copy.error?.errorMessage ?? "target reported an error before any event";
             break;
           }
-          if (copy.partial?.usage) lastUsage = copy.partial.usage;
+          // A partial's usage starts as `freshUsage()` — a zero-valued object — so truthiness alone would record
+          // a spend for a route that never reached a model. Only a usage that spent something counts.
+          if (copy.partial?.usage && spentSomething(copy.partial.usage)) lastUsage = copy.partial.usage;
           if (copy.type === "done") { copy.message = dressed(copy.message); terminal = "done"; terminalMessage = copy.message; }
           if (copy.type === "error") { copy.error = dressed(copy.error); terminal = "error"; terminalMessage = copy.error; }
           push(copy);
