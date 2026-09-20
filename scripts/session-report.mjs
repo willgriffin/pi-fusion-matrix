@@ -485,17 +485,18 @@ export function aggregate(sessions) {
       // hallucinated location is worth *seeing* rather than trusting, and a path that does not exist is the
       // cheapest evidence that a finding was not read off the diff.
       const review = record.review;
-      if (details.verdict || details.malformedAnswer) {
+      const malformedChain = Array.isArray(details.malformedAnswers) ? details.malformedAnswers : [];
+      if (details.verdict || malformedChain.length > 0) {
         review.runs += 1;
         if (typeof details.dispositionBy === "string") review.by.set(details.dispositionBy, (review.by.get(details.dispositionBy) ?? 0) + 1);
         if (typeof details.verdict === "string") review.verdicts.set(details.verdict, (review.verdicts.get(details.verdict) ?? 0) + 1);
-        if (details.malformedAnswer) {
+        // Every entry is counted, superseded or not: a run that produced three bad answers before a good one
+        // produced three, and a count that only saw the last would be the lossy record all over again.
+        for (const entry of malformedChain) {
           review.malformed += 1;
-          const reason = details.malformedAnswer.reason ?? "no reason recorded";
+          const reason = entry?.reason ?? "no reason recorded";
           review.reasons.set(reason, (review.reasons.get(reason) ?? 0) + 1);
-          // Superseded is not the same as absent: the answer failed its contract and a later one answered, and a
-          // reader that cannot tell those apart is reading a record that hides a failure.
-          if (typeof details.malformedAnswer.supersededBy === "string") review.superseded += 1;
+          if (typeof entry?.supersededBy === "string") review.superseded += 1;
         }
         for (const finding of Array.isArray(details.findings) ? details.findings : []) {
           const severity = typeof finding?.severity === "string" ? finding.severity : "unknown";
@@ -621,7 +622,7 @@ export function render(report, { limit = 12 } = {}) {
   lines.push("");
   const reviewRows = [...report.deliberation.values()].filter((row) => (row.review?.runs ?? 0) > 0).sort((a, b) => (b.review.runs - a.review.runs));
   if (reviewRows.length > 0) {
-    lines.push("review dispositions (details.verdict / details.malformedAnswer)");
+    lines.push("review dispositions (details.verdict / details.malformedAnswers)");
     for (const row of reviewRows) {
       const { review } = row;
       const counts = (map) => [...map].map(([k, v]) => `${k} ${v}`).join(", ") || "—";
@@ -1258,14 +1259,14 @@ function check() {
     { type: "message", message: { role: "assistant", api: FUSION_API, provider: "fusion-matrix", model: "review-quick",
       usage: usage(400, 60, 0.003), content: [{ type: "text", text: "I could not read the diff." }],
       details: { fusion: "review-quick", seats: [], seatErrors: [], usage: usage(400, 60, 0.003),
-        malformedAnswer: { persona: "review-synth", reason: "the answer was not a JSON object" } } } },
+        malformedAnswers: [{ persona: "review-synth", reason: "the answer was not a JSON object" }] } } },
     // A malformed answer that a later one superseded, and a finding naming an absolute path — which is outside
     // the session's tree by construction and therefore cannot be verified at all, let alone "found".
     { type: "message", message: { role: "assistant", api: FUSION_API, provider: "fusion-matrix", model: "review-single",
       usage: usage(300, 40, 0.002), content: [{ type: "text", text: "{\"verdict\":\"clean\"}" }],
       details: { fusion: "review-single", seats: [], seatErrors: [], usage: usage(300, 40, 0.002),
         dispositionBy: "review-synth", verdict: "clean", severityCounts: {},
-        malformedAnswer: { persona: "judge", reason: "the answer was not a JSON object", supersededBy: "review-synth" },
+        malformedAnswers: [{ persona: "judge", reason: "the answer was not a JSON object", supersededBy: "review-synth" }],
         findings: [{ severity: "minor", path: "/etc/passwd", line: null, criterion: "c", claim: "a path outside the tree" }] } } },
   ], { file: "review.jsonl", harness: "pi" });
   const reviewReport = buildReport({ sessions: [reviewSession], roots: [], unreadable: [] });
@@ -1300,6 +1301,24 @@ function check() {
       && reviewReport.deliberation.get("pi/review-single")?.review.superseded === 1
       && reviewReport.deliberation.get("pi/review-single")?.review.verdicts.get("clean") === 1,
     reviewText.split("\n").find((l) => l.includes("superseded")) ?? "no superseded line");
+  // A run can fail its contract more than once. The chain is counted entry by entry, because a record that kept
+  // only the last bad answer would have lost the earlier ones — the exact loss this shape exists to prevent.
+  const chainedSession = extractSession([{ ...sessionMeta, cwd: reviewDir },
+    { type: "message", message: { role: "assistant", api: FUSION_API, provider: "fusion-matrix", model: "review-check",
+      usage: usage(200, 20, 0.001), content: [{ type: "text", text: "not a disposition" }],
+      details: { fusion: "review-check", seats: [], seatErrors: [], usage: usage(200, 20, 0.001),
+        malformedAnswers: [
+          { persona: "judge", reason: "the answer was not a JSON object", supersededBy: "review-synth" },
+          { persona: "review-synth", reason: "verdict is not one of clean|findings" },
+        ] } } },
+  ], { file: "chained.jsonl", harness: "pi" });
+  const chainedReport = buildReport({ sessions: [chainedSession], roots: [], unreadable: [] });
+  const chainedReview = chainedReport.deliberation.get("pi/review-check")?.review;
+  ok("two bad answers are both counted, and the chain says which one stands",
+    chainedReview?.malformed === 2 && chainedReview?.superseded === 1
+      && chainedReview?.reasons.get("the answer was not a JSON object") === 1
+      && render(chainedReport).includes("malformed 2 × (1 superseded by a later answer)"),
+    JSON.stringify({ malformed: chainedReview?.malformed, superseded: chainedReview?.superseded, reasons: [...(chainedReview?.reasons ?? [])] }));
   fs.rmSync(reviewDir, { recursive: true, force: true });
 
   const failures = results.filter((r) => !r.pass);

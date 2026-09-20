@@ -79,10 +79,10 @@ test("the run's own abort is not a seat timeout", async () => {
   const started = Date.now();
   const result = await pending;
   assert.equal(result.degraded, true);
-  // The caller stopping the run must not be recorded as the provider failing to answer in time, and it must not
-  // buy a retry: a stopped run has nobody waiting for the next attempt.
-  assert.equal(result.attempts[0].reason, "transient");
+  // A cancelled run is neither a provider failure nor a timeout: filed as `transient` it would read as a
+  // provider that failed, and the failure taxonomy is what a later reader uses to decide what to retry.
+  assert.equal(result.attempts[0].reason, "aborted");
   assert.doesNotMatch(result.attempts[0].detail, /no answer within/);
-  assert.equal(result.calls, 1);
+  assert.equal(result.calls, 1, "a stopped run must not buy a retry");
   assert.ok(Date.now() - started < 1000, `settled in ${Date.now() - started} ms`);
 });

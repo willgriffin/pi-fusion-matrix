@@ -285,7 +285,7 @@ for (const [name, payload] of flawedDispositions) {
     flawResults.push([name, false, `the run threw: ${error.message}`]);
     continue;
   }
-  flawResults.push([name, Boolean(run.details.malformedAnswer) && run.details.findings === undefined && run.details.verdict === undefined, run.details.malformedAnswer?.reason]);
+  flawResults.push([name, Boolean(run.details.malformedAnswers?.length) && run.details.findings === undefined && run.details.verdict === undefined, run.details.malformedAnswers?.[0]?.reason]);
 }
 check("a disposition that violates the schema is recorded as malformed, never as a clean review",
   flawResults.every(([, ok]) => ok),
@@ -293,9 +293,9 @@ check("a disposition that violates the schema is recorded as malformed, never as
 
 const malformedRun = await runReview(dispositionModel("I could not read the diff, sorry."));
 check("an answer that is not a JSON object is recorded as malformed, not as a clean review",
-  malformedRun.details.malformedAnswer?.persona === "review-synth" && malformedRun.details.findings === undefined
+  malformedRun.details.malformedAnswers?.[0]?.persona === "review-synth" && malformedRun.details.findings === undefined
     && malformedRun.details.verdict === undefined,
-  JSON.stringify(malformedRun.details.malformedAnswer));
+  JSON.stringify(malformedRun.details.malformedAnswers));
 
 // Three JSON seats, three answers, one record. `review-committee` ends in `judge` then `review-synth`, so a
 // per-persona model can put a different kind of answer in each seat and the run-level record has to stay
@@ -312,25 +312,37 @@ const runReviewCheck = (answers) => runPipeline({ config, sources, fusion: { ...
 // contract, is recovered as data and recorded against nothing.
 const foreignJson = await runReviewCheck({ judge: { label: "mechanical", confidence: 0.95 }, "review-synth": { verdict: "clean", findings: [] } });
 check("a JSON answer that does not claim to be a disposition is not judged by its schema",
-  foreignJson.details.malformedAnswer === undefined && foreignJson.details.verdict === "clean"
+  foreignJson.details.malformedAnswers === undefined && foreignJson.details.verdict === "clean"
     && foreignJson.details.dispositionBy === "review-synth",
-  JSON.stringify({ malformed: foreignJson.details.malformedAnswer, verdict: foreignJson.details.verdict }));
+  JSON.stringify({ malformed: foreignJson.details.malformedAnswers, verdict: foreignJson.details.verdict }));
 
 // A malformed answer that arrives *after* a valid one wins outright; that ordering is the one that must never
 // read as clean.
 const shadowed = await runReviewCheck({ judge: { verdict: "clean", findings: [] }, "review-synth": "not a disposition at all" });
 check("a malformed final disposition leaves no earlier verdict standing",
-  shadowed.details.malformedAnswer?.persona === "review-synth" && shadowed.details.malformedAnswer?.supersededBy === undefined
+  shadowed.details.malformedAnswers?.[0]?.persona === "review-synth" && shadowed.details.malformedAnswers?.[0]?.supersededBy === undefined
     && shadowed.details.verdict === undefined && shadowed.details.findings === undefined,
-  JSON.stringify({ malformed: shadowed.details.malformedAnswer, verdict: shadowed.details.verdict }));
+  JSON.stringify({ malformed: shadowed.details.malformedAnswers, verdict: shadowed.details.verdict }));
 
 // The other order: a malformed answer, then one that answers. The failure is not deleted by being superseded —
 // it is named as superseded, so no reader can call the pairing ambiguous.
 const superseded = await runReviewCheck({ judge: "not a disposition at all", "review-synth": { verdict: "clean", findings: [] } });
 check("a valid disposition after a malformed answer names the answer it superseded",
   superseded.details.verdict === "clean" && superseded.details.dispositionBy === "review-synth"
-    && superseded.details.malformedAnswer?.persona === "judge" && superseded.details.malformedAnswer?.supersededBy === "review-synth",
-  JSON.stringify({ verdict: superseded.details.verdict, malformed: superseded.details.malformedAnswer }));
+    && superseded.details.malformedAnswers?.[0]?.persona === "judge" && superseded.details.malformedAnswers?.[0]?.supersededBy === "review-synth",
+  JSON.stringify({ verdict: superseded.details.verdict, malformed: superseded.details.malformedAnswers }));
+
+// Bad answer, then another bad answer: the record is a chain, so the first one does not disappear when the
+// second lands — it is named as superseded by it, and the standing failure is the last entry.
+const chainedMalformed = await runReviewCheck({ judge: "not a disposition at all", "review-synth": { verdict: "banana", findings: [] } });
+check("a second bad answer does not erase the first",
+  chainedMalformed.details.malformedAnswers?.length === 2
+    && chainedMalformed.details.malformedAnswers[0].persona === "judge"
+    && chainedMalformed.details.malformedAnswers[0].supersededBy === "review-synth"
+    && chainedMalformed.details.malformedAnswers[1].persona === "review-synth"
+    && chainedMalformed.details.malformedAnswers[1].supersededBy === undefined
+    && chainedMalformed.details.malformedAnswers[1].reason === "verdict is not one of clean|findings",
+  JSON.stringify(chainedMalformed.details.malformedAnswers));
 
 // 7. proxy: the harness's context goes to the writing seat's alias verbatim, and its events come back
 const seen = [];

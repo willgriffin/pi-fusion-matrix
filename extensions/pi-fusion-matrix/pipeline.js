@@ -303,6 +303,9 @@ export async function runSeat(args) {
  * hang is a silent run — no answer, no error, nothing to report — for as long as the harness waits, which is
  * forever. Observed seat calls on a full-diff packet run 12–80 s, so this leaves room for a slow provider and
  * still turns a stall into a substitution. A fusion may tighten or loosen it with `seatTimeoutMs`.
+ *
+ * The bound is built from `AbortSignal.timeout` and `AbortSignal.any`, so the runtime floor this package
+ * declares in `engines` is Node 20.3 rather than whatever the extension API alone would need.
  */
 const SEAT_TIMEOUT_MS = 300000;
 
@@ -464,8 +467,11 @@ async function runSeatInner({
       // keep only the final figure.
       const noteFailure = (failed) => {
         const text = failed.errorMessage ?? "unknown error";
+        // A cancelled run is neither the provider's failure nor a timeout: the taxonomy has to say which, or a
+        // deliberate stop is filed as a transient provider error and read as one later.
         const reason = failed.timedOut ? "timeout"
-          : QUOTA.test(text) ? "quota" : CREDENTIAL.test(text) ? "credential" : MISSING_MODEL.test(text) ? "missing model" : "transient";
+          : signal?.aborted ? "aborted"
+            : QUOTA.test(text) ? "quota" : CREDENTIAL.test(text) ? "credential" : MISSING_MODEL.test(text) ? "missing model" : "transient";
         attempts.push({ alias: resolved.alias, seat: label(resolved), reason, detail: text, durationMs: failed.durationMs });
         return { text, reason };
       };
@@ -501,9 +507,9 @@ async function runSeatInner({
             degraded: true, error: text, reason, calls,
           };
         }
-        // A retry is for a failure that might not repeat. When the *caller* stopped the run, the next attempt
-        // is not a second chance, it is two seconds of dead time per seat on a run nobody is waiting for.
-        const isTransient = reason === "transient" && !signal?.aborted;
+        // A retry is for a failure that might not repeat. `aborted` and `timeout` are not transient, so a
+        // cancelled run and a stalled provider both advance rather than paying the wait again.
+        const isTransient = reason === "transient";
         if (isTransient) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
           const retried = await call(!noTemperature.has(key));
@@ -583,21 +589,25 @@ export async function runPipeline({
   const seatRecords = [];
   const runStartedAt = Date.now();
   let lastDisposition = null;
-  let malformedAnswer = null;
+  const malformedAnswers = [];
   /**
-   * One writer, in order. A valid disposition supersedes an earlier malformed answer — but superseding it is not
-   * deleting it: the malformed answer is a fact about the run, so it stays in the record, named as superseded, and
-   * a consumer can never read a standing verdict beside an unexplained flaw. A malformed answer that arrives
-   * *after* a valid one wins outright, which is the ordering that must not read as clean.
+   * One writer, in order, and nothing is overwritten. Every answer that failed its contract is a fact about the
+   * run, so each one stays in the record; when a later answer lands — valid or malformed — the ones before it are
+   * named as superseded by it. The answer that stands is the one `dispositionBy` names; when no valid answer
+   * landed, it is the last malformed entry, the only one left without `supersededBy`.
+   *
+   * A malformed answer that arrives after a valid one takes the standing position outright: that ordering must
+   * never read as clean. A malformed answer after another malformed one does not make the first disappear — the
+   * record is a chain, not a slot.
    */
   const noteDisposition = (seat) => {
+    if (!seat.disposition && !seat.malformed) return;
+    for (const earlier of malformedAnswers) if (earlier.supersededBy === undefined) earlier.supersededBy = seat.persona;
     if (seat.disposition) {
       lastDisposition = { persona: seat.persona, ...seat.disposition };
-      if (malformedAnswer) malformedAnswer.supersededBy = seat.persona;
-    }
-    if (seat.malformed) {
-      malformedAnswer = { persona: seat.persona, reason: seat.malformed };
+    } else {
       lastDisposition = null;
+      malformedAnswers.push({ persona: seat.persona, reason: seat.malformed });
     }
   };
   const rounds = [];
@@ -835,13 +845,11 @@ export async function runPipeline({
     // `seatErrors` is always present, empty array included: a run that degraded quietly is a wrong answer.
     details: { fusion: fusion.id, mode: fusion.mode, stages, seats: seatRecords, seatErrors, rounds, substitutions,
       cascades: [...cascades, ...cascadeRecords], durationMs: Date.now() - runStartedAt,
-      // A review's numbers live here: the deciding seat's verdict and findings with their severities, and the
-      // count per severity, so a run whose findings are all `editorial` is visible as such. A JSON answer that
-      // did not satisfy the contract it was asked for is recorded as `malformedAnswer` — the name a classifier's
-      // broken JSON deserves as much as a review's — because an answer that failed its own contract must never
-      // read as a clean result.
+      // `malformedAnswers` is a chain, one entry per answer that failed its own contract, each naming the seat
+      // that superseded it: an answer that failed is a fact about the run, and a fact that a later answer
+      // overwrites is a fact the record lost.
       ...(lastDisposition ? { dispositionBy: lastDisposition.persona, verdict: lastDisposition.verdict, severityCounts: countSeverities(lastDisposition.findings), findings: lastDisposition.findings } : {}),
-      ...(malformedAnswer ? { malformedAnswer } : {}) },
+      ...(malformedAnswers.length > 0 ? { malformedAnswers } : {}) },
     stagesRun,
   };
 }

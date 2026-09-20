@@ -543,12 +543,13 @@ answer stands), `details.verdict`, `details.findings` (`severity` from `blocking
 `path`, `line`, `criterion`, `claim`) and `details.severityCounts`. Severity is what decides whether another
 review is worth buying — an `editorial` finding never is — which is the point of recording it at all.
 
-A schema violation is recorded as `details.malformedAnswer` with the reason, and records no verdict and no
+A schema violation is recorded as `details.malformedAnswers` with the reason, and records no verdict and no
 findings: `{"verdict":"clean"}` is an answer that claims the contract and fails it, and a run that returns one
 is not a clean review. The schema judges an answer that *claims* to be a disposition (it carries `verdict` or
-`findings`) — another JSON persona's answer is a valid answer to a different contract — and a malformed answer
-that arrives after a valid one displaces it, while one that a valid answer supersedes stays in the record with
-`supersededBy` naming the seat that answered instead. A finding's `line` keeps an explicit `null`.
+`findings`) — another JSON persona's answer is a valid answer to a different contract — and the record is a
+chain, not a slot: every answer that failed its contract stays, each naming the seat that superseded it, so a
+second bad answer cannot erase the first and a malformed answer that arrives after a valid one takes the standing
+position outright. A finding's `line` keeps an explicit `null`.
 
 `path` is the reviewer's claim, not a fact — the cheap rung names files it has only read as text — so
 `session-report.mjs` checks each recorded path against the session's working directory and prints

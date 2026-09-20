@@ -665,6 +665,7 @@ async function runSeat(
    | text matches `/not found|unknown model|\b404\b/i` | advance | `"missing model"` | both |
    | transport failure, 5xx, or a 429 without quota semantics | retry same candidate once after 2000 ms, then advance | `"transient"` | both |
    | a decision candidate answered, but `sufficientWhen` did not hold | advance at once, keeping the answer | `"insufficient"` | seat cascade |
+   | the caller stopped the run, or the seat's own deadline passed | advance at once, no retry | `"aborted"` / `"timeout"` | seat cascade |
    | any delta already streamed to the caller | do not advance; end with emitted text, `degraded: true` | — | — |
 
    `"insufficient"` is not a failure and must not be reported as one. Its line names the answer and
@@ -1284,12 +1285,15 @@ was asked for an object, and prose (or a top-level array) is a broken contract h
 `{"verdict":"clean"}` is not a clean review; it is an answer that claims the contract and fails it, and it reads
 as exactly that.
 
-**One writer, in order.** A valid disposition supersedes an earlier malformed answer, and superseding is not
-deleting: the malformed answer stays in the record with `supersededBy` naming the seat that answered instead, so
-a reader can never see a standing verdict beside an unexplained flaw. A malformed answer that arrives *after* a
-valid one wins outright, which is the ordering that must not read as clean. A finding's `line` keeps an explicit
-`null` — the persona prompt allows a null line for a finding about the change as a whole, and dropping the key
-would lose a field the contract says is always present.
+**One writer, in order, and nothing is overwritten.** `details.malformedAnswers` is a chain: one entry per answer
+that failed its contract, in the order they arrived, each naming the seat that superseded it. A valid disposition
+supersedes an earlier malformed answer; a malformed answer supersedes either kind, and takes the standing position
+outright — that ordering is the one that must never read as clean. Superseding is not deleting, and it is not
+overwriting either: a run that produced three bad answers before a good one produced three, and a record that kept
+only the last would have lost two failures. The answer that stands is the one `dispositionBy` names; when no valid
+answer landed, it is the last entry in the chain. A finding's `line` keeps an explicit `null` — the persona prompt
+allows a null line for a finding about the change as a whole, and dropping the key would lose a field the contract
+says is always present.
 
 Severity is what decides whether another review is bought: an `editorial` finding never does, and a run whose
 findings are all `editorial` is visible as such.
@@ -1665,7 +1669,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
 
 30. **The review route** — `npm test` passes 7/7 unit tests (`test/seat-deadline.test.mjs`,
     `test/disposition.test.mjs`: the seat deadline with its advance and its abort cases, and the disposition
-    schema judged only where it applies). `node scripts/interp-check.mjs` passes 59/59, the new ones covering:
+    schema judged only where it applies). `node scripts/interp-check.mjs` passes 60/60, the new ones covering:
     a mechanical class routing to `review-quick`, a standard one to `review-check`, the boundary class
     escalating to `smrt-review`'s own mode with `routing.escalated` (not `declined`), an unsure answer
     escalating rather than routing cheap; an `execute: false` rung deliberating on a *tool-bearing* turn with
@@ -1673,15 +1677,16 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     review run recording `dispositionBy`, `verdict`, `findings`, their `severityCounts` and a `null` line kept;
     seven schema-violating answers each recorded as malformed rather than as a clean review; a malformed final
     answer leaving no earlier verdict standing; a valid answer after a malformed one naming what it superseded;
-    and a JSON answer that claims no disposition being left unjudged. Five are mutation-proven — the seat
-    deadline disabled, the claim discriminator removed, `supersededBy` dropped, the path guard bypassed, and
-    the schema check removed — and each red names the check it fails. The five load errors are the `config`
-    rules: `execute: false` with `proxy`, `review` without `execute: false`, `review` without `route`, a review
-    route target that is an executor, and a JSON-writing seat without `execute: false`. `node
-    scripts/session-report.mjs --check` passes 86/86, five of them reading a disposition out of a session: its
-    verdict, the persona that stands, its severities, and its finding paths — one under the session's cwd, one
-    that does not exist (so `[path not found]`), one absolute (so `[path outside the session]`, never resolved),
-    and a malformed answer a later one superseded. Then live: a packet reviewed through
+    a second bad answer not erasing the first; and a JSON answer that claims no disposition being left unjudged.
+    Six are mutation-proven — the seat deadline disabled, the claim discriminator removed, `supersededBy`
+    dropped, the chain collapsed to a slot, the path guard bypassed, and the schema check removed — and each red
+    names the check it fails. The five load errors are the `config` rules: `execute: false` with `proxy`,
+    `review` without `execute: false`, `review` without `route`, a review route target that is an executor, and a
+    JSON-writing seat without `execute: false`. `node scripts/session-report.mjs --check` passes 87/87, six of
+    them reading a disposition out of a session: its verdict, the persona that stands, its severities, and its
+    finding paths — one under the session's cwd, one that does not exist (so `[path not found]`), one absolute
+    (so `[path outside the session]`, never resolved) — a malformed answer a later one superseded, and a chain
+    of two bad answers counted entry by entry. Then live: a packet reviewed through
     `omp -p --model fusion-matrix/smrt-review`, which chose the `high` class, ran its own committee mode,
     reported three substitutions as they happened, and returned a disposition with severities.
 
