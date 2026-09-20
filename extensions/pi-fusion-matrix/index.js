@@ -139,11 +139,34 @@ export default async function (pi) {
       if (!prompt) { ctx.ui.notify("usage: /matrix <id> <prompt>", "error"); return; }
 
       ctx.ui.setStatus("matrix", `🧠 ${fusion}…`);
+
+      // The run record rides the message, as it does on the tool path: a custom message entry keeps
+      // `details` (pi's `session-manager.js` `appendCustomMessageEntry`), where before the command
+      // recorded only the answer text, so the deliberate face was unobservable once the turn ended —
+      // measured 2026-09-19: 46 stored sessions, zero deliberation records. `scripts/session-report.mjs`
+      // is the reader: it counts what it recognises and names what it does not, so a missing record
+      // cannot read as a clean run.
+      //
+      // Delivery is a separate fact from the run. A message the harness refuses to write is a delivery
+      // failure and says so; folding it into the run's outcome would file a good deliberation as a failed
+      // one, which is the one thing a run record must never do.
+      const record = async (content, details) => {
+        try {
+          await pi.sendMessage({ customType: "matrix-answer", content, display: true, details }, { triggerTurn: false });
+        } catch (error) {
+          ctx.ui.notify(`the run record could not be written: ${error?.message ?? String(error)}`, "error");
+        }
+      };
+
       try {
         const result = await runOnce({ config, sources, fusion, prompt, getRegistry: () => getRegistry(sessionIdOf(ctx)), decide, callModel, onProgress: (line) => ctx.ui.setStatus("matrix", line), getWriteParameters });
-        pi.sendMessage({ customType: "matrix-answer", content: result.text, display: true }, { triggerTurn: false });
+        await record(result.text, { fusion, ...result.details });
       } catch (error) {
-        ctx.ui.notify(`fusion failed: ${error?.message ?? String(error)}`, "error");
+        const message = error?.message ?? String(error);
+        ctx.ui.notify(`fusion failed: ${message}`, "error");
+        // A failure is the record most worth keeping: without it the next day's report cannot tell a run
+        // that failed from a fusion nobody asked.
+        await record(`fusion failed: ${message}`, { fusion, error: message });
       } finally {
         ctx.ui.setStatus("matrix", undefined);
       }

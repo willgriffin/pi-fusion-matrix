@@ -473,6 +473,41 @@ The run record is the audit trail: `details.stages` (kind and calls per stage �
 `details.verification`, `details.rounds`, and `details.usage` — with `seatErrors` and `substitutions`
 always present, empty arrays included.
 
+A record is only an audit trail if it survives the turn, so both entry points persist it: the tool result
+and the `/matrix` answer message carry the same `details` (a custom message entry keeps them), and a run
+that failed records the failure — a run whose seats all died keeps its degraded seats, `seatErrors` and
+substitutions, and a run that threw records `{ fusion, error }` — instead of only raising a notification. `scripts/session-report.mjs`
+reads them back out of the harness's own session files — no network, no keys, no model calls, no writes:
+
+```bash
+node scripts/session-report.mjs                          # ~/.pi/agent/sessions and ~/.omp/agent/sessions
+node scripts/session-report.mjs --cwd my-project --since 2026-09-19
+node scripts/session-report.mjs --verbose                # one line per record, with its timestamp
+node scripts/session-report.mjs --json                   # the same numbers, for a spreadsheet
+node scripts/session-report.mjs --harness pi             # one harness's store (the other is named, not omitted)
+```
+
+Money always states its basis: a cost is `$X reported`, with the messages whose provider reported no price
+counted beside it, never folded into a single total that reads as free.
+
+It totals turns, tokens, cost, tool calls and tool errors per fusion, per model **and per harness** — the
+two harnesses record different things, so folding them together would average a fact with a silence — and for each
+deliberation: seats, degraded seats, seat errors, cascades split sufficient/advanced, substitutions,
+decision tokens, routes, verification. Two absences it refuses to read as zeros — a duration the harness
+did not record (pi records none, omp records `duration`/`ttft`) and a price a provider did not report (a
+subscription plan reports $0) — because "we did not record it" and "it cost nothing" are different facts.
+It reads all three carriers a run's record can ride: a tool result, a `/matrix` answer message, and a turn
+where a fusion is the session's own model (the streamed path records `details.fusion` on the assistant
+message).
+Anything shaped like a run record it cannot attribute, and any line it cannot parse, is printed rather
+than skipped: a reader that silently dropped either would make a missing record look like a clean run.
+`--cwd`, `--since` and `--harness` select what is totalled, never what is accounted for — the files read,
+the lines that did not parse, the stores and sessions a filter left out, and any session a filter could not
+attribute (a truncated header has no `cwd` to compare; an unplaceable timestamp cannot be dated) are
+reported either way with their file and line, and the exit status is non-zero when anything could not be
+accounted for — an unreadable file, a line that did not parse, a session a filter could not attribute — so
+neither a filtered nor a truncated report can pass a short total off as a fact about the fusions.
+
 ## What leaves your machine
 
 Two things, and both are worth knowing before the first run:
@@ -557,6 +592,7 @@ quota blocks a live one:
 node scripts/typesafe-stub.mjs & node scripts/semif-stub.mjs &      # local backends
 node scripts/interp-check.mjs                                       # 9 interpreter contracts
 node scripts/doctor.mjs                                             # config + connectivity
+node scripts/session-report.mjs --check                             # the run-record reader's accounting
 node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone
 node scripts/semif-probe.mjs    --backend http://127.0.0.1:8792/score
 ```
