@@ -54,7 +54,10 @@ async function postJson(fetchImpl, url, body, { apiKey, timeoutMs, signal, log }
     let response;
     try {
       response = await fetchImpl(url, {
-        method: "POST", headers, body: JSON.stringify(body), signal: timeoutSignal(timeoutMs, signal),
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: timeoutSignal(timeoutMs, signal),
       });
     } catch (error) {
       // `fetch` rejects before a response exists: refused connection, DNS, or the timeout signal. That
@@ -92,9 +95,19 @@ function normaliseTypeSafeAnswers(payload, expectedIds) {
   const out = {};
   for (const id of expectedIds) {
     const answer = answers[id];
-    if (!answer) { out[id] = null; continue; }
+    if (!answer) {
+      out[id] = null;
+      continue;
+    }
     if (answer.type === "noul") out[id] = { type: "noul", noul: answer.noul };
-    else if (answer.type === "score") out[id] = { type: "score", score: answer.score, legend: answer.legend, probabilities: answer.probabilities, confidence: answer.confidence };
+    else if (answer.type === "score")
+      out[id] = {
+        type: "score",
+        score: answer.score,
+        legend: answer.legend,
+        probabilities: answer.probabilities,
+        confidence: answer.confidence,
+      };
     else out[id] = { type: "choice", choice: answer.choice, probabilities: answer.probabilities, confidence: answer.confidence };
   }
   return out;
@@ -103,7 +116,8 @@ function normaliseTypeSafeAnswers(payload, expectedIds) {
 const usageFrom = (payload) => ({
   input: payload?.usage?.input_tokens ?? 0,
   output: payload?.usage?.output_tokens ?? 0,
-  cacheRead: 0, cacheWrite: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
   totalTokens: (payload?.usage?.input_tokens ?? 0) + (payload?.usage?.output_tokens ?? 0),
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 });
@@ -124,7 +138,9 @@ export function createDecide({ config, fetchImpl = globalThis.fetch, log } = {})
     if (backend.apiKeyEnv && !apiKey && !loopback) throw new Error(`decision backend "${backendName}" needs env var ${backend.apiKeyEnv}`);
 
     if (backend.kind === "semif" && spec.questions) {
-      throw new Error(`backend "${backendName}" is SemIf and takes one question per request; use a criteria decision or the questions form on a typesafe backend`);
+      throw new Error(
+        `backend "${backendName}" is SemIf and takes one question per request; use a criteria decision or the questions form on a typesafe backend`,
+      );
     }
     const state = truncateState(interpolate(spec.state ?? vars.input ?? "", vars, "decision state"), STATE_BUDGET_TOKENS, log);
     const options = { apiKey, timeoutMs: backend.timeoutMs, signal, log };
@@ -155,7 +171,8 @@ export function createDecide({ config, fetchImpl = globalThis.fetch, log } = {})
       const body = { state, model: backend.model, questions };
       const payload = await postJson(fetchImpl, backend.url, body, options);
       return {
-        backend: backendName, model: payload?.model ?? backend.model,
+        backend: backendName,
+        model: payload?.model ?? backend.model,
         answers: normaliseTypeSafeAnswers(payload, Object.keys(questions)),
         usage: usageFrom(payload),
       };
@@ -166,32 +183,57 @@ export function createDecide({ config, fetchImpl = globalThis.fetch, log } = {})
       const answers = {};
       let usage = usageFrom(null);
       for (const item of spec.over) {
-        const payload = await postJson(fetchImpl, backend.url, {
-          id: randomUUID(), state: `${state}\n\nResponse to evaluate (${item.persona}):\n${item.text ?? ""}`,
-          question: spec.instructions, options: toOptions(criteria), model: backend.model, max_tokens: 4096,
-        }, options);
+        const payload = await postJson(
+          fetchImpl,
+          backend.url,
+          {
+            id: randomUUID(),
+            state: `${state}\n\nResponse to evaluate (${item.persona}):\n${item.text ?? ""}`,
+            question: spec.instructions,
+            options: toOptions(criteria),
+            model: backend.model,
+            max_tokens: 4096,
+          },
+          options,
+        );
         answers[item.persona] = normaliseSemifAnswer(payload, criteria, backend.url);
         usage = sumUsage(usage, usageFrom(payload));
       }
       return { backend: backendName, model: backend.model, answers, usage };
     }
 
-    const payload = await postJson(fetchImpl, backend.url, {
-      id: randomUUID(), state, question: spec.instructions, options: toOptions(criteria),
-      model: backend.model, max_tokens: 4096,
-    }, options);
+    const payload = await postJson(
+      fetchImpl,
+      backend.url,
+      {
+        id: randomUUID(),
+        state,
+        question: spec.instructions,
+        options: toOptions(criteria),
+        model: backend.model,
+        max_tokens: 4096,
+      },
+      options,
+    );
     return {
-      backend: backendName, model: backend.model,
-      answers: { choice: normaliseSemifAnswer(payload, criteria, backend.url) }, usage: usageFrom(payload),
+      backend: backendName,
+      model: backend.model,
+      answers: { choice: normaliseSemifAnswer(payload, criteria, backend.url) },
+      usage: usageFrom(payload),
     };
   };
 }
 
 const fromCriteria = (criteria) =>
-  Object.fromEntries(Object.entries(criteria ?? {}).map(([id, value]) => [id, typeof value === "string" ? value : value?.description ?? null]));
+  Object.fromEntries(
+    Object.entries(criteria ?? {}).map(([id, value]) => [id, typeof value === "string" ? value : (value?.description ?? null)]),
+  );
 
 const toOptions = (criteria) =>
-  Object.entries(criteria ?? {}).map(([id, value]) => ({ id, description: typeof value === "string" ? value : value?.description ?? "" }));
+  Object.entries(criteria ?? {}).map(([id, value]) => ({
+    id,
+    description: typeof value === "string" ? value : (value?.description ?? ""),
+  }));
 
 function normaliseSemifAnswer(payload, criteria, url) {
   const failure = (detail) => new Error(`decision backend ${url} failed: ${detail}`);
@@ -209,7 +251,9 @@ function normaliseSemifAnswer(payload, criteria, url) {
   }
   if (ids.length === 0) throw failure("response carried no options to align");
   const probabilities = {};
-  ids.forEach((id, index) => { probabilities[id] = values[index]; });
+  ids.forEach((id, index) => {
+    probabilities[id] = values[index];
+  });
   const winner = ids.reduce((best, id) => (probabilities[id] > (probabilities[best] ?? -1) ? id : best), ids[0]);
   // SemIf reports no confidence at all — its own output says the probabilities are uncalibrated as
   // decision confidence — so this answer can never satisfy a confidence gate. That is why any
@@ -219,7 +263,10 @@ function normaliseSemifAnswer(payload, criteria, url) {
 
 function sumUsage(a, b) {
   return {
-    input: a.input + b.input, output: a.output + b.output, cacheRead: 0, cacheWrite: 0,
+    input: a.input + b.input,
+    output: a.output + b.output,
+    cacheRead: 0,
+    cacheWrite: 0,
     totalTokens: a.totalTokens + b.totalTokens,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   };

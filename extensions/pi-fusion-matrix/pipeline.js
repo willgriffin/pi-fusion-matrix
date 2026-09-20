@@ -33,7 +33,8 @@ const noTemperature = new Set();
 const noThinking = new Set();
 
 const MODELS_REJECT_TEMPERATURE = /temperature/i;
-const THINKING_UNSUPPORTED = /thinking effort .*not supported|unsupported (thinking|reasoning)|thinking .*not supported|reasoning .*not supported/i;
+const THINKING_UNSUPPORTED =
+  /thinking effort .*not supported|unsupported (thinking|reasoning)|thinking .*not supported|reasoning .*not supported/i;
 const QUOTA = /\b429\b|usage limit|quota|balance/i;
 const CREDENTIAL = /\b40[13]\b|unauthorized|invalid api key/i;
 const MISSING_MODEL = /not found|unknown model|\b404\b/i;
@@ -111,7 +112,8 @@ export function renderDecision(answer) {
  * `output: "json"` personas. The keys come from the persona's own prompt (the packaged judge names
  * them), so the instruction only has to demand the object and nothing else.
  */
-const JSON_INSTRUCTION = "Output only a valid JSON object matching the keys described above — no prose, no markdown fence, and nothing before or after it.";
+const JSON_INSTRUCTION =
+  "Output only a valid JSON object matching the keys described above — no prose, no markdown fence, and nothing before or after it.";
 
 /** The two-stage recovery the spec names: a leading fence, else the first `{` to the last `}`. */
 export function parseJsonOutput(text) {
@@ -126,7 +128,9 @@ export function parseJsonOutput(text) {
     try {
       const value = JSON.parse(candidate);
       if (value && typeof value === "object" && !Array.isArray(value)) return { ok: true, value };
-    } catch { /* try the next recovery */ }
+    } catch {
+      /* try the next recovery */
+    }
   }
   return { ok: false };
 }
@@ -217,7 +221,11 @@ export function dispositionOf(persona, text) {
   if (flaw) return { text: normaliseJsonSeat(text), malformed: flaw };
   return {
     text: JSON.stringify(value, null, 2),
-    disposition: { verdict: value.verdict, summary: typeof value.summary === "string" ? value.summary : undefined, findings: value.findings.map(normaliseFinding) },
+    disposition: {
+      verdict: value.verdict,
+      summary: typeof value.summary === "string" ? value.summary : undefined,
+      findings: value.findings.map(normaliseFinding),
+    },
   };
 }
 
@@ -259,7 +267,15 @@ function priorLine(answer) {
   return `A fast classifier read this as ${bits.join(", ") || "an inconclusive answer"}${confidence}; treat the ambiguity explicitly.`;
 }
 
-const emptyUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, reasoning: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
+const emptyUsage = () => ({
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  reasoning: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+});
 export const freshUsage = emptyUsage;
 
 export function accumulateUsage(total, extra) {
@@ -310,8 +326,20 @@ export async function runSeat(args) {
 const SEAT_TIMEOUT_MS = 300000;
 
 async function runSeatInner({
-  personaName, persona, candidates, fusion, config, registry, callModel, decide, emit, signal, vars, maxAdvance = 3,
-  onDelta, fusionSource,
+  personaName,
+  persona,
+  candidates,
+  fusion,
+  config,
+  registry,
+  callModel,
+  decide,
+  emit,
+  signal,
+  vars,
+  maxAdvance = 3,
+  onDelta,
+  fusionSource,
 }) {
   const seatTimeoutMs = Number.isInteger(fusion?.seatTimeoutMs) && fusion.seatTimeoutMs > 0 ? fusion.seatTimeoutMs : SEAT_TIMEOUT_MS;
   // A fusion may override one persona's prompt. Inline text, or a path beside the layer that declared
@@ -345,7 +373,9 @@ async function runSeatInner({
       try {
         const list = resolveCandidates(config, next);
         if (list.length > 0) return label(list[0]);
-      } catch { /* an invalid candidate cannot name the route it never had */ }
+      } catch {
+        /* an invalid candidate cannot name the route it never had */
+      }
     }
     return "—";
   };
@@ -366,15 +396,25 @@ async function runSeatInner({
       const answer = Object.values(result.answers ?? {})[0] ?? null;
       const sufficient = isSufficient(answer, candidate.sufficientWhen);
       cascades.push({
-        seat: personaName, kind: "decision", answer,
-        sufficient, advancedTo: sufficient ? undefined : "next candidate",
+        seat: personaName,
+        kind: "decision",
+        answer,
+        sufficient,
+        advancedTo: sufficient ? undefined : "next candidate",
         prior: sufficient ? undefined : priorLine(answer),
       });
       if (sufficient) {
         emit.delta(` ├─ ⚖️ ${personaName} via decision (${describeAnswer(answer, candidate.sufficientWhen)})\n`);
         return {
-          persona: personaName, text: renderDecision(answer), usage: emptyUsage(), decisionUsage: result.usage,
-          substitutions, cascades, attempts, degraded: false, calls: 1,
+          persona: personaName,
+          text: renderDecision(answer),
+          usage: emptyUsage(),
+          decisionUsage: result.usage,
+          substitutions,
+          cascades,
+          attempts,
+          degraded: false,
+          calls: 1,
         };
       }
       emit.delta(` ├─  ${personaName} decision insufficient (${describeAnswer(answer, candidate.sufficientWhen)}) → next candidate\n`);
@@ -396,7 +436,14 @@ async function runSeatInner({
       const seat = await seatRequest(registry, resolved);
       if (!seat.ok) {
         const to = nextRouteLabel(candidateIndex, resolvedList, resolvedIndex);
-        attempts.push({ alias: resolved.alias, seat: label(resolved), provider: resolved.provider, model: resolved.model, reason: seat.reason, detail: seat.detail });
+        attempts.push({
+          alias: resolved.alias,
+          seat: label(resolved),
+          provider: resolved.provider,
+          model: resolved.model,
+          reason: seat.reason,
+          detail: seat.detail,
+        });
         emit.substitution({ seat: personaName, from: label(resolved), to, reason: seat.reason, detail: seat.detail });
         substitutions.push({ seat: personaName, from: label(resolved), to, reason: seat.reason });
         continue;
@@ -418,9 +465,8 @@ async function runSeatInner({
       emit.delta(` ├─ ⏳ ${personaName}: ${resolved.provider}/${resolved.model}${thinking ? ` @${thinking}` : ""}\n`);
       // A JSON persona is asked for the object in its system prompt, and its answer is recovered to
       // JSON before any later stage sees it — so `{{judge}}` is data, not a fenced blob.
-      const seatPersona = persona.output === "json"
-        ? { ...persona, prompt: `${persona.prompt ?? ""}\n\n${JSON_INSTRUCTION}`.trim() }
-        : persona;
+      const seatPersona =
+        persona.output === "json" ? { ...persona, prompt: `${persona.prompt ?? ""}\n\n${JSON_INSTRUCTION}`.trim() } : persona;
       let temperature = temperatureFor(persona, resolved.model, undefined);
       let emitted = "";
       // A thrown transport error is an attempt like any other: classified, retried once when transient,
@@ -438,16 +484,31 @@ async function runSeatInner({
         // after cancellation and its answer waited for indefinitely.
         if (signal?.aborted) {
           return {
-            text: "", usage: emptyUsage(), stopReason: "error", toolCalls: [], durationMs: 0, timedOut: false,
+            text: "",
+            usage: emptyUsage(),
+            stopReason: "error",
+            toolCalls: [],
+            durationMs: 0,
+            timedOut: false,
             errorMessage: "the run was already aborted before this call",
           };
         }
         try {
           const message = await callModel({
-            model: seat.model, apiKey: seat.apiKey, headers: seat.headers, messages,
+            model: seat.model,
+            apiKey: seat.apiKey,
+            headers: seat.headers,
+            messages,
             temperature: withTemperature ? temperature : undefined,
-            reasoning: withThinking ? thinking : undefined, signal: bounded, persona: seatPersona,
-            onDelta: onDelta ? (chunk) => { emitted += chunk; onDelta(chunk); } : undefined,
+            reasoning: withThinking ? thinking : undefined,
+            signal: bounded,
+            persona: seatPersona,
+            onDelta: onDelta
+              ? (chunk) => {
+                  emitted += chunk;
+                  onDelta(chunk);
+                }
+              : undefined,
           });
           return { ...message, durationMs: Date.now() - callStartedAt };
         } catch (error) {
@@ -455,8 +516,12 @@ async function runSeatInner({
           // in time (a substitution), the other is the user stopping the run (which must propagate as such).
           const timedOut = deadline.aborted && !signal?.aborted;
           return {
-            text: "", usage: emptyUsage(), stopReason: "error", toolCalls: [], durationMs: Date.now() - callStartedAt,
-            errorMessage: timedOut ? `no answer within ${seatTimeoutMs} ms` : error?.message ?? String(error),
+            text: "",
+            usage: emptyUsage(),
+            stopReason: "error",
+            toolCalls: [],
+            durationMs: Date.now() - callStartedAt,
+            errorMessage: timedOut ? `no answer within ${seatTimeoutMs} ms` : (error?.message ?? String(error)),
             timedOut,
           };
         }
@@ -469,10 +534,26 @@ async function runSeatInner({
         const text = failed.errorMessage ?? "unknown error";
         // A cancelled run is neither the provider's failure nor a timeout: the taxonomy has to say which, or a
         // deliberate stop is filed as a transient provider error and read as one later.
-        const reason = failed.timedOut ? "timeout"
-          : signal?.aborted ? "aborted"
-            : QUOTA.test(text) ? "quota" : CREDENTIAL.test(text) ? "credential" : MISSING_MODEL.test(text) ? "missing model" : "transient";
-        attempts.push({ alias: resolved.alias, seat: label(resolved), provider: resolved.provider, model: resolved.model, reason, detail: text, durationMs: failed.durationMs });
+        const reason = failed.timedOut
+          ? "timeout"
+          : signal?.aborted
+            ? "aborted"
+            : QUOTA.test(text)
+              ? "quota"
+              : CREDENTIAL.test(text)
+                ? "credential"
+                : MISSING_MODEL.test(text)
+                  ? "missing model"
+                  : "transient";
+        attempts.push({
+          alias: resolved.alias,
+          seat: label(resolved),
+          provider: resolved.provider,
+          model: resolved.model,
+          reason,
+          detail: text,
+          durationMs: failed.durationMs,
+        });
         return { text, reason };
       };
 
@@ -502,9 +583,21 @@ async function runSeatInner({
         if (emitted) {
           emit.delta(` ├─ ⚠️ ${personaName}: streamed ${emitted.length} chars then failed (${reason}); ending with what was emitted\n`);
           return {
-            persona: personaName, text: emitted, provider: resolved.provider, model: resolved.model, alias: resolved.alias,
-            template: seat.template, thinking, usage: message.usage ?? emptyUsage(), substitutions, cascades, attempts,
-            degraded: true, error: text, reason, calls,
+            persona: personaName,
+            text: emitted,
+            provider: resolved.provider,
+            model: resolved.model,
+            alias: resolved.alias,
+            template: seat.template,
+            thinking,
+            usage: message.usage ?? emptyUsage(),
+            substitutions,
+            cascades,
+            attempts,
+            degraded: true,
+            error: text,
+            reason,
+            calls,
           };
         }
         // A retry is for a failure that might not repeat. `aborted` and `timeout` are not transient, so a
@@ -516,10 +609,21 @@ async function runSeatInner({
           if (retried.stopReason !== "error") {
             const retriedDisposition = dispositionOf(persona, retried.text);
             return {
-              persona: personaName, text: retriedDisposition.text, disposition: retriedDisposition.disposition, malformed: retriedDisposition.malformed,
-              provider: resolved.provider, model: resolved.model, alias: resolved.alias,
-              template: seat.template, thinking, usage: retried.usage, substitutions, cascades, attempts,
-              degraded: false, calls,
+              persona: personaName,
+              text: retriedDisposition.text,
+              disposition: retriedDisposition.disposition,
+              malformed: retriedDisposition.malformed,
+              provider: resolved.provider,
+              model: resolved.model,
+              alias: resolved.alias,
+              template: seat.template,
+              thinking,
+              usage: retried.usage,
+              substitutions,
+              cascades,
+              attempts,
+              degraded: false,
+              calls,
             };
           }
         }
@@ -531,10 +635,21 @@ async function runSeatInner({
 
       const seatDisposition = dispositionOf(persona, message.text);
       return {
-        persona: personaName, text: seatDisposition.text, disposition: seatDisposition.disposition, malformed: seatDisposition.malformed,
-        provider: resolved.provider, model: resolved.model, alias: resolved.alias,
-        template: seat.template, thinking, usage: message.usage, substitutions, cascades, attempts,
-        degraded: false, calls,
+        persona: personaName,
+        text: seatDisposition.text,
+        disposition: seatDisposition.disposition,
+        malformed: seatDisposition.malformed,
+        provider: resolved.provider,
+        model: resolved.model,
+        alias: resolved.alias,
+        template: seat.template,
+        thinking,
+        usage: message.usage,
+        substitutions,
+        cascades,
+        attempts,
+        degraded: false,
+        calls,
       };
     }
 
@@ -545,9 +660,18 @@ async function runSeatInner({
   const detail = attempts.map((a) => `${a.seat} (${a.reason})`).join(", ") || "no candidates";
   emit.delta(` ├─ ⚠️ ${personaName} unavailable: ${detail}\n`);
   return {
-    persona: personaName, text: "", provider: undefined, model: undefined, usage: emptyUsage(),
-    substitutions, cascades, attempts, degraded: true, error: `all candidates failed: ${detail}`,
-    reason: attempts[0]?.reason, calls,
+    persona: personaName,
+    text: "",
+    provider: undefined,
+    model: undefined,
+    usage: emptyUsage(),
+    substitutions,
+    cascades,
+    attempts,
+    degraded: true,
+    error: `all candidates failed: ${detail}`,
+    reason: attempts[0]?.reason,
+    calls,
   };
 }
 
@@ -556,7 +680,9 @@ function buildPrompt(persona, vars) {
   if (vars.prefix) parts.push(vars.prefix);
   parts.push(vars.input ?? vars.prompt ?? "");
   if (vars.alsoSynthesize) {
-    parts.push("After your analysis above, write the final answer to the original request in this same message, resolving what you found. Do not restate the analysis verbatim.");
+    parts.push(
+      "After your analysis above, write the final answer to the original request in this same message, resolving what you found. Do not restate the analysis verbatim.",
+    );
   }
   return parts.filter(Boolean).join("\n\n");
 }
@@ -577,9 +703,7 @@ export function resolveInput(input, vars) {
 /**
  * Walk a mode's stages. Returns the assistant text plus everything the run should report.
  */
-export async function runPipeline({
-  config, sources, fusion, prompt, registry, callModel, decide, emit, signal, cwd = process.cwd(),
-}) {
+export async function runPipeline({ config, sources, fusion, prompt, registry, callModel, decide, emit, signal, cwd = process.cwd() }) {
   const personas = loadPersonas(config, sources);
   const mode = config.modes[fusion.mode];
   const vars = { prompt, cwd };
@@ -626,11 +750,14 @@ export async function runPipeline({
   for (const [persona, list] of Object.entries(fusion.candidates ?? {})) {
     const plan = [];
     for (const candidate of list ?? []) {
-      if (isObject(candidate) && candidate.decide !== undefined) { plan.push("a decision"); continue; }
+      if (isObject(candidate) && candidate.decide !== undefined) {
+        plan.push("a decision");
+        continue;
+      }
       try {
         plan.push(...resolveCandidates(config, candidate).map(label));
       } catch {
-        plan.push("unknown route");   // the seat reports the config error when it runs
+        plan.push("unknown route"); // the seat reports the config error when it runs
       }
     }
     if (plan.length > 0) emit.delta(` ├─ plan ${persona}: ${plan.join(" → ")}\n`);
@@ -666,16 +793,29 @@ export async function runPipeline({
         const active = round === 1 ? names : lastSeats.filter((s) => !s.degraded).map((s) => s.persona);
         const seatVars = (seatName) => {
           const peers = round === 1 ? undefined : renderPeers(lastSeats.filter((s) => s.persona !== seatName && !s.degraded));
-          const input = round === 1
-            ? resolveInput(stage.input, vars)
-            : resolveInput(stage.roundInput ?? stage.input, { ...vars, peers: peers ?? "" });
+          const input =
+            round === 1 ? resolveInput(stage.input, vars) : resolveInput(stage.roundInput ?? stage.input, { ...vars, peers: peers ?? "" });
           return { ...vars, peers, input };
         };
-        const roundSeats = await Promise.all(active.map((name) => runSeat({
-          personaName: name, persona: personas[name] ?? { name, prompt: "", temperature: 0.7 }, candidates: fusion.candidates?.[name],
-          fusion, config, registry, callModel, decide, emit, signal, vars: seatVars(name), maxAdvance: fusion.maxAdvance,
-          fusionSource: sources?.fusions?.[fusion.id],
-        })));
+        const roundSeats = await Promise.all(
+          active.map((name) =>
+            runSeat({
+              personaName: name,
+              persona: personas[name] ?? { name, prompt: "", temperature: 0.7 },
+              candidates: fusion.candidates?.[name],
+              fusion,
+              config,
+              registry,
+              callModel,
+              decide,
+              emit,
+              signal,
+              vars: seatVars(name),
+              maxAdvance: fusion.maxAdvance,
+              fusionSource: sources?.fusions?.[fusion.id],
+            }),
+          ),
+        );
         lastSeats = roundSeats;
         record.calls += roundSeats.reduce((total, seat) => total + (seat.calls ?? 0), 0);
         stagesRun += 1;
@@ -684,9 +824,18 @@ export async function runPipeline({
           accumulateUsage(usage, seat.usage);
           if (seat.decisionUsage) accumulateUsage(decisionUsage, seat.decisionUsage);
           seatRecords.push({
-            persona: seat.persona, alias: seat.alias ?? seat.attempts?.[0]?.alias, provider: seat.provider, model: seat.model,
-            template: seat.template, thinking: seat.thinking, usage: seat.usage, durationMs: seat.durationMs,
-            attempts: seat.attempts, degraded: seat.degraded, error: seat.error, reason: seat.reason,
+            persona: seat.persona,
+            alias: seat.alias ?? seat.attempts?.[0]?.alias,
+            provider: seat.provider,
+            model: seat.model,
+            template: seat.template,
+            thinking: seat.thinking,
+            usage: seat.usage,
+            durationMs: seat.durationMs,
+            attempts: seat.attempts,
+            degraded: seat.degraded,
+            error: seat.error,
+            reason: seat.reason,
           });
           substitutions.push(...seat.substitutions);
           cascades.push(...seat.cascades);
@@ -710,9 +859,19 @@ export async function runPipeline({
       vars.decisionPrior = undefined;
       vars.alsoSynthesize = Boolean(stage.alsoSynthesize);
       const seat = await runSeat({
-        personaName: name, persona: personas[name] ?? { name, prompt: "", temperature: 0.7 },
-        candidates: fusion.candidates?.[name], fusion, config, registry, callModel, decide, emit, signal, vars,
-        maxAdvance: fusion.maxAdvance, fusionSource: sources?.fusions?.[fusion.id],
+        personaName: name,
+        persona: personas[name] ?? { name, prompt: "", temperature: 0.7 },
+        candidates: fusion.candidates?.[name],
+        fusion,
+        config,
+        registry,
+        callModel,
+        decide,
+        emit,
+        signal,
+        vars,
+        maxAdvance: fusion.maxAdvance,
+        fusionSource: sources?.fusions?.[fusion.id],
         // The answer streams token-by-token; every other seat reports a status line only, because five
         // interleaved answers are unreadable.
         onDelta: isLast ? (chunk) => emit.delta(chunk) : undefined,
@@ -723,9 +882,18 @@ export async function runPipeline({
       accumulateUsage(usage, seat.usage);
       if (seat.decisionUsage) accumulateUsage(decisionUsage, seat.decisionUsage);
       seatRecords.push({
-        persona: seat.persona, alias: seat.alias ?? seat.attempts?.[0]?.alias, provider: seat.provider, model: seat.model,
-        template: seat.template, thinking: seat.thinking, usage: seat.usage, durationMs: seat.durationMs,
-        attempts: seat.attempts, degraded: seat.degraded, error: seat.error, reason: seat.reason,
+        persona: seat.persona,
+        alias: seat.alias ?? seat.attempts?.[0]?.alias,
+        provider: seat.provider,
+        model: seat.model,
+        template: seat.template,
+        thinking: seat.thinking,
+        usage: seat.usage,
+        durationMs: seat.durationMs,
+        attempts: seat.attempts,
+        degraded: seat.degraded,
+        error: seat.error,
+        reason: seat.reason,
       });
       substitutions.push(...seat.substitutions);
       cascades.push(...seat.cascades);
@@ -760,16 +928,21 @@ export async function runPipeline({
       vars.judge = rendered;
       const sufficient = isSufficient(answer, stage.sufficientWhen);
       cascadeRecords.push({
-        seat: "stage", kind: "decision", answer, sufficient,
+        seat: "stage",
+        kind: "decision",
+        answer,
+        sufficient,
         advancedTo: sufficient ? undefined : "next stage",
         // An escalated stage is told what the cheap read said, so it addresses the ambiguity rather
         // than rediscovering it.
         prior: sufficient ? undefined : priorLine(answer),
       });
       if (stage.sufficientWhen) {
-        emit.delta(sufficient
-          ? ` ├─ ✅ decision sufficient (${describeAnswer(answer, stage.sufficientWhen)}) — skipping stage ${index + 1}\n`
-          : ` ├─  decision insufficient (${describeAnswer(answer, stage.sufficientWhen)}) — running stage ${index + 1}\n`);
+        emit.delta(
+          sufficient
+            ? ` ├─ ✅ decision sufficient (${describeAnswer(answer, stage.sufficientWhen)}) — skipping stage ${index + 1}\n`
+            : ` ├─  decision insufficient (${describeAnswer(answer, stage.sufficientWhen)}) — running stage ${index + 1}\n`,
+        );
         if (sufficient && index + 1 < stageList.length) {
           skipped.add(index + 1);
           // The loader rejects a gate on the final stage, so this only fires for a config that reached
@@ -808,7 +981,9 @@ export async function runPipeline({
       stagesRun += 1;
       accumulateUsage(decisionUsage, result.usage);
       const weights = Object.entries(result.answers ?? {}).map(([name, answer]) => ({
-        persona: name, score: answer?.score ?? answer?.noul ?? 0, confidence: answer?.confidence ?? 0,
+        persona: name,
+        score: answer?.score ?? answer?.noul ?? 0,
+        confidence: answer?.confidence ?? 0,
       }));
       vars.weights = renderWeights(weights);
       vars.previous = vars.weights;
@@ -843,13 +1018,29 @@ export async function runPipeline({
     usage,
     decisionUsage,
     // `seatErrors` is always present, empty array included: a run that degraded quietly is a wrong answer.
-    details: { fusion: fusion.id, mode: fusion.mode, stages, seats: seatRecords, seatErrors, rounds, substitutions,
-      cascades: [...cascades, ...cascadeRecords], durationMs: Date.now() - runStartedAt,
+    details: {
+      fusion: fusion.id,
+      mode: fusion.mode,
+      stages,
+      seats: seatRecords,
+      seatErrors,
+      rounds,
+      substitutions,
+      cascades: [...cascades, ...cascadeRecords],
+      durationMs: Date.now() - runStartedAt,
       // `malformedAnswers` is a chain, one entry per answer that failed its own contract, each naming the seat
       // that superseded it: an answer that failed is a fact about the run, and a fact that a later answer
       // overwrites is a fact the record lost.
-      ...(lastDisposition ? { dispositionBy: lastDisposition.persona, verdict: lastDisposition.verdict, severityCounts: countSeverities(lastDisposition.findings), findings: lastDisposition.findings } : {}),
-      ...(malformedAnswers.length > 0 ? { malformedAnswers } : {}) },
+      ...(lastDisposition
+        ? {
+            dispositionBy: lastDisposition.persona,
+            verdict: lastDisposition.verdict,
+            severityCounts: countSeverities(lastDisposition.findings),
+            findings: lastDisposition.findings,
+          }
+        : {}),
+      ...(malformedAnswers.length > 0 ? { malformedAnswers } : {}),
+    },
     stagesRun,
   };
 }

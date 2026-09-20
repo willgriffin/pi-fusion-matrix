@@ -22,7 +22,7 @@ import { providerStatus } from "./resolve.js";
 export const EXIT = { clean: 0, config: 1, connect: 2, drift: 3 };
 
 const refId = (ref) => (ref && typeof ref === "object" ? ref.id : ref);
-const refModel = (ref, alias) => (ref && typeof ref === "object" ? ref.modelOverride ?? alias.model : alias.model);
+const refModel = (ref, alias) => (ref && typeof ref === "object" ? (ref.modelOverride ?? alias.model) : alias.model);
 
 /** One GET /models per provider, for ids pi does not catalogue. Absent or unparseable is "unknown". */
 async function liveModels(provider, { registry, fetchImpl, signal }) {
@@ -78,16 +78,28 @@ export async function runDoctor({ config, sources, registry, online = false, fet
   for (const provider of registry ? providers : []) {
     const status = providerStatus(registry, provider);
     if (!status.known) {
-      add("error", "connect", `provider "${provider}" is not configured in pi, so aliases routing through it cannot resolve`,
-        `connect it in pi (\`/login\`, or a models.json provider entry) or remove it from the alias's providers`);
+      add(
+        "error",
+        "connect",
+        `provider "${provider}" is not configured in pi, so aliases routing through it cannot resolve`,
+        `connect it in pi (\`/login\`, or a models.json provider entry) or remove it from the alias's providers`,
+      );
     } else if (!status.authenticated) {
-      add("error", "connect", `provider "${provider}" is configured but has no credential`,
-        `authenticate it (\`/login\` ${provider}) or set its env var`);
+      add(
+        "error",
+        "connect",
+        `provider "${provider}" is configured but has no credential`,
+        `authenticate it (\`/login\` ${provider}) or set its env var`,
+      );
     }
   }
   for (const [name, count] of Object.entries(routesPerAlias)) {
     if (count === 1) {
-      add("info", "connect", `alias "${name}" has a single route, so a quota or outage on ${refId((aliases[name].providers ?? [])[0])} has no fallback`);
+      add(
+        "info",
+        "connect",
+        `alias "${name}" has a single route, so a quota or outage on ${refId((aliases[name].providers ?? [])[0])} has no fallback`,
+      );
     }
   }
 
@@ -101,10 +113,16 @@ export async function runDoctor({ config, sources, registry, online = false, fet
   for (const [id, fusion] of Object.entries(config.fusions ?? {})) {
     const executor = executorOf(config, fusion);
     if (!executor) continue;
-    const missing = ["contextWindow", "maxTokens"].filter((field) => aliases[executor.alias]?.[field] === undefined && fusion.model?.[field] === undefined);
+    const missing = ["contextWindow", "maxTokens"].filter(
+      (field) => aliases[executor.alias]?.[field] === undefined && fusion.model?.[field] === undefined,
+    );
     if (missing.length > 0) {
-      add("info", "metadata", `fusion "${id}" executes as "${executor.alias}", which declares no ${missing.join(" and no ")}, so its registered model advertises the package default for ${missing.length > 1 ? "both" : "it"}`,
-        `declare ${missing.map((field) => `\`aliases.${executor.alias}.${field}\``).join(" and ")} from that model's own limits`);
+      add(
+        "info",
+        "metadata",
+        `fusion "${id}" executes as "${executor.alias}", which declares no ${missing.join(" and no ")}, so its registered model advertises the package default for ${missing.length > 1 ? "both" : "it"}`,
+        `declare ${missing.map((field) => `\`aliases.${executor.alias}.${field}\``).join(" and ")} from that model's own limits`,
+      );
     }
   }
 
@@ -114,7 +132,12 @@ export async function runDoctor({ config, sources, registry, online = false, fet
   // failed: a CI job that asked for reachability must not get a green from an environment that has no
   // registry. The informational reach finding — an id pi does not catalogue — is a different thing: a
   // miss the operator is told about, not a check that did not happen.
-  if (online && !registry) add("warn", "reach", "online checks need a model registry (run inside pi or through /matrix-doctor); nothing about reachability or drift was checked, so this is not a clean bill");
+  if (online && !registry)
+    add(
+      "warn",
+      "reach",
+      "online checks need a model registry (run inside pi or through /matrix-doctor); nothing about reachability or drift was checked, so this is not a clean bill",
+    );
   if (online && registry) {
     for (const provider of providers) {
       const result = await liveModels(provider, { registry, fetchImpl, signal });
@@ -122,21 +145,36 @@ export async function runDoctor({ config, sources, registry, online = false, fet
       // A failed listing learned nothing, so it may not read as clean: a retired or renamed id behind
       // an unreachable provider would go unreported, which is what exit 3 is for. The finding carries
       // no `repair` — nothing here is a models.json addition, and `--repair` must not offer it as one.
-      if (!result.ok) add("warn", "reach", `could not list models for "${provider}" (${result.reason}); reachability is unknown, so nothing it serves can be called current`);
+      if (!result.ok)
+        add(
+          "warn",
+          "reach",
+          `could not list models for "${provider}" (${result.reason}); reachability is unknown, so nothing it serves can be called current`,
+        );
     }
     for (const [name, alias] of Object.entries(aliases)) {
-      const catalogued = new Set((registry?.getAll?.() ?? []).filter((m) => m.provider && alias.providers?.some((r) => refId(r) === m.provider)).map((m) => m.id));
+      const catalogued = new Set(
+        (registry?.getAll?.() ?? []).filter((m) => m.provider && alias.providers?.some((r) => refId(r) === m.provider)).map((m) => m.id),
+      );
       for (const ref of alias.providers ?? []) {
         const provider = refId(ref);
         const model = refModel(ref, alias);
         const result = live.get(provider);
         if (result?.ok && !result.ids.has(model)) {
-          add("warn", "drift", `alias "${name}" names ${provider}/${model}, which that provider no longer lists`,
-            `update \`aliases.${name}.model\` (or that route's modelOverride) to an id the provider serves; this is a decision, not a repair`);
+          add(
+            "warn",
+            "drift",
+            `alias "${name}" names ${provider}/${model}, which that provider no longer lists`,
+            `update \`aliases.${name}.model\` (or that route's modelOverride) to an id the provider serves; this is a decision, not a repair`,
+          );
         }
         if (catalogued.size > 0 && !catalogued.has(model)) {
-          add("info", "reach", `${provider}/${model} is not in pi's catalogue — expected, seats resolve by provider + id`,
-            `optional: to have it selectable in pi's own picker, upsert it:\n  {"providers": {"${provider}": {"models": [{"id": "${model}"}]}}}`);
+          add(
+            "info",
+            "reach",
+            `${provider}/${model} is not in pi's catalogue — expected, seats resolve by provider + id`,
+            `optional: to have it selectable in pi's own picker, upsert it:\n  {"providers": {"${provider}": {"models": [{"id": "${model}"}]}}}`,
+          );
         }
       }
     }
@@ -146,18 +184,24 @@ export async function runDoctor({ config, sources, registry, online = false, fet
   // A `reach` listing that failed is a warning for the opposite reason a drift finding is: it learned
   // nothing, so it must not pass. The catalogue-miss findings stay `info` — an id pi does not list is
   // expected, and only the drift warning (the provider no longer serving it) is a finding.
-  const exit = errors.length > 0
-    ? EXIT.config
-    : findings.some((f) => f.check === "connect" && f.level === "error") ? EXIT.connect
-      : findings.some((f) => (f.check === "reach" || f.check === "drift") && f.level === "warn") ? EXIT.drift
-        : EXIT.clean;
+  const exit =
+    errors.length > 0
+      ? EXIT.config
+      : findings.some((f) => f.check === "connect" && f.level === "error")
+        ? EXIT.connect
+        : findings.some((f) => (f.check === "reach" || f.check === "drift") && f.level === "warn")
+          ? EXIT.drift
+          : EXIT.clean;
 
   return { findings, exit };
 }
 
 /** The one additive repair: an id you asked to see in pi's own picker. Returns the snippet, never writes. */
 export function repairSnippet(findings) {
-  return findings.filter((f) => f.check === "reach" && f.repair).map((f) => f.repair).join("\n");
+  return findings
+    .filter((f) => f.check === "reach" && f.repair)
+    .map((f) => f.repair)
+    .join("\n");
 }
 
 export function formatFindings(findings) {

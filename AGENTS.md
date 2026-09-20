@@ -61,6 +61,10 @@ that iterate until green, and plan-then-DAG execution. `verify` gates run once a
   `sed -i`, no `python3 -c` rewriting a file, no heredoc that does `text.replace(old, new)`: a
   mismatch is a silent no-op rather than an error, and there is no diff to review. Read the region,
   edit it, and read it back. Scripted *investigation* is fine; scripted *mutation of the tree* is not.
+- **Stage what you changed, by name. Never `git add -A`.** A working tree holds what the repository is not
+  supposed to have — local environment files, scratch scripts, an operator's notes — and `-A` commits all of it.
+  It did: a sweep staged an untracked `.envrc` holding a live provider key, pushed it, and the key had to be
+  rotated. Name the paths in the commit, and read `git status` before and after.
 - **One behaviour per module, exported.** A function that can only be exercised through a whole
   pipeline run is a function whose contract nobody can test in isolation. Export the unit; the
   pipeline test then covers the wiring.

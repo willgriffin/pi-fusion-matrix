@@ -30,14 +30,21 @@ import { harnessName, executorOf, executorThinking } from "./config.js";
  * one branch in one place instead of teaching this file two dialects.
  */
 export function writeTool(parameters) {
-  return [{
-    name: "write",
-    description: "Write content to a file: `path` (relative to the project root) and `content` (the full file body, not a diff). Create one file per tool call.",
-    parameters,
-  }];
+  return [
+    {
+      name: "write",
+      description:
+        "Write content to a file: `path` (relative to the project root) and `content` (the full file body, not a diff). Create one file per tool call.",
+      parameters,
+    },
+  ];
 }
 
-const textOf = (content) => (content ?? []).filter((part) => part?.type === "text").map((part) => part.text).join("");
+const textOf = (content) =>
+  (content ?? [])
+    .filter((part) => part?.type === "text")
+    .map((part) => part.text)
+    .join("");
 
 /** The same taxonomy seats use, so a file-agent failure reads as `quota` rather than as noise. */
 export function classifyFailure(text) {
@@ -72,8 +79,8 @@ export function classifyFailure(text) {
 const PEER_WALK_LEVELS = 6;
 
 /** A usage that spent something: the tokens or the priced total, not the presence of the object. */
-const spentSomething = (usage) => ((usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) > 0)
-  || (usage.cost?.total ?? 0) > 0;
+const spentSomething = (usage) =>
+  (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) > 0 || (usage.cost?.total ?? 0) > 0;
 
 const PEERS = [
   { harness: "pi", subpath: "node_modules/@earendil-works/pi-ai/dist/compat.js", bare: "@earendil-works/pi-ai/compat" },
@@ -86,17 +93,26 @@ const peersFor = (harness) => [...PEERS.filter((peer) => peer.harness === harnes
 async function loadPeer(peer, check) {
   const entry = process.argv[1] ?? "";
   let real = null;
-  try { real = fs.realpathSync(entry); } catch { /* compiled binary or missing shim */ }
+  try {
+    real = fs.realpathSync(entry);
+  } catch {
+    /* compiled binary or missing shim */
+  }
   if (!real) throw new Error(`cannot locate the harness installation to load ${peer.bare} from (entry ${entry || "unknown"})`);
 
   let root = null;
   let dir = path.dirname(real);
   for (let i = 0; i < PEER_WALK_LEVELS && dir !== path.dirname(dir); i += 1) {
-    if (fs.existsSync(path.join(dir, peer.subpath))) { root = dir; break; }
+    if (fs.existsSync(path.join(dir, peer.subpath))) {
+      root = dir;
+      break;
+    }
     dir = path.dirname(dir);
   }
   if (!root) {
-    throw new Error(`no ${peer.bare} found beside the running harness (looked from ${path.dirname(real)} up ${PEER_WALK_LEVELS} levels); this extension uses the module the harness ships, never a search path outside its installation`);
+    throw new Error(
+      `no ${peer.bare} found beside the running harness (looked from ${path.dirname(real)} up ${PEER_WALK_LEVELS} levels); this extension uses the module the harness ships, never a search path outside its installation`,
+    );
   }
 
   const resolved = fs.realpathSync(path.join(root, peer.subpath));
@@ -210,12 +226,12 @@ export async function routeFusion({ config, fusion, prompt, decide, emit, signal
     // `high` class, and the escalation a route takes when the strongest rung is its own. Calling that a decline
     // would misdescribe a deliberate decision in `details.routing`, which the report reads.
     const matched = option !== undefined && route.criteria?.[option] !== undefined;
-    const routing = matched
-      ? { answer, threshold, escalated: option }
-      : { answer, threshold, declined: "no option matched" };
-    emit.delta(matched
-      ? ` ├─ ↪ "${option}" runs ${fusion.id} (the option declares no target)\n`
-      : ` ├─ ↪ route declined (${option ?? "no answer"}); running ${fusion.id}\n`);
+    const routing = matched ? { answer, threshold, escalated: option } : { answer, threshold, declined: "no option matched" };
+    emit.delta(
+      matched
+        ? ` ├─ ↪ "${option}" runs ${fusion.id} (the option declares no target)\n`
+        : ` ├─ ↪ route declined (${option ?? "no answer"}); running ${fusion.id}\n`,
+    );
     return { fusion, routing };
   }
   if (!isSufficient(answer, sufficientWhen)) {
@@ -256,7 +272,9 @@ export async function verifyRun({ config, fusion, vars, decide, emit, signal, ru
         const ok = gate.exit === expected;
         results.push({ check: `gate: ${entry.gate.command.join(" ")}`, result: { exit: gate.exit, expected }, gate });
         if (!ok) {
-          emit.delta(` ⚠️ verify: gate "${entry.gate.command.join(" ")}" exited ${gate.exit} (expected ${expected}) — ${gate.output.split("\n").length} lines of output in details\n`);
+          emit.delta(
+            ` ⚠️ verify: gate "${entry.gate.command.join(" ")}" exited ${gate.exit} (expected ${expected}) — ${gate.output.split("\n").length} lines of output in details\n`,
+          );
         }
       } catch (error) {
         results.push({ check: `gate: ${entry.gate.command.join(" ")}`, result: { skipped: error?.message ?? String(error) } });
@@ -271,7 +289,8 @@ export async function verifyRun({ config, fusion, vars, decide, emit, signal, ru
         const low = [];
         if (answer?.noul !== undefined && answer.noul < 0.5) low.push(`${id}=${answer.noul.toFixed(2)}`);
         if (answer?.confidence !== undefined && answer.confidence < 0.5) low.push(`${id} confidence ${answer.confidence.toFixed(2)}`);
-        if (answer?.type === "choice" && answer.choice && /ignore|none|unclear|no$/i.test(answer.choice)) low.push(`${id}=${answer.choice}`);
+        if (answer?.type === "choice" && answer.choice && /ignore|none|unclear|no$/i.test(answer.choice))
+          low.push(`${id}=${answer.choice}`);
         if (low.length) emit.delta(` ⚠️ verify: ${low.join(", ")} — see details.verification\n`);
       }
     } catch (error) {
@@ -304,16 +323,21 @@ export async function fileAgentStep({ config, fusion, prompt, synthesis, registr
       let message;
       try {
         message = await callModel({
-          model: seat.model, apiKey: seat.apiKey, headers: seat.headers, signal,
+          model: seat.model,
+          apiKey: seat.apiKey,
+          headers: seat.headers,
+          signal,
           // The instruction goes in pi-ai's `systemPrompt`, not as a system *message*: measured
           // 2026-09-18, a system-role message alongside `tools` makes the call fail with
           // `Cannot read properties of undefined (reading 'length')` on the same model that works
           // without it.
           persona: { prompt: FIXED_SYSTEM },
-          messages: [{
-            role: "user",
-            content: `Original user request: ${prompt}\n\nDeliberation synthesis:\n${synthesis}\n\nSave the file(s) now using the write tool, or confirm if nothing needs saving.`,
-          }],
+          messages: [
+            {
+              role: "user",
+              content: `Original user request: ${prompt}\n\nDeliberation synthesis:\n${synthesis}\n\nSave the file(s) now using the write tool, or confirm if nothing needs saving.`,
+            },
+          ],
           tools: writeTool(await getWriteParameters()),
         });
       } catch (error) {
@@ -334,7 +358,8 @@ export async function fileAgentStep({ config, fusion, prompt, synthesis, registr
   return { toolCalls: [], usage: freshUsage() };
 }
 
-const FIXED_SYSTEM = "You are a file-saving agent. You receive a deliberation synthesis that may contain code, files, or project structure. Use the write tool to save every file the user would expect from the original request. Choose sensible filenames inferred from the request and the code's language. If the synthesis contains no files to save (e.g. it is a conceptual answer), do NOT call any tool — just reply with a brief one-line acknowledgment. Never explain at length; either call write tool(s) or give a one-line confirmation.";
+const FIXED_SYSTEM =
+  "You are a file-saving agent. You receive a deliberation synthesis that may contain code, files, or project structure. Use the write tool to save every file the user would expect from the original request. Choose sensible filenames inferred from the request and the code's language. If the synthesis contains no files to save (e.g. it is a conceptual answer), do NOT call any tool — just reply with a brief one-line acknowledgment. Never explain at length; either call write tool(s) or give a one-line confirmation.";
 
 /* ------------------------------------------------------------------- proxy */
 
@@ -357,7 +382,11 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
   const attempts = [];
   const fail = (reason, proxied = {}) => {
     const text = `Fusion proxy error: ${reason}`;
-    const failed = message(text, { stopReason: "error", errorMessage: text, details: { proxied: { alias: executor.alias, ...proxied, attempts } } });
+    const failed = message(text, {
+      stopReason: "error",
+      errorMessage: text,
+      details: { proxied: { alias: executor.alias, ...proxied, attempts } },
+    });
     push({ type: "error", reason: "error", error: failed });
     end(failed);
   };
@@ -379,7 +408,14 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
   for (const resolved of resolveCandidates(config, executor.route)) {
     const seat = await seatRequest(registry, resolved);
     if (!seat.ok) {
-      attempts.push({ alias: resolved.alias, seat: label(resolved), provider: resolved.provider, model: resolved.model, reason: seat.reason, detail: seat.detail });
+      attempts.push({
+        alias: resolved.alias,
+        seat: label(resolved),
+        provider: resolved.provider,
+        model: resolved.model,
+        reason: seat.reason,
+        detail: seat.detail,
+      });
       continue;
     }
 
@@ -389,9 +425,10 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
     const targetOptions = { ...options, apiKey: seat.apiKey, headers: seat.headers };
     if (level !== undefined) targetOptions.reasoning = level;
 
-    const identified = (part) => (part && (part.provider !== model.provider || part.model !== model.id)
-      ? { ...part, api: model.api, provider: model.provider, model: model.id }
-      : part);
+    const identified = (part) =>
+      part && (part.provider !== model.provider || part.model !== model.id)
+        ? { ...part, api: model.api, provider: model.provider, model: model.id }
+        : part;
     const forwarded = (event) => {
       if (!event.partial && !event.message && !event.error) return event;
       const copy = { ...event };
@@ -407,7 +444,14 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
     // seen — measured 2026-09-19: pi persisted the pipeline's `details` and nothing for a proxied turn.
     // `thinking` follows `targetOptions`, so a level this route had to drop is recorded as dropped
     // rather than as the level the turn did not run at; `attempts` carries the refusal itself.
-    const proxied = { alias: resolved.alias, provider: resolved.provider, model: resolved.model, template: seat.template, thinking: targetOptions.reasoning ?? null, attempts };
+    const proxied = {
+      alias: resolved.alias,
+      provider: resolved.provider,
+      model: resolved.model,
+      template: seat.template,
+      thinking: targetOptions.reasoning ?? null,
+      attempts,
+    };
     const dressed = (part) => (part ? { ...identified(part), details: { ...(part.details ?? {}), proxied } } : part);
 
     // A thinking level the target refuses is our request rather than its failure, and it can surface
@@ -437,7 +481,15 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
       // `usage` only when this route spent something before it failed: an attempt that never reached a model
       // has no tokens to report, and writing zeros there would read as "it cost nothing" rather than "nothing
       // was spent".
-      attempts.push({ alias: resolved.alias, seat: label(resolved), provider: resolved.provider, model: resolved.model, reason: classifyFailure(detail), detail, ...(lastUsage ? { usage: lastUsage } : {}) });
+      attempts.push({
+        alias: resolved.alias,
+        seat: label(resolved),
+        provider: resolved.provider,
+        model: resolved.model,
+        reason: classifyFailure(detail),
+        detail,
+        ...(lastUsage ? { usage: lastUsage } : {}),
+      });
     };
 
     // The usage of the last partial the caller saw: a route that streamed then failed spent those tokens, and
@@ -473,8 +525,16 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
           // A partial's usage starts as `freshUsage()` — a zero-valued object — so truthiness alone would record
           // a spend for a route that never reached a model. Only a usage that spent something counts.
           if (copy.partial?.usage && spentSomething(copy.partial.usage)) lastUsage = copy.partial.usage;
-          if (copy.type === "done") { copy.message = dressed(copy.message); terminal = "done"; terminalMessage = copy.message; }
-          if (copy.type === "error") { copy.error = dressed(copy.error); terminal = "error"; terminalMessage = copy.error; }
+          if (copy.type === "done") {
+            copy.message = dressed(copy.message);
+            terminal = "done";
+            terminalMessage = copy.message;
+          }
+          if (copy.type === "error") {
+            copy.error = dressed(copy.error);
+            terminal = "error";
+            terminalMessage = copy.error;
+          }
           push(copy);
           sent += 1;
         }
@@ -483,7 +543,13 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
         record(detail);
         if (sent === 0 && dropLevel(detail)) continue;
         if (sent === 0) break;
-        return fail(`target stream failed after ${sent} events: ${detail}`, { alias: resolved.alias, provider: resolved.provider, model: resolved.model, template: seat.template, thinking: proxied.thinking });
+        return fail(`target stream failed after ${sent} events: ${detail}`, {
+          alias: resolved.alias,
+          provider: resolved.provider,
+          model: resolved.model,
+          template: seat.template,
+          thinking: proxied.thinking,
+        });
       }
       if (beforeStart !== null) {
         record(beforeStart);
@@ -515,9 +581,11 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
       // A target that ended without a terminal event leaves the harness's loop waiting on a stream that
       // never completes. The result is the same message, so it becomes the terminal event itself.
       if (terminal === null) {
-        push(final.stopReason === "stop" || final.stopReason === "length" || final.stopReason === "toolUse"
-          ? { type: "done", reason: final.stopReason, message: final }
-          : { type: "error", reason: final.stopReason === "aborted" ? "aborted" : "error", error: final });
+        push(
+          final.stopReason === "stop" || final.stopReason === "length" || final.stopReason === "toolUse"
+            ? { type: "done", reason: final.stopReason, message: final }
+            : { type: "error", reason: final.stopReason === "aborted" ? "aborted" : "error", error: final },
+        );
       }
       end(final);
       return;
@@ -526,7 +594,9 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
     // the turn.
   }
 
-  const detail = attempts.map((a) => `${a.seat} (${a.reason}: ${String(a.detail ?? "").slice(0, 140)})`).join("; ") || `alias "${executor.alias}" has no providers`;
+  const detail =
+    attempts.map((a) => `${a.seat} (${a.reason}: ${String(a.detail ?? "").slice(0, 140)})`).join("; ") ||
+    `alias "${executor.alias}" has no providers`;
   fail(`no route for "${executor.alias}" could be reached — ${detail}`);
 }
 
@@ -556,8 +626,13 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
     const resultWaiters = [];
 
     const base = {
-      role: "assistant", api: model.api, provider: model.provider, model: model.id,
-      usage: freshUsage(), stopReason: "stop", timestamp: Date.now(),
+      role: "assistant",
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: freshUsage(),
+      stopReason: "stop",
+      timestamp: Date.now(),
     };
     const message = (text, extra = {}) => ({ ...base, content: [{ type: "text", text }], ...extra });
 
@@ -569,7 +644,14 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
         while (pending.length) pending.shift()({ value: undefined, done: true });
         while (resultWaiters.length) resultWaiters.shift()(result);
       },
-      [Symbol.asyncIterator]: () => ({ next: async () => (events.length ? { value: events.shift(), done: false } : finished ? { value: undefined, done: true } : new Promise((resolve) => pending.push(resolve))) }),
+      [Symbol.asyncIterator]: () => ({
+        next: async () =>
+          events.length
+            ? { value: events.shift(), done: false }
+            : finished
+              ? { value: undefined, done: true }
+              : new Promise((resolve) => pending.push(resolve)),
+      }),
       result: () => (finished ? Promise.resolve(result) : new Promise((resolve) => resultWaiters.push(resolve))),
     };
 
@@ -601,7 +683,19 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
         // with no tools means no agent loop to serve, so the deliberation runs exactly as it always has.
         const executor = executorOf(config, fusion);
         if (executor && Array.isArray(context.tools) && context.tools.length > 0) {
-          await proxyTurn({ config, fusion, executor, context, options, registry, getPi, model, push, end: (final) => outer.end(final), message });
+          await proxyTurn({
+            config,
+            fusion,
+            executor,
+            context,
+            options,
+            registry,
+            getPi,
+            model,
+            push,
+            end: (final) => outer.end(final),
+            message,
+          });
           return;
         }
 
@@ -612,9 +706,10 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
         const writeResults = trailingWriteResults(messages);
         if (writeResults.length > 0) {
           const saved = savedPathsFor(messages, writeResults);
-          const confirmation = saved.length > 0
-            ? `✅ Saved ${saved.length} file${saved.length > 1 ? "s" : ""}:\n${saved.map((file) => `  • \`${file}\``).join("\n")}`
-            : `✅ Saved ${writeResults.length} file${writeResults.length > 1 ? "s" : ""}.`;
+          const confirmation =
+            saved.length > 0
+              ? `✅ Saved ${saved.length} file${saved.length > 1 ? "s" : ""}:\n${saved.map((file) => `  • \`${file}\``).join("\n")}`
+              : `✅ Saved ${writeResults.length} file${writeResults.length > 1 ? "s" : ""}.`;
           emit.delta(confirmation);
           const final = message(confirmation);
           push({ type: "text_end", contentIndex: 0, content: confirmation, partial: final });
@@ -629,7 +724,15 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
         routing = routed.routing;
 
         const run = await runPipeline({
-          config, sources, fusion, prompt, registry, callModel, decide, emit, signal: options?.signal,
+          config,
+          sources,
+          fusion,
+          prompt,
+          registry,
+          callModel,
+          decide,
+          emit,
+          signal: options?.signal,
         });
 
         // A run whose every seat failed must say so instead of presenting progress lines as an answer.
@@ -637,7 +740,9 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
         const failed = seats.filter((s) => s.degraded);
         if (!run.text.trim() && failed.length > 0) {
           const reasons = [...new Set(failed.map((s) => s.reason).filter(Boolean))].join(", ") || "unknown";
-          emit.delta(`\n⚠️ No deliberation happened: ${failed.length} of ${seats.length} seats were unavailable (${reasons}). Nothing was synthesized — this is not an answer.\n`);
+          emit.delta(
+            `\n⚠️ No deliberation happened: ${failed.length} of ${seats.length} seats were unavailable (${reasons}). Nothing was synthesized — this is not an answer.\n`,
+          );
         }
 
         // A mode that ends in `render`, in `decide`, or in a stage a sufficient decision skipped produces
@@ -649,13 +754,36 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
         const usage = run.usage;
         accumulateUsage(usage, run.decisionUsage);
 
-        const verification = await verifyRun({ config, fusion, vars, decide, emit, signal: options?.signal, runGate: makeRunGate(options?.signal) });
-        const files = await fileAgentStep({ config, fusion, prompt, synthesis: run.text, registry, callModel, signal: options?.signal, emit, getWriteParameters });
+        const verification = await verifyRun({
+          config,
+          fusion,
+          vars,
+          decide,
+          emit,
+          signal: options?.signal,
+          runGate: makeRunGate(options?.signal),
+        });
+        const files = await fileAgentStep({
+          config,
+          fusion,
+          prompt,
+          synthesis: run.text,
+          registry,
+          callModel,
+          signal: options?.signal,
+          emit,
+          getWriteParameters,
+        });
 
         const toolCalls = files.toolCalls ?? [];
         const content = [{ type: "text", text: streamed }];
         for (let i = 0; i < toolCalls.length; i += 1) {
-          const block = { type: "toolCall", id: toolCalls[i].id || `call_${Date.now()}_${i}`, name: toolCalls[i].name, arguments: toolCalls[i].arguments };
+          const block = {
+            type: "toolCall",
+            id: toolCalls[i].id || `call_${Date.now()}_${i}`,
+            name: toolCalls[i].name,
+            arguments: toolCalls[i].arguments,
+          };
           content.push(block);
           const partial = { ...base, content: [...content], usage, stopReason: "toolUse" };
           push({ type: "toolcall_start", contentIndex: 1 + i, partial });
@@ -707,8 +835,18 @@ export function makeRunGate(parentSignal) {
     let killTimer;
     const escalate = () => {
       timedOut = true;
-      try { child.kill("SIGTERM"); } catch { /* already gone */ }
-      killTimer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* already gone */ } }, GATE_KILL_GRACE_MS);
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* already gone */
+      }
+      killTimer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }, GATE_KILL_GRACE_MS);
     };
     const timer = setTimeout(escalate, gate.timeoutMs ?? 120000);
     const onAbort = () => escalate();
@@ -745,7 +883,9 @@ export function trailingWriteResults(messages) {
 export function savedPathsFor(messages, writeResults) {
   const assistant = messages[messages.length - writeResults.length - 1];
   return writeResults
-    .map((result) => (assistant?.content ?? []).find((block) => block.type === "toolCall" && block.id === result.toolCallId)?.arguments?.path)
+    .map(
+      (result) => (assistant?.content ?? []).find((block) => block.type === "toolCall" && block.id === result.toolCallId)?.arguments?.path,
+    )
     .filter(Boolean);
 }
 

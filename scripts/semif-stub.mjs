@@ -16,15 +16,24 @@ const portArg = args.indexOf("--port");
 const port = portArg === -1 ? 8792 : Number(args[portArg + 1]);
 
 const server = http.createServer((req, res) => {
-  const send = (code, body) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
+  const send = (code, body) => {
+    res.writeHead(code, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  };
   if (req.method === "GET" && req.url === "/health") return send(200, { status: "ok", models: ["qwen3.5-4b"] });
   if (req.method !== "POST" || !req.url?.startsWith("/score")) return send(404, { error: "not found" });
 
   let body = "";
-  req.on("data", (chunk) => { body += chunk; });
+  req.on("data", (chunk) => {
+    body += chunk;
+  });
   req.on("end", () => {
     let payload;
-    try { payload = JSON.parse(body); } catch { return send(400, { error: "invalid json" }); }
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return send(400, { error: "invalid json" });
+    }
     const options = payload.options;
     if (!Array.isArray(options) || options.length < 2 || options.length > 16) {
       return send(422, { error: "options must contain 2-16 entries" });
