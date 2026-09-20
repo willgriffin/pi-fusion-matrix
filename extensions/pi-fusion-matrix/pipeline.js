@@ -205,7 +205,19 @@ export function accumulateUsage(total, extra) {
  * Run one seat: walk its candidate list, and inside each alias walk the provider chain.
  * Never throws for a call failure — a seat reports what happened and the pipeline continues.
  */
-export async function runSeat({
+/**
+ * The seat's own clock, wrapped around the body rather than threaded through five returns, and the only
+ * place a seat's duration is set: a seat that retried a level or a temperature took the sum of its calls,
+ * while a *failed* call's own time rides its attempt record. The harness records neither — omp times its own
+ * turns, pi none at all — so this is the only figure either harness has for a call we make ourselves.
+ */
+export async function runSeat(args) {
+  const startedAt = Date.now();
+  const seat = await runSeatInner(args);
+  return { ...seat, durationMs: Date.now() - startedAt };
+}
+
+async function runSeatInner({
   personaName, persona, candidates, fusion, config, registry, callModel, decide, emit, signal, vars, maxAdvance = 3,
   onDelta, fusionSource,
 }) {
@@ -323,23 +335,37 @@ export async function runSeat({
       // run ends with it rather than concatenating a second model's answer onto a partial one.
       const call = async (withTemperature, withThinking = true) => {
         calls += 1;
+        const callStartedAt = Date.now();
         try {
-          return await callModel({
+          const message = await callModel({
             model: seat.model, apiKey: seat.apiKey, headers: seat.headers, messages,
             temperature: withTemperature ? temperature : undefined,
             reasoning: withThinking ? thinking : undefined, signal, persona: seatPersona,
             onDelta: onDelta ? (chunk) => { emitted += chunk; onDelta(chunk); } : undefined,
           });
+          return { ...message, durationMs: Date.now() - callStartedAt };
         } catch (error) {
-          return { text: "", usage: emptyUsage(), stopReason: "error", errorMessage: error?.message ?? String(error), toolCalls: [] };
+          return { text: "", usage: emptyUsage(), stopReason: "error", errorMessage: error?.message ?? String(error), toolCalls: [], durationMs: Date.now() - callStartedAt };
         }
       };
 
+      // Every failed call is recorded as its own attempt, with its own time: a seat that spent four seconds on
+      // a temperature retry and then failed has spent twice what the last call took, and the record used to
+      // keep only the final figure.
+      const noteFailure = (failed) => {
+        const text = failed.errorMessage ?? "unknown error";
+        const reason = QUOTA.test(text) ? "quota" : CREDENTIAL.test(text) ? "credential" : MISSING_MODEL.test(text) ? "missing model" : "transient";
+        attempts.push({ alias: resolved.alias, seat: label(resolved), reason, detail: text, durationMs: failed.durationMs });
+        return { text, reason };
+      };
+
       let message = await call(!noTemperature.has(key));
+      let lastFailure = message.stopReason === "error" ? noteFailure(message) : null;
       if (message.stopReason === "error" && MODELS_REJECT_TEMPERATURE.test(message.errorMessage ?? "") && !noTemperature.has(key)) {
         noTemperature.add(key);
         emit.delta(` ├─ ⚠️ ${key} rejects a temperature override; retrying without it.\n`);
         message = await call(false);
+        if (message.stopReason === "error") lastFailure = noteFailure(message);
       }
       // A harness may enforce a model's supported thinking efforts instead of passing the level through.
       // The seat is retried once at no reasoning level rather than at a guess — a level the config did
@@ -351,12 +377,11 @@ export async function runSeat({
         rememberThinkingRefusal(resolved.provider, resolved.model, thinking);
         emit.delta(` ├─ ️ ${key} does not support thinking "${thinking}"; retrying that seat without a reasoning level.\n`);
         message = await call(!noTemperature.has(key), false);
+        if (message.stopReason === "error") lastFailure = noteFailure(message);
       }
 
       if (message.stopReason === "error") {
-        const text = message.errorMessage ?? "unknown error";
-        const reason = QUOTA.test(text) ? "quota" : CREDENTIAL.test(text) ? "credential" : MISSING_MODEL.test(text) ? "missing model" : "transient";
-        attempts.push({ alias: resolved.alias, seat: label(resolved), reason, detail: text });
+        const { text, reason } = lastFailure ?? noteFailure(message);
         if (emitted) {
           emit.delta(` ├─ ⚠️ ${personaName}: streamed ${emitted.length} chars then failed (${reason}); ending with what was emitted\n`);
           return {
@@ -441,6 +466,7 @@ export async function runPipeline({
   const decisionUsage = emptyUsage();
   const stages = [];
   const seatRecords = [];
+  const runStartedAt = Date.now();
   const rounds = [];
   const substitutions = [];
   const cascades = [];
@@ -515,8 +541,8 @@ export async function runPipeline({
           if (seat.decisionUsage) accumulateUsage(decisionUsage, seat.decisionUsage);
           seatRecords.push({
             persona: seat.persona, alias: seat.alias ?? seat.attempts?.[0]?.alias, provider: seat.provider, model: seat.model,
-            template: seat.template, thinking: seat.thinking, usage: seat.usage,
-            degraded: seat.degraded, error: seat.error, reason: seat.reason,
+            template: seat.template, thinking: seat.thinking, usage: seat.usage, durationMs: seat.durationMs,
+            attempts: seat.attempts, degraded: seat.degraded, error: seat.error, reason: seat.reason,
           });
           substitutions.push(...seat.substitutions);
           cascades.push(...seat.cascades);
@@ -553,8 +579,8 @@ export async function runPipeline({
       if (seat.decisionUsage) accumulateUsage(decisionUsage, seat.decisionUsage);
       seatRecords.push({
         persona: seat.persona, alias: seat.alias ?? seat.attempts?.[0]?.alias, provider: seat.provider, model: seat.model,
-        template: seat.template, thinking: seat.thinking, usage: seat.usage,
-        degraded: seat.degraded, error: seat.error, reason: seat.reason,
+        template: seat.template, thinking: seat.thinking, usage: seat.usage, durationMs: seat.durationMs,
+        attempts: seat.attempts, degraded: seat.degraded, error: seat.error, reason: seat.reason,
       });
       substitutions.push(...seat.substitutions);
       cascades.push(...seat.cascades);
@@ -672,7 +698,8 @@ export async function runPipeline({
     usage,
     decisionUsage,
     // `seatErrors` is always present, empty array included: a run that degraded quietly is a wrong answer.
-    details: { fusion: fusion.id, mode: fusion.mode, stages, seats: seatRecords, seatErrors, rounds, substitutions, cascades: [...cascades, ...cascadeRecords] },
+    details: { fusion: fusion.id, mode: fusion.mode, stages, seats: seatRecords, seatErrors, rounds, substitutions,
+      cascades: [...cascades, ...cascadeRecords], durationMs: Date.now() - runStartedAt },
     stagesRun,
   };
 }

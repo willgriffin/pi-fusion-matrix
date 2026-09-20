@@ -10,6 +10,7 @@
  */
 
 import fs from "node:fs";
+import { LABEL_OUTCOMES, isOutcome } from "./labels.js";
 import path from "node:path";
 import process from "node:process";
 import { loadMatrixConfig, validateConfig, harnessName, executorOf, executorThinking, HARNESS_THINKING, REPO_ROOT } from "./config.js";
@@ -190,6 +191,27 @@ export default async function (pi) {
         await record(`fusion failed: ${message}`, { fusion, error: message });
       } finally {
         ctx.ui.setStatus("matrix", undefined);
+      }
+    },
+  });
+
+  pi.registerCommand("matrix-label", {
+    description: `Record what a session's fusion runs were for and how they ended: /matrix-label <work-item> <${LABEL_OUTCOMES.join("|")}> [evidence]`,
+    handler: async (args, ctx) => {
+      const text = String(args ?? "").trim();
+      const [workItem, outcome, ...rest] = text.split(/\s+/);
+      if (!workItem || !isOutcome(outcome)) {
+        ctx.ui.notify(`usage: /matrix-label <work-item> <${LABEL_OUTCOMES.join("|")}> [evidence]`, "error");
+        return;
+      }
+      const evidence = rest.join(" ").trim();
+      // Append-only, latest wins: a session that was in review and then landed carries both, and the reader
+      // takes the last one as the current outcome rather than rewriting history.
+      const details = { workItem, outcome, ...(evidence ? { evidence } : {}) };
+      try {
+        await pi.sendMessage({ customType: "matrix-label", content: `${workItem} — ${outcome}${evidence ? ` (${evidence})` : ""}`, display: true, details }, { triggerTurn: false });
+      } catch (error) {
+        ctx.ui.notify(`the label could not be written: ${error?.message ?? String(error)}`, "error");
       }
     },
   });

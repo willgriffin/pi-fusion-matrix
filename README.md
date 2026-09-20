@@ -562,13 +562,19 @@ node scripts/session-report.mjs --json                   # the same numbers, for
 node scripts/session-report.mjs --harness pi             # one harness's store (the other is named, not omitted)
 ```
 
+The one thing a run cannot know about itself is whether the work landed, so that is a label rather than an
+inference: `/matrix-label` writes a `matrix-label` message, and the report prints an `outcomes` section —
+work item, latest outcome, evidence, the runs and fusion turns behind it, and the reported cost — beside an
+`(unlabelled)` line for the sessions that produced runs without one.
+
 Money always states its basis: a cost is `$X reported`, with the messages whose provider reported no price
 counted beside it, never folded into a single total that reads as free.
 
 It totals turns, tokens, cost, tool calls and tool errors per fusion, per model **and per harness** — the
 two harnesses record different things, so folding them together would average a fact with a silence — and for each
 deliberation: seats, degraded seats, seat errors, cascades split sufficient/advanced, substitutions,
-decision tokens, routes, verification. Two absences it refuses to read as zeros — a duration the harness
+decision tokens, routes, verification, and the wall clock of each seat and of the run, which we measure
+ourselves because neither harness times a call an extension makes. Two absences it refuses to read as zeros — a duration the harness
 did not record (pi records none, omp records `duration`/`ttft`) and a price a provider did not report (a
 subscription plan reports $0) — because "we did not record it" and "it cost nothing" are different facts.
 It reads all three carriers a run's record can ride: a tool result, a `/matrix` answer message, and a turn
@@ -649,6 +655,9 @@ and the bare `/matrix`.
 
 - `/matrix <id> <prompt>` — run a named fusion; `/matrix` alone uses `defaultFusion`.
 - `/matrix-info` — resolvable aliases with their routes, modes, fusions with rosters and execute faces, backends, layers.
+- `/matrix-label <work-item> <landed|review|findings|ci-red|blocked|abandoned> [evidence]` — record what this
+  session's runs were for and how they ended. Append-only, latest wins; the report joins the label to the
+  runs' cost, and a session with runs and no label is reported as unlabelled rather than assumed fine.
 - `/matrix-doctor` (`--online`, `--repair`) — validate the config, check provider connectivity, and
   report catalogue drift. `node scripts/doctor.mjs` runs the same checks outside a session:
 
@@ -671,7 +680,7 @@ quota blocks a live one:
 
 ```bash
 node scripts/typesafe-stub.mjs & node scripts/semif-stub.mjs &      # local backends
-node scripts/interp-check.mjs                                       # 35 interpreter contracts
+node scripts/interp-check.mjs                                       # 44 interpreter contracts
 node scripts/doctor.mjs                                             # config + connectivity
 node scripts/session-report.mjs --check                             # the run-record reader's accounting
 node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone

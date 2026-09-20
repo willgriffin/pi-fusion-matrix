@@ -71,6 +71,10 @@ export function classifyFailure(text) {
  */
 const PEER_WALK_LEVELS = 6;
 
+/** A usage that spent something: the tokens or the priced total, not the presence of the object. */
+const spentSomething = (usage) => ((usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) > 0)
+  || (usage.cost?.total ?? 0) > 0;
+
 const PEERS = [
   { harness: "pi", subpath: "node_modules/@earendil-works/pi-ai/dist/compat.js", bare: "@earendil-works/pi-ai/compat" },
   { harness: "omp", subpath: "node_modules/@oh-my-pi/pi-ai/src/index.ts", bare: "@oh-my-pi/pi-ai" },
@@ -422,10 +426,18 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
     // pushes the partial into its conversation on `start` and a second provider's `start` would append a
     // second assistant message.
     const record = (detail) => {
-      attempts.push({ alias: resolved.alias, seat: label(resolved), reason: classifyFailure(detail), detail });
+      // `usage` only when this route spent something before it failed: an attempt that never reached a model
+      // has no tokens to report, and writing zeros there would read as "it cost nothing" rather than "nothing
+      // was spent".
+      attempts.push({ alias: resolved.alias, seat: label(resolved), reason: classifyFailure(detail), detail, ...(lastUsage ? { usage: lastUsage } : {}) });
     };
 
+    // The usage of the last partial the caller saw: a route that streamed then failed spent those tokens, and
+    // without this the only thing visible about it is that it failed. Declared outside the attempt loop so the
+    // create-throw path — which runs before anything inside the loop is initialised — can read it.
+    let lastUsage = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      lastUsage = null;
       let target;
       try {
         target = streamSimple(seat.model, context, targetOptions);
@@ -450,6 +462,9 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
             beforeStart = copy.error?.errorMessage ?? "target reported an error before any event";
             break;
           }
+          // A partial's usage starts as `freshUsage()` — a zero-valued object — so truthiness alone would record
+          // a spend for a route that never reached a model. Only a usage that spent something counts.
+          if (copy.partial?.usage && spentSomething(copy.partial.usage)) lastUsage = copy.partial.usage;
           if (copy.type === "done") { copy.message = dressed(copy.message); terminal = "done"; terminalMessage = copy.message; }
           if (copy.type === "error") { copy.error = dressed(copy.error); terminal = "error"; terminalMessage = copy.error; }
           push(copy);
