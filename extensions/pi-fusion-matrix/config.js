@@ -479,6 +479,11 @@ export function validateConfig(config, { sources } = {}) {
     if (fusion.execute !== undefined && typeof fusion.execute !== "boolean") {
       err(`fusion "${id}": execute must be true or false`);
     }
+    if (fusion.seatTimeoutMs !== undefined && (!Number.isInteger(fusion.seatTimeoutMs) || fusion.seatTimeoutMs <= 0)) {
+      // The bound on one seat call. A number that is not a positive integer would silently disable it —
+      // `AbortSignal.timeout(0)` aborts at once and `undefined` never aborts — so it is a load error.
+      err(`fusion "${id}": seatTimeoutMs must be a positive integer number of milliseconds`);
+    }
     if (fusion.review !== undefined && (fusion.review !== true || fusion.execute !== false)) {
       // A reviewer runs the rung *as its model*, so it has to be a deliberating rung: `review: true` without
       // `execute: false` would proxy the pinned review to the writer, which is the failure this marks.
