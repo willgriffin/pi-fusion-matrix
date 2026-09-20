@@ -361,6 +361,9 @@ export function aggregate(sessions) {
       row.sessions += 1;
       for (const entry of session.labels) if (entry.workItem === item) row.outcomes.push({ ...entry });
       if (item === attributesto) {
+        // This item *is* the endpoint here, so a note from an earlier session's redirection is stale: leaving
+        // it would print "runs counted under #15" on a row that counts its own runs.
+        row.attributedTo = undefined;
         row.runs += session.records.length;
         row.fusionTurns += fusionTurns;
         mergeSums(row.sums, fusionSums);
@@ -935,6 +938,23 @@ function check() {
     undatedLabels.labels.get("#12")?.outcomes.length === 2 && /#12\s+landed/.test(undatedLabelText),
     undatedLabelText.split("\n").find((l) => l.includes("#12")) ?? "no line");
 
+  // The sequence: one session redirects #12 to #15, a later one ends on #12 — the stale note must go.
+  const redirectThenEnd = aggregate([twoItems, extractSession([sessionMeta,
+    { type: "message", message: { role: "assistant", api: FUSION_API, model: "quick", usage: usage(20, 2, 0.001), content: [],
+      details: { fusion: "quick", seats: [], cascades: [], seatErrors: [], usage: usage(20, 2, 0.001) } } },
+    { type: "custom_message", customType: "matrix-label", content: "#12 — landed", display: true, timestamp: "2026-09-19T10:00:00.000Z", details: { workItem: "#12", outcome: "landed" } },
+  ], { file: "ends-on-12.jsonl", harness: "omp" })]);
+  const redirectText = render(buildReport({ sessions: [twoItems, extractSession([sessionMeta,
+    { type: "message", message: { role: "assistant", api: FUSION_API, model: "quick", usage: usage(20, 2, 0.001), content: [],
+      details: { fusion: "quick", seats: [], cascades: [], seatErrors: [], usage: usage(20, 2, 0.001) } } },
+    { type: "custom_message", customType: "matrix-label", content: "#12 — landed", display: true, timestamp: "2026-09-19T10:00:00.000Z", details: { workItem: "#12", outcome: "landed" } },
+  ], { file: "ends-on-12.jsonl", harness: "omp" })], roots: [], unreadable: [],
+    store: { read: 2, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }));
+  ok("an item attributed in a later session loses the stale note from an earlier one",
+    redirectThenEnd.labels.get("#12")?.runs === 1 && redirectThenEnd.labels.get("#12")?.attributedTo === undefined
+      && !/runs counted under/.test(redirectText),
+    redirectText.split("\n").filter((l) => l.includes("#12")).join(" | "));
+
   const twoItemText = render(buildReport({ sessions: [twoItems], roots: [], unreadable: [],
     store: { read: 1, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }));
   ok("the report says where an unattributed item's runs were counted",
@@ -970,7 +990,6 @@ function check() {
 
   const text = render(buildReport({ sessions: [labelled], roots: [{ harness: "pi", root: "/tmp/fixture", files: 1, missing: false }], unreadable: [],
     store: { read: 1, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }));
-  console.log("  [debug outcomes]", JSON.stringify(text.split("\n").filter((l) => l.includes("#12") || l.includes("label(s)"))));
   ok("the text report prints the outcome, the evidence and the unlabelled count",
     /#12\s+landed/.test(text) && /https:\/\/example\.test\/pull\/1/.test(text) && /2 label\(s\), latest wins/.test(text),
     text.split("\n").find((l) => l.includes("#12")) ?? "no label line");
