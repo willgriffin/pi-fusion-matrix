@@ -506,6 +506,17 @@ export function validateConfig(config, { sources } = {}) {
       // contradictory declarations rather than a preference between them.
       if (fusion.route) err(`fusion "${id}": proxy and route cannot both be declared; a proxied turn has no deliberation to size`);
     }
+    if (fusion.execute !== false) {
+      // A writing seat whose persona answers in JSON is a *disposition*, not an agent turn: a tool-bearing
+      // turn proxied to it would answer with a review's JSON and the panel would never run. `execute: false`
+      // is the opt-out, and requiring it here is what keeps that from being a thing the next rung forgets —
+      // the failure it prevents is silent, because the proxy answers perfectly well, just not with an answer.
+      const writer = executorOf(config, fusion);
+      const answersInJson = writer && config.personas?.[writer.persona]?.output === "json";
+      if (answersInJson) {
+        err(`fusion "${id}": the writing seat "${writer.persona}" answers in JSON, so this fusion must declare execute: false — a tool-bearing turn would proxy to a disposition instead of deliberating`);
+      }
+    }
     for (const persona of Object.keys(fusion.prompts ?? {})) {
       if (!used.has(persona)) err(`fusion "${id}": prompt override for unused persona "${persona}"`);
     }

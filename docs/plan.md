@@ -1258,14 +1258,38 @@ carries. Load errors, because each one is a silent degradation waiting to happen
   declared it never uses);
 - `review: true` with `execute` anything but `false` (the reviewer runs the rung as its model);
 - `review: true` without a `route` (the class is what selects the rung);
-- a `review: true` route whose target does not itself declare `execute: false` (a pinned reviewer would proxy).
+- a `review: true` route whose target does not itself declare `execute: false` (a pinned reviewer would proxy);
+- a fusion whose writing seat answers in JSON (`output: "json"`) without `execute: false`. A disposition is not
+  an agent turn, and the failure this prevents is silent: a proxy to a JSON seat answers perfectly well — with a
+  review where work was asked for. Every packaged rung declares `execute: false` by hand; the rule is what keeps
+  the next one from having to remember.
 
 **The disposition is data.** A review rung's last seat is the `review-synth` persona (`output: "json"`), and its
-answer is recorded on the run as `details.verdict`, `details.findings` (`{severity, path, line, criterion,
-claim}` each, severity from `blocking | major | minor | editorial`, anything else kept as `unknown` rather than
-dropped) and `details.severityCounts`. A malformed disposition is recorded as `details.malformedDisposition` —
-never wrapped into something that reads like a clean review. Severity is what decides whether another review is
-bought: an `editorial` finding never does, and a run whose findings are all `editorial` is visible as such.
+answer is recorded on the run as `details.dispositionBy` (the persona whose answer stands), `details.verdict`,
+`details.findings` (`{severity, path, line, criterion, claim}` each) and `details.severityCounts`.
+
+*Every* JSON seat's answer is subject to that schema — a `judge` persona's answer is recorded the same way —
+because a JSON answer that is not the JSON it was asked for is worth reporting wherever it happens.
+
+**A parseable answer is not a disposition.** Every field is checked, and a flaw — a verdict outside
+`clean | findings`, a `findings` that is not a list, a finding without a `severity` from `blocking | major |
+minor | editorial`, without a `path`, with a `line` that is neither an integer nor `null`, without a `criterion`
+or without a `claim`, a `clean` verdict with findings, or a `findings` verdict with none — is recorded as
+`details.malformedDisposition` with the reason, and records *no* verdict and *no* findings. `{"verdict":
+"clean"}` is not a clean review; it is an answer that answered nothing, and it reads as exactly that.
+
+A later malformed disposition clears whatever verdict stood before it: a run cannot carry an earlier seat's
+`clean` beside a malformed final answer, because that pairing is the one a consumer would read as clean. A
+finding's `line` keeps an explicit `null` — the persona prompt allows a null line for a finding about the change
+as a whole, and dropping the key would lose a field the contract says is always present.
+
+Severity is what decides whether another review is bought: an `editorial` finding never does, and a run whose
+findings are all `editorial` is visible as such.
+
+A finding's `path` is the reviewer's claim, not a fact: the cheap rung names files in a diff it has only read as
+text, and a run whose findings all name a path that does not exist is a hallucination the *report* has to be
+able to show — `session-report.mjs` checks each recorded path against the session's working directory and prints
+`[path not found]` beside it.
 
 Two limits, stated rather than discovered later: the *class decision* sees the packet truncated to the decision
 backend's state budget (its head and tail — the panel gets it whole), and a review rung has no tools, so a packet
@@ -1629,15 +1653,23 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     same store reported no deliberation records at all. Each must fail when the unwrap, the attribution, the
     result naming, the unwrapped count or the single-count rule is mutated.
 
-30. **The review route** — `node scripts/interp-check.mjs` passes 51/51, the new ones covering: a mechanical
+30. **The review route** — `node scripts/interp-check.mjs` passes 55/55, the new ones covering: a mechanical
     class routing to `review-quick`, a standard one to `review-check`, the boundary class escalating to
     `smrt-review`'s own mode with `routing.escalated` (not `declined`), an unsure answer escalating rather than
     routing cheap; an `execute: false` rung deliberating on a *tool-bearing* turn with no `details.proxied`; a
-    review run recording `verdict`, `findings`, their `severityCounts`, and a malformed disposition recorded as
-    malformed. The four load errors are the `config` rules: `execute: false` with `proxy`, `review` without
-    `execute: false`, `review` without `route`, and a review route target that is an executor. Then live: a
-    packet reviewed through `omp -p --model fusion-matrix/smrt-review`, reading the class it chose, the rung
-    that ran, and the disposition with its severities.
+    review run recording `dispositionBy`, `verdict`, `findings`, their `severityCounts`, a `null` line kept,
+    seven schema-violating answers each recorded as malformed rather than as a clean review, and a malformed
+    final answer leaving no earlier verdict standing. Three of those are mutation-proven — removing the schema
+    check (expect a red naming all seven), dropping `null` from the recorded line, and leaving an earlier
+    verdict standing — and each red names the check it fails. The four load errors are the `config` rules:
+    `execute: false` with `proxy`, `review` without `execute: false`, `review` without `route`, and a review
+    route target that is an executor, and a JSON-writing seat without `execute: false`. `node
+    scripts/session-report.mjs --check` passes 84/84, three of them
+    reading a disposition out of a session: its verdict, the persona that stands, its severities and its
+    finding paths — one of which exists under the session's cwd and one which does not, so the report prints
+    `[path not found]` for the second and not the first. Then live: a packet reviewed through
+    `omp -p --model fusion-matrix/smrt-review`, reading the class it chose, the rung that ran, and the
+    disposition with its severities.
 
 ## Assumptions & contingencies
 

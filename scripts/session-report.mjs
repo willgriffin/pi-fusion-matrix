@@ -475,9 +475,40 @@ export function aggregate(sessions) {
         cascades: 0, cascadesSufficient: 0, cascadesAdvanced: 0, cascadeSeats: new Map(), substitutions: 0, rounds: 0,
         verify: 0, route: 0, saved: 0, failedWrites: 0, failures: 0, routed: undefined,
         runMs: 0, runsTimed: 0, timedSeats: 0, slowestSeat: undefined,
+        review: { runs: 0, malformed: 0, verdicts: new Map(), severities: new Map(), by: new Map(), reasons: new Map(),
+          findings: [], paths: 0, pathsMissing: 0, more: 0 },
       });
       record.runs = (record.runs ?? 0) + 1;
       record.carriers.set(entry.carrier, (record.carriers.get(entry.carrier) ?? 0) + 1);
+      // A review rung's answer, as data. `path` is the reviewer's claim and not a fact — the cheap rung names
+      // files it has only read as text — so each one is checked against the session's working directory: a
+      // hallucinated location is worth *seeing* rather than trusting, and a path that does not exist is the
+      // cheapest evidence that a finding was not read off the diff.
+      const review = record.review;
+      if (details.verdict || details.malformedDisposition) {
+        review.runs += 1;
+        if (typeof details.dispositionBy === "string") review.by.set(details.dispositionBy, (review.by.get(details.dispositionBy) ?? 0) + 1);
+        if (typeof details.verdict === "string") review.verdicts.set(details.verdict, (review.verdicts.get(details.verdict) ?? 0) + 1);
+        if (details.malformedDisposition) {
+          review.malformed += 1;
+          const reason = details.malformedDisposition.reason ?? "no reason recorded";
+          review.reasons.set(reason, (review.reasons.get(reason) ?? 0) + 1);
+        }
+        for (const finding of Array.isArray(details.findings) ? details.findings : []) {
+          const severity = typeof finding?.severity === "string" ? finding.severity : "unknown";
+          review.severities.set(severity, (review.severities.get(severity) ?? 0) + 1);
+          const where = typeof finding?.path === "string" && finding.path ? finding.path : undefined;
+          let found;
+          if (where !== undefined) {
+            review.paths += 1;
+            found = fs.existsSync(path.isAbsolute(where) ? where : path.join(session.cwd ?? ".", where));
+            if (!found) review.pathsMissing += 1;
+          }
+          // Bounded: the report is a summary, and a run with hundreds of findings must not become the file.
+          if (review.findings.length < 40) review.findings.push({ severity, where, line: finding?.line ?? null, found, claim: typeof finding?.claim === "string" ? finding.claim : undefined });
+          else review.more += 1;
+        }
+      }
       addUsage(record.sums, details.usage);
       addUsage(record.decisionUsage, details.decisionUsage);
       const seats = Array.isArray(details.seats) ? details.seats : [];
@@ -579,6 +610,24 @@ export function render(report, { limit = 12 } = {}) {
     lines.push(`  ${"".padEnd(20)} turns ${money(row.sums.costReported)} reported${unpriced} · ${num(row.sums.input)} in / ${num(row.sums.output)} out · ${row.failures} failed · routes ${row.route} · verify ${row.verify} check(s) · saved ${row.saved}${row.failedWrites ? `, ${row.failedWrites} write failure(s)` : ""}`);
   }
   lines.push("");
+  const reviewRows = [...report.deliberation.values()].filter((row) => (row.review?.runs ?? 0) > 0).sort((a, b) => (b.review.runs - a.review.runs));
+  if (reviewRows.length > 0) {
+    lines.push("review dispositions (details.verdict / details.malformedDisposition)");
+    for (const row of reviewRows) {
+      const { review } = row;
+      const counts = (map) => [...map].map(([k, v]) => `${k} ${v}`).join(", ") || "—";
+      lines.push(`  ${row.key.padEnd(20)} ${review.runs} run(s) with a disposition · verdict ${counts(review.verdicts)} · by ${counts(review.by)}`);
+      lines.push(`  ${"".padEnd(20)} severities ${counts(review.severities)} · ${review.paths} path(s), ${review.pathsMissing} not found in the session cwd`);
+      // A malformed disposition is the reason no verdict is recorded, so the reason is the whole finding.
+      if (review.malformed > 0) lines.push(`  ${"".padEnd(20)} malformed ${review.malformed} ×: ${[...review.reasons].map(([k, v]) => `${k} (${v})`).join(" | ")}`);
+      for (const finding of review.findings) {
+        const line = finding.line === null || finding.line === undefined ? "" : `:${finding.line}`;
+        lines.push(`  ${"".padEnd(20)} ${finding.found === false ? "[path not found] " : finding.found === undefined ? "[no path] " : ""}${finding.severity} ${finding.where ?? "?"}${line} — ${(finding.claim ?? "").split("\n")[0].slice(0, 120)}`);
+      }
+      if (review.more > 0) lines.push(`  ${"".padEnd(20)} … ${review.more} further finding(s) not listed`);
+    }
+    lines.push("");
+  }
   lines.push("outcomes (what the runs were for, and how they ended)");
   const labels = [...report.labels.values()].sort((a, b) => String(b.outcomes.map((e) => e.at).sort().at(-1) ?? "").localeCompare(String(a.outcomes.map((e) => e.at).sort().at(-1) ?? "")));
   if (labels.length === 0 && report.unlabelled.runs === 0) lines.push("  (no fusion runs recorded in these sessions)");
@@ -1177,6 +1226,46 @@ function check() {
     piWrite.turns[0].toolCalls.join(",") === "write" && piReport.toolCalls.get("pi/write") === 1
       && (piReport.toolCalls.get("pi/matrix") ?? 0) === 0 && piReport.gaps.wrappedCalls === 0,
     JSON.stringify({ calls: piWrite.turns[0].toolCalls, counted: Object.fromEntries(piReport.toolCalls), device: piReport.gaps.wrappedCalls }));
+
+  // A review rung's disposition, as the report has to read it. The path check is the point: `extensions/…/run.js`
+  // exists under the session's cwd, `src/disposition.ts` does not, and a report that printed both alike would be
+  // laundering a hallucinated location into a fact.
+  const reviewDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-report-review-"));
+  fs.mkdirSync(path.join(reviewDir, "extensions/pi-fusion-matrix"), { recursive: true });
+  fs.writeFileSync(path.join(reviewDir, "extensions/pi-fusion-matrix/run.js"), "// a real file\n");
+  const reviewSession = extractSession([{ ...sessionMeta, cwd: reviewDir },
+    { type: "message", message: { role: "assistant", api: FUSION_API, provider: "fusion-matrix", model: "review-check",
+      usage: usage(500, 100, 0.004), content: [{ type: "text", text: "{\"verdict\":\"findings\"}" }],
+      details: { fusion: "review-check", seats: [], seatErrors: [], usage: usage(500, 100, 0.004),
+        dispositionBy: "review-synth", verdict: "findings", severityCounts: { blocking: 1, editorial: 1 },
+        findings: [
+          { severity: "blocking", path: "extensions/pi-fusion-matrix/run.js", line: 42, criterion: "no silent degradation", claim: "the refusal is swallowed\nand then some" },
+          { severity: "editorial", path: "src/disposition.ts", line: null, criterion: "docs match evidence", claim: "a count went stale" },
+        ] } } },
+    { type: "message", message: { role: "assistant", api: FUSION_API, provider: "fusion-matrix", model: "review-quick",
+      usage: usage(400, 60, 0.003), content: [{ type: "text", text: "I could not read the diff." }],
+      details: { fusion: "review-quick", seats: [], seatErrors: [], usage: usage(400, 60, 0.003),
+        malformedDisposition: { persona: "review-synth", reason: "the disposition was not JSON" } } } },
+  ], { file: "review.jsonl", harness: "pi" });
+  const reviewReport = buildReport({ sessions: [reviewSession], roots: [], unreadable: [] });
+  const reviewRow = reviewReport.deliberation.get("pi/review-check");
+  const reviewText = render(reviewReport);
+  // Two runs, two rungs: a row is a fusion, so the disposition of `review-check` and the malformed answer of
+  // `review-quick` are counted under their own rows rather than pooled into one.
+  ok("a review disposition is counted: verdict, the persona that stands, severities and paths",
+    reviewRow?.review.runs === 1 && reviewRow?.review.verdicts.get("findings") === 1 && reviewRow?.review.by.get("review-synth") === 1
+      && reviewRow?.review.severities.get("blocking") === 1 && reviewRow?.review.severities.get("editorial") === 1
+      && reviewRow?.review.paths === 2 && reviewRow?.review.pathsMissing === 1 && reviewRow?.review.malformed === 0,
+    JSON.stringify({ runs: reviewRow?.review.runs, paths: reviewRow?.review.paths, missing: reviewRow?.review.pathsMissing, malformed: reviewRow?.review.malformed }));
+  ok("a finding whose path is not in the session cwd is marked, and a real one is not",
+    /\[path not found\] editorial src\/disposition\.ts/.test(reviewText) && !/\[path not found\] blocking extensions\/pi-fusion-matrix\/run\.js/.test(reviewText)
+      && /blocking extensions\/pi-fusion-matrix\/run\.js:42/.test(reviewText),
+    reviewText.split("\n").filter((l) => l.includes("blocking") || l.includes("editorial")).slice(0, 3).join(" // "));
+  ok("a malformed disposition is reported by reason, with no verdict beside it",
+    reviewReport.deliberation.get("pi/review-quick")?.review.malformed === 1 && /malformed 1 ×: the disposition was not JSON/.test(reviewText)
+      && reviewRow?.review.reasons.size === 0,
+    reviewText.split("\n").find((l) => l.includes("malformed 1 ×")) ?? "no malformed line");
+  fs.rmSync(reviewDir, { recursive: true, force: true });
 
   const failures = results.filter((r) => !r.pass);
   for (const r of results) console.log(`  ${r.pass ? "ok  " : "FAIL"} ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);

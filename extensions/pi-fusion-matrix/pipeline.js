@@ -155,16 +155,43 @@ function countSeverities(findings = []) {
   return counts;
 }
 
-const normaliseFinding = (finding) => {
-  const value = finding && typeof finding === "object" ? finding : {};
-  return {
-    severity: SEVERITIES.includes(value.severity) ? value.severity : "unknown",
-    path: typeof value.path === "string" && value.path ? value.path : undefined,
-    line: Number.isInteger(value.line) ? value.line : undefined,
-    criterion: typeof value.criterion === "string" && value.criterion ? value.criterion : undefined,
-    claim: typeof value.claim === "string" ? value.claim : undefined,
-  };
-};
+const VERDICTS = ["clean", "findings"];
+
+/**
+ * One finding, as recorded. `line` keeps an explicit `null`: the persona prompt allows a null line for a finding
+ * about the change as a whole, and dropping the key would lose the field the contract says is always present.
+ */
+const normaliseFinding = (finding) => ({
+  severity: finding.severity,
+  path: finding.path,
+  line: finding.line === null ? null : finding.line,
+  criterion: finding.criterion,
+  claim: finding.claim,
+});
+
+/**
+ * Why a disposition is not one, or `undefined` when it is. The schema is the persona prompt's, enforced here
+ * because a *parseable* answer is not necessarily a disposition: `{"verdict":"clean"}` would otherwise record as
+ * an empty, unmarked review — a clean-looking result produced by an answer that answered nothing.
+ */
+function dispositionFlaw(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "the disposition is not an object";
+  if (!VERDICTS.includes(value.verdict)) return `verdict is not one of ${VERDICTS.join("|")}`;
+  if (!Array.isArray(value.findings)) return "findings is not an array";
+  for (const [index, finding] of value.findings.entries()) {
+    if (!finding || typeof finding !== "object" || Array.isArray(finding)) return `findings[${index}] is not an object`;
+    if (!SEVERITIES.includes(finding.severity)) return `findings[${index}].severity is not one of ${SEVERITIES.join("|")}`;
+    if (typeof finding.path !== "string" || !finding.path) return `findings[${index}].path is missing`;
+    if (!(finding.line === null || Number.isInteger(finding.line))) return `findings[${index}].line is neither an integer nor null`;
+    if (typeof finding.criterion !== "string" || !finding.criterion) return `findings[${index}].criterion is missing`;
+    if (typeof finding.claim !== "string" || !finding.claim) return `findings[${index}].claim is missing`;
+  }
+  // An inconsistent verdict is a flaw, not a preference: `clean` with findings, or `findings` with none, cannot be
+  // both recorded and trusted.
+  if (value.verdict === "clean" && value.findings.length > 0) return "verdict is clean but findings is not empty";
+  if (value.verdict === "findings" && value.findings.length === 0) return "verdict is findings but findings is empty";
+  return undefined;
+}
 
 /**
  * A JSON seat's answer as both *text for the next stage* and *the disposition it declared*. The record is the
@@ -176,11 +203,13 @@ function dispositionOf(persona, text) {
   if (persona?.output !== "json") return { text };
   const { ok, value } = parseJsonOutput(text);
   if (!ok) return { text: normaliseJsonSeat(text), malformed: "the disposition was not JSON" };
-  const findings = Array.isArray(value.findings) ? value.findings.map(normaliseFinding) : [];
-  const verdict = typeof value.verdict === "string" ? value.verdict : undefined;
+  const flaw = dispositionFlaw(value);
+  if (flaw) return { text: normaliseJsonSeat(text), malformed: flaw };
+  // Every JSON seat's answer is still recovered for the next stage unchanged; only *review* answers carry the
+  // disposition keys, and a malformed one carries nothing but the flaw.
   return {
     text: JSON.stringify(value, null, 2),
-    disposition: { ...(verdict ? { verdict } : {}), summary: typeof value.summary === "string" ? value.summary : undefined, findings },
+    disposition: { verdict: value.verdict, summary: typeof value.summary === "string" ? value.summary : undefined, findings: value.findings.map(normaliseFinding) },
   };
 }
 
@@ -584,7 +613,9 @@ export async function runPipeline({
         stagesRun += 1;
         for (const seat of roundSeats) {
           if (seat.disposition) lastDisposition = { persona: seat.persona, ...seat.disposition };
-          if (seat.malformed) malformedDisposition = { persona: seat.persona, reason: seat.malformed };
+          // A later malformed disposition *replaces* whatever stood before it: a verdict from an earlier seat
+          // beside a malformed final answer is exactly the ambiguous record a consumer would read as clean.
+          if (seat.malformed) { malformedDisposition = { persona: seat.persona, reason: seat.malformed }; lastDisposition = null; }
           accumulateUsage(usage, seat.usage);
           if (seat.decisionUsage) accumulateUsage(decisionUsage, seat.decisionUsage);
           seatRecords.push({
@@ -624,7 +655,7 @@ export async function runPipeline({
       record.calls = seat.calls ?? 0;
       stagesRun += 1;
       if (seat.disposition) lastDisposition = { persona: seat.persona, ...seat.disposition };
-      if (seat.malformed) malformedDisposition = { persona: seat.persona, reason: seat.malformed };
+      if (seat.malformed) { malformedDisposition = { persona: seat.persona, reason: seat.malformed }; lastDisposition = null; }
       accumulateUsage(usage, seat.usage);
       if (seat.decisionUsage) accumulateUsage(decisionUsage, seat.decisionUsage);
       seatRecords.push({
@@ -753,7 +784,7 @@ export async function runPipeline({
       // A review's numbers live here: the deciding seat's verdict and findings with their severities, the count
       // per severity (so a run whose findings are all `editorial` is visible as such), and — when a JSON seat
       // produced something unparseable — that fact, because a malformed disposition must not read as clean.
-      ...(lastDisposition ? { verdict: lastDisposition.verdict, severityCounts: countSeverities(lastDisposition.findings), findings: lastDisposition.findings } : {}),
+      ...(lastDisposition ? { dispositionBy: lastDisposition.persona, verdict: lastDisposition.verdict, severityCounts: countSeverities(lastDisposition.findings), findings: lastDisposition.findings } : {}),
       ...(malformedDisposition ? { malformedDisposition } : {}) },
     stagesRun,
   };

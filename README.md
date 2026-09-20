@@ -538,14 +538,24 @@ omp -p "@/tmp/packet.md" --model fusion-matrix/review-check     # the committee,
 omp -p "@/tmp/packet.md" --model fusion-matrix/review-quick     # one adversarial seat, then the disposition
 ```
 
-The last seat of a review rung answers in JSON, and the run records it: `details.verdict`, `details.findings`
-(`severity` from `blocking | major | minor | editorial`, `path`, `line`, `criterion`, `claim`) and
-`details.severityCounts`; a malformed disposition is recorded as `details.malformedDisposition` rather than
-reading as clean. Severity is what decides whether another review is worth buying — an `editorial` finding
-never is — which is the point of recording it at all.
+The last seat of a review rung answers in JSON, and the run records it: `details.dispositionBy` (which persona's
+answer stands), `details.verdict`, `details.findings` (`severity` from `blocking | major | minor | editorial`,
+`path`, `line`, `criterion`, `claim`) and `details.severityCounts`. Severity is what decides whether another
+review is worth buying — an `editorial` finding never is — which is the point of recording it at all.
+
+A schema violation is recorded as `details.malformedDisposition` with the reason, and records no verdict and no
+findings: `{"verdict":"clean"}` is an answer that answered nothing, and a run that returns one is not a clean
+review. A malformed final answer also clears any verdict an earlier seat had recorded, so the two can never
+appear together. A finding's `line` keeps an explicit `null`.
+
+`path` is the reviewer's claim, not a fact — the cheap rung names files it has only read as text — so
+`session-report.mjs` checks each recorded path against the session's working directory and prints
+`[path not found]` beside the ones that do not exist.
 
 `execute: false` on these rungs is not decoration: with an execute face, a tool-bearing turn to a review rung
 would *proxy to its writing seat*, so the panel would never run and the review would be one model's opinion.
+The loader enforces it wherever a writing seat answers in JSON — a disposition is not an agent turn — so the
+rule holds for the next rung without anyone having to remember it.
 The loader refuses that combination, along with a `review` router whose targets could do it.
 
 ## Fallback and reporting
