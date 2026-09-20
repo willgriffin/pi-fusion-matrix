@@ -392,11 +392,13 @@ check("seat: a refused thinking level is retried once without one",
 // are the two surfaces a user sees before any run, and both follow from the executor rule.
 const registered = new Map();
 const commands = new Map();
+const sentMessages = [];
 const stubApi = {
   on: () => {},
   registerProvider: (id, definition) => registered.set(id, definition),
   registerTool: () => {},
   registerCommand: (name, definition) => commands.set(name, definition),
+  sendMessage: async (message, options) => { sentMessages.push({ message, options }); },
 };
 const { default: extensionFactory } = await import("../extensions/pi-fusion-matrix/index.js");
 // A scratch cwd so the entry point's own load (packaged + machine + a project layer here) can carry a
@@ -434,6 +436,54 @@ check("matrix-info: every fusion prints its execute face",
     && / {2}review-check: committee-cascaded[^\n]*\n[\s\S]*? {4}executes: kimi @harness \(writing seat synth\)/.test(info)
     && /executes: — \(no writing seat/.test(info),
   info.split("\n").filter((line) => line.includes("executes:")).slice(0, 3).join(" | "));
+
+// A seat's own clock: the harness records none for a call we make ourselves, so the record has to.
+const timedRun = await runPipeline({ config, sources, fusion: { ...config.fusions["review-check"], id: "review-check" }, prompt: "time it", callModel, decide, emit: silent, registry });
+const timedSeats = timedRun.details.seats ?? [];
+check("a deliberation records its own wall clock, per seat and for the run",
+  timedSeats.length > 0 && timedSeats.every((seat) => Number.isFinite(seat.durationMs) && seat.durationMs >= 0)
+    && Number.isFinite(timedRun.details.durationMs) && timedRun.details.durationMs >= 0,
+  `seats=${JSON.stringify(timedSeats.map((seat) => seat.durationMs))} run=${timedRun.details.durationMs}`);
+// A call that fails spent time too, and that time is the attempt's: the seat's clock covers the seat.
+let failedCallSaw = 0;
+const failingCallModel = async (args) => {
+  failedCallSaw += 1;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  return { text: "", usage: { input: 1, output: 0, totalTokens: 1, cost: { total: 0 } }, stopReason: "error", errorMessage: "the provider said no", toolCalls: [] };
+};
+const failedRun = await runPipeline({ config, sources, fusion: { ...config.fusions.quick, id: "quick" }, prompt: "fail", callModel: failingCallModel, decide, emit: silent, registry });
+const failedSeat = failedRun.details.seats?.[0];
+check("a failed call records the time it spent failing, on its attempt",
+  failedCallSaw >= 1 && failedSeat?.degraded === true && Number.isFinite(failedSeat.attempts?.[0]?.durationMs) && failedSeat.attempts[0].durationMs >= 1,
+  `attempts=${JSON.stringify(failedSeat?.attempts)}`);
+
+/* ------------------------------------------------------------ the outcome label */
+
+// `/matrix-label` is the half a run cannot know about itself: what the work was, and how it ended.
+const labelNotice = { text: "", level: "" };
+const notify = (text, level) => { labelNotice.text = String(text); labelNotice.level = String(level); };
+const labelsBefore = sentMessages.length;
+await commands.get("matrix-label").handler("#12 landed https://example.test/pull/1", { ui: { notify } });
+const written = sentMessages.at(-1)?.message;
+check("matrix-label: a label records the work item, the outcome and its evidence",
+  sentMessages.length === labelsBefore + 1 && written?.customType === "matrix-label"
+    && written.details?.workItem === "#12" && written.details?.outcome === "landed"
+    && written.details?.evidence === "https://example.test/pull/1"
+    && sentMessages.at(-1)?.options?.triggerTurn === false
+    && /#12 — landed/.test(String(written.content)),
+  JSON.stringify(written?.details));
+await commands.get("matrix-label").handler("#12 shipped", { ui: { notify } });
+check("matrix-label: an outcome outside the vocabulary is refused, and writes nothing",
+  sentMessages.length === labelsBefore + 1 && labelNotice.level === "error" && /usage: \/matrix-label/.test(labelNotice.text) && /landed/.test(labelNotice.text),
+  `${labelNotice.level}: ${labelNotice.text}`);
+await commands.get("matrix-label").handler("#12", { ui: { notify } });
+check("matrix-label: a work item with no outcome is refused",
+  sentMessages.length === labelsBefore + 1 && labelNotice.level === "error", labelNotice.text);
+await commands.get("matrix-label").handler("#12 review", { ui: { notify } });
+check("matrix-label: evidence is optional",
+  sentMessages.length === labelsBefore + 2 && sentMessages.at(-1).message.details?.outcome === "review"
+    && sentMessages.at(-1).message.details?.evidence === undefined,
+  JSON.stringify(sentMessages.at(-1)?.message?.details));
 
 /* ------------------------------------------------------------ review findings */
 
@@ -519,6 +569,25 @@ check("proxy: an error event before any event recovers like a throw",
     && eventRecovered.final.details?.proxied?.provider === "zai"
     && eventRecovered.final.details?.proxied?.attempts?.length === 3,
   `attempts=${JSON.stringify(eventAttempts)}, provider=${eventRecovered.final.details?.proxied?.provider}, recorded=${eventRecovered.final.details?.proxied?.attempts?.length}`);
+
+// A peer whose stream cannot even be created: the failure is a route that never began, and it must not take
+// the reader of the run's own bookkeeping down with it.
+const makeThrowingPeer = (seen) => ({
+  streamSimple: (model, context, options) => {
+    seen.push({ model, context, options });
+    throw new Error("the provider refused to open a stream");
+  },
+});
+const throwSeen = [];
+const thrown = await driveStream(fusionStream(makeThrowingPeer(throwSeen))(fusionModel("proxy-eventful"), harnessContext, harnessOptions));
+const throwAttempts = thrown.final.details?.proxied?.attempts ?? [];
+check("proxy: a route that cannot be created is recorded, not thrown",
+  thrown.final.stopReason === "error"
+    && throwAttempts.length === 2                       // both providers of the alias were tried
+    && throwAttempts.every((a) => a.reason === "transient" && /refused to open a stream/.test(String(a.detail)))
+    && throwAttempts.every((a) => a.usage === undefined) // nothing was spent, so nothing is reported as spent
+    && thrown.events.some((e) => e.type === "error"),
+  `attempts=${JSON.stringify(throwAttempts)}`);
 
 // 7b. proxy: a `result()` rejection past the first event must not become a second terminal message
 const rejectSeen = [];

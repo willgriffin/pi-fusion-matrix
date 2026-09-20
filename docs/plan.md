@@ -1047,6 +1047,9 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
 
 - it reads both harnesses' session JSONL (`~/.pi/agent/sessions`, `~/.omp/agent/sessions`), with no
   network, no keys, no model calls, and no writes;
+- per run it also reads the clocks we record ourselves, because neither harness times a call we make: a
+  seat's `durationMs` (the sum of its calls, so a retry is included) with each failed attempt's own time,
+  the run's `durationMs`, and — on a proxied turn — the `usage` a route spent before it failed;
 - per fusion and per model it totals turns, tokens, cost, tool calls and tool errors; for deliberation
   runs, seats, degraded seats, seat errors, cascades split sufficient/advanced, substitutions, decision
   tokens, routes, verification and saved files; for proxied turns, the alias that answered, the level the
@@ -1061,6 +1064,15 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
   counted *and* named with its file, line number and reason, and the first ten of every diagnostic list are
   followed by an omitted-count marker. A reader that silently skipped any of these would make a missing
   record look like a clean run;
+- **the outcome is a label, not an inference.** `/matrix-label <work-item> <outcome> [evidence]` records what
+  the session's runs were for and how they ended, as a `matrix-label` custom message: an append-only label
+  whose latest entry is the current outcome, so a session that was in review and then landed carries both.
+  The vocabulary is closed (`landed`, `review`, `findings`, `ci-red`, `blocked`, `abandoned`) because a
+  free-text outcome cannot be counted, and an unrecognised one is refused without writing anything. The
+  label is the one fact a run cannot know about itself: the report joins it to the runs, their fusion turns
+  and their cost, and counts a session that produced runs without a label as **unlabelled** rather than
+  assuming it went well. A hand-written label missing either half is named as an unrecognised shape, not
+  counted;
 - **filters select rows, never the accounting.** `--cwd`/`--since` decide which sessions are totalled; the
   files read, the unparsed lines and any session a filter could not attribute (a truncated header has no
   `cwd` to compare, and a malformed timestamp cannot be placed) are reported either way, and the exit
@@ -1530,6 +1542,20 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     those messages and exit non-zero, and an empty `proxy: {}` reports `proxy needs an alias`; all seven
     rules (that one, `proxy: null`, and the five above) are asserted offline in `scripts/interp-check.mjs`. Remove each file afterwards, and confirm the
     packaged config alone validates clean (`node scripts/doctor.mjs` exits 0).
+
+27. **The outcome label, and the clocks we record ourselves** — `node scripts/interp-check.mjs` must pass
+    42/42, the new ones being: a seat's `durationMs` and the run's are present and finite while a failed
+    call's time rides its attempt record, and `/matrix-label` writes a `matrix-label` custom message with
+    the work item, the outcome and its evidence — refusing an outcome outside the vocabulary, a work item
+    with no outcome, and writing nothing in either case. Then live in a scratch `cwd`: `/matrix quick "…"`
+    followed by `/matrix-label <work-item> landed <evidence>` in **both** harnesses, after which
+    `node scripts/session-report.mjs --cwd <scratch>` prints an `outcomes` section naming the work item, the
+    latest outcome and the evidence, with the fusion turns and the reported cost beside them; a second
+    label in the same session supersedes the first and the report says `2 labels, latest wins`; and a
+    session with runs but no label appears under `(unlabelled)` with its cost and the line that no
+    `/matrix-label` was recorded. Each of those must fail when the reader, the command or the seat clock is
+    mutated (the label not read, the first label kept instead of the latest, a half-written label counted,
+    unlabelled runs uncounted, a sums object merged as a usage, a seat clock dropped).
 
 ## Assumptions & contingencies
 

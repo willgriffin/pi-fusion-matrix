@@ -194,6 +194,33 @@ export default async function (pi) {
     },
   });
 
+  /**
+   * The outcomes a work item can be labelled with. Closed on purpose: a free-text outcome cannot be counted,
+   * and the point of the label is to be joined to the cost of the runs that produced it.
+   */
+  const LABEL_OUTCOMES = ["landed", "review", "findings", "ci-red", "blocked", "abandoned"];
+
+  pi.registerCommand("matrix-label", {
+    description: `Record what a session's fusion runs were for and how they ended: /matrix-label <work-item> <${LABEL_OUTCOMES.join("|")}> [evidence]`,
+    handler: async (args, ctx) => {
+      const text = String(args ?? "").trim();
+      const [workItem, outcome, ...rest] = text.split(/\s+/);
+      if (!workItem || !LABEL_OUTCOMES.includes(outcome)) {
+        ctx.ui.notify(`usage: /matrix-label <work-item> <${LABEL_OUTCOMES.join("|")}> [evidence]`, "error");
+        return;
+      }
+      const evidence = rest.join(" ").trim();
+      // Append-only, latest wins: a session that was in review and then landed carries both, and the reader
+      // takes the last one as the current outcome rather than rewriting history.
+      const details = { workItem, outcome, ...(evidence ? { evidence } : {}) };
+      try {
+        await pi.sendMessage({ customType: "matrix-label", content: `${workItem} — ${outcome}${evidence ? ` (${evidence})` : ""}`, display: true, details }, { triggerTurn: false });
+      } catch (error) {
+        ctx.ui.notify(`the label could not be written: ${error?.message ?? String(error)}`, "error");
+      }
+    },
+  });
+
   pi.registerCommand("matrix-info", {
     description: "List the configured modes, fusions, seats, and provider routes",
     handler: async (_args, ctx) => {

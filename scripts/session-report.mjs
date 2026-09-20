@@ -50,6 +50,8 @@ const DEFAULT_ROOTS = [
 
 /** The api id every fusion model is registered under, so a turn names the fusion that served it. */
 const FUSION_API = "fusion-matrix";
+/** The custom message type a `/matrix-label` writes: a work item, an outcome, and optional evidence. */
+const LABEL_TYPE = "matrix-label";
 /** Keys that only ever appear in a fusion run record: a shape carrying one of these is ours to explain. */
 const RECORD_KEYS = ["fusion", "proxied", "cascades", "seats", "seatErrors"];
 
@@ -59,6 +61,23 @@ const values = (name) => args.flatMap((arg, i) => (arg === `--${name}` ? [args[i
 const value = (name, fallback) => values(name).at(-1) ?? fallback;
 
 const emptySums = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0, costReported: 0, unpricedMessages: 0 });
+
+/**
+ * Sums into sums. `addUsage` reads a *usage* (it looks at `cost.total`); adding one sums object to another
+ * with it counted the whole object as an unpriced message and contributed nothing — measured on the first
+ * run of the label fixture, which reported `$0.0000 reported + 1 unpriced` for a turn that cost $0.002.
+ */
+function mergeSums(target, source) {
+  target.input += source.input ?? 0;
+  target.output += source.output ?? 0;
+  target.cacheRead += source.cacheRead ?? 0;
+  target.cacheWrite += source.cacheWrite ?? 0;
+  target.reasoning += source.reasoning ?? 0;
+  target.totalTokens += source.totalTokens ?? 0;
+  target.costReported += source.costReported ?? 0;
+  target.unpricedMessages += source.unpricedMessages ?? 0;
+  return target;
+}
 
 /**
  * `cost.reported` is the only money in these sums, and `unpricedMessages` counts the usages that carried
@@ -157,6 +176,7 @@ export function extractSession(entries, meta = {}) {
     turns: [],
     toolResults: [],
     records: [],
+    labels: [],
     unknown: [],
     problems: [],
   };
@@ -173,6 +193,17 @@ export function extractSession(entries, meta = {}) {
 
     if (entry?.type === "custom_message") {
       const details = entry.details;
+      // A label is the workflow's own record of what the runs were for and how they ended — the one fact a
+      // run cannot know about itself. A hand-written label missing either half is named as unrecognised
+      // rather than counted, because a label nothing can be joined to is worse than no label.
+      if (entry.customType === LABEL_TYPE) {
+        if (typeof details?.workItem === "string" && typeof details?.outcome === "string") {
+          session.labels.push({ workItem: details.workItem, outcome: details.outcome, evidence: details.evidence, at: entry.timestamp });
+        } else {
+          session.unknown.push({ carrier: "custom_message", keys: Object.keys(details ?? {}).sort(), at: entry.timestamp });
+        }
+        continue;
+      }
       if (typeof details?.fusion === "string") {
         session.records.push({ kind: "deliberation", carrier: "custom_message", fusion: details.fusion, details, at: entry.timestamp });
       } else if (isRecordShape(details)) {
@@ -248,6 +279,8 @@ export function aggregate(sessions) {
     unknownShapes: [],
     problems: [],
     turns: new Map(),
+    labels: new Map(),
+    unlabelled: { sessions: 0, runs: 0, fusionTurns: 0, sums: emptySums() },
     proxy: new Map(),
     deliberation: new Map(),
     tools: new Map(),
@@ -297,12 +330,50 @@ export function aggregate(sessions) {
       if (owner && result.isError) owner.toolErrors += 1;
     }
 
+    // What this session cost inside fusions: the raw material of "what did this work item cost". Two
+    // carriers, never both for one run — a *streamed* fusion turn carries its cost on the assistant message
+    // (and its record repeats the same run's usage), while a `/matrix` or tool run has no assistant message
+    // at all and carries its cost only in the record. Counting both would double a streamed run, and counting
+    // only the messages reported a `/matrix` session as costing nothing — measured 2026-09-19 on the first
+    // live label run, which read `1 run(s) · $0.0000 reported` over a run that cost $0.000066.
+    const fusionSums = emptySums();
+    let fusionTurns = 0;
+    for (const t of session.turns) {
+      if (t.api !== FUSION_API) continue;
+      fusionTurns += 1;
+      addUsage(fusionSums, t.usage);
+    }
+    for (const entry of session.records) {
+      if (entry.carrier === "assistant") continue;
+      addUsage(fusionSums, entry.details?.usage);
+    }
+    const label = session.labels.at(-1);
+    if (label) {
+      if (!report.labels.has(label.workItem)) {
+        report.labels.set(label.workItem, { workItem: label.workItem, outcomes: [], fusions: new Map(), sums: emptySums(), sessions: 0, runs: 0, fusionTurns: 0 });
+      }
+      const row = report.labels.get(label.workItem);
+      row.sessions += 1;
+      row.runs += session.records.length;
+      row.fusionTurns += fusionTurns;
+      mergeSums(row.sums, fusionSums);
+      for (const entry of session.labels) row.outcomes.push({ ...entry });
+      for (const record of session.records) row.fusions.set(record.fusion, (row.fusions.get(record.fusion) ?? 0) + 1);
+    } else if (session.records.length > 0) {
+      // A run nobody labelled is counted as unlabelled, never assumed to have gone well.
+      report.unlabelled.sessions += 1;
+      report.unlabelled.runs += session.records.length;
+      report.unlabelled.fusionTurns += fusionTurns;
+      mergeSums(report.unlabelled.sums, fusionSums);
+    }
+
     for (const entry of session.records) {
       if (entry.kind === "proxy") {
         report.records.proxy += 1;
         const proxied = entry.details;
         const key = entry.fusion ?? proxied.model ?? "?";
-        const record = turn(report.proxy, `${session.harness}/${key}`, { aliases: new Map(), levels: new Map(), attempts: new Map(), dropped: 0, failures: 0, sums: emptySums(), blank: 0 });
+        const record = turn(report.proxy, `${session.harness}/${key}`, { aliases: new Map(), levels: new Map(), attempts: new Map(),
+          dropped: 0, failures: 0, sums: emptySums(), attemptsSpent: emptySums() });
         record.turns += 1;
         if (typeof proxied.alias === "string") record.aliases.set(proxied.alias, (record.aliases.get(proxied.alias) ?? 0) + 1);
         // `thinking: null` is a turn that ran at no level; an absent key is a record that did not say, and
@@ -311,7 +382,11 @@ export function aggregate(sessions) {
         const level = recorded ? (proxied.thinking ?? "none") : "unrecorded";
         record.levels.set(level, (record.levels.get(level) ?? 0) + 1);
         const attempts = Array.isArray(proxied.attempts) ? proxied.attempts : [];
-        for (const attempt of attempts) record.attempts.set(attempt?.reason ?? "?", (record.attempts.get(attempt?.reason ?? "?") ?? 0) + 1);
+        for (const attempt of attempts) {
+          record.attempts.set(attempt?.reason ?? "?", (record.attempts.get(attempt?.reason ?? "?") ?? 0) + 1);
+          // The tokens a route burned before it failed: only present when the target actually spent them.
+          if (attempt?.usage) addUsage(record.attemptsSpent, attempt.usage);
+        }
         // A turn that ran at no level while a route was refused at the level we asked for: the drop is the
         // fact worth counting, because it is what makes a cheap model answer without reasoning.
         if (recorded && proxied.thinking === null && attempts.length > 0) record.dropped += 1;
@@ -325,6 +400,7 @@ export function aggregate(sessions) {
         carriers: new Map(), sums: emptySums(), decisionUsage: emptySums(), seats: 0, degradedSeats: 0, seatErrors: 0,
         cascades: 0, cascadesSufficient: 0, cascadesAdvanced: 0, cascadeSeats: new Map(), substitutions: 0, rounds: 0,
         verify: 0, route: 0, saved: 0, failedWrites: 0, failures: 0, routed: undefined,
+        runMs: 0, runsTimed: 0, timedSeats: 0, slowestSeat: undefined,
       });
       record.runs = (record.runs ?? 0) + 1;
       record.carriers.set(entry.carrier, (record.carriers.get(entry.carrier) ?? 0) + 1);
@@ -351,6 +427,12 @@ export function aggregate(sessions) {
         record.cascadeSeats.set(seat, (record.cascadeSeats.get(seat) ?? 0) + 1);
       }
       record.substitutions += Array.isArray(details.substitutions) ? details.substitutions.length : 0;
+      if (Number.isFinite(details.durationMs)) { record.runMs = (record.runMs ?? 0) + details.durationMs; record.runsTimed = (record.runsTimed ?? 0) + 1; }
+      for (const seat of seats) {
+        if (!Number.isFinite(seat?.durationMs)) continue;
+        record.timedSeats = (record.timedSeats ?? 0) + 1;
+        if (!record.slowestSeat || seat.durationMs > record.slowestSeat.durationMs) record.slowestSeat = { persona: seat.persona, durationMs: seat.durationMs };
+      }
       record.rounds += details.rounds ?? 0;
       record.verify += Array.isArray(details.verification) ? details.verification.length : 0;
       if (details.routing) { record.route += 1; record.routed = details.routing; }
@@ -402,16 +484,39 @@ export function render(report, { limit = 12 } = {}) {
     const aliases = [...row.aliases].map(([k, v]) => `${k}×${v}`).join(", ") || "—";
     const levels = [...row.levels].map(([k, v]) => `${k}×${v}`).join(", ") || "—";
     const attempts = [...row.attempts].map(([k, v]) => `${k}×${v}`).join(", ") || "none";
-    lines.push(`  ${row.key.padEnd(20)} ${String(row.turns).padStart(3)} turns · alias ${aliases} · level ${levels} · ${row.dropped} level drop(s) · attempts ${attempts}`);
+    const spent = row.attemptsSpent.unpricedMessages > 0
+      ? `, ${num(row.attemptsSpent.input)} in / ${num(row.attemptsSpent.output)} out on failed routes (unpriced)`
+      : row.attemptsSpent.input + row.attemptsSpent.output > 0 ? `, ${num(row.attemptsSpent.input)} in / ${num(row.attemptsSpent.output)} out on failed routes (${money(row.attemptsSpent.costReported)} reported)` : "";
+    lines.push(`  ${row.key.padEnd(20)} ${String(row.turns).padStart(3)} turns · alias ${aliases} · level ${levels} · ${row.dropped} level drop(s) · attempts ${attempts}${spent}`);
   }
   lines.push("");
   lines.push(`deliberation records (details.fusion): ${report.records.deliberation}`);
   for (const row of [...report.deliberation.values()].sort((a, b) => (b.runs ?? 0) - (a.runs ?? 0))) {
     const carriers = [...row.carriers].map(([k, v]) => `${k}×${v}`).join(", ");
     lines.push(`  ${row.key.padEnd(20)} ${String(row.runs ?? 0).padStart(3)} runs (${carriers}) · ${row.seats} seats, ${row.degradedSeats} degraded, ${row.seatErrors} seat error(s)`);
+    const slowest = row.slowestSeat ? ` · slowest seat ${row.slowestSeat.persona ?? "?"} ${ms(row.slowestSeat.durationMs)}` : "";
     lines.push(`  ${"".padEnd(20)} cascades ${row.cascades} (sufficient ${row.cascadesSufficient}, advanced ${row.cascadesAdvanced}) · substitutions ${row.substitutions} · decision tokens ${num(row.decisionUsage.totalTokens)} (${money(row.decisionUsage.costReported)} reported${row.decisionUsage.unpricedMessages ? `, ${row.decisionUsage.unpricedMessages} unpriced` : ""})`);
+    if (row.runMs) lines.push(`  ${"".padEnd(20)} run time ${ms(row.runMs)}${slowest} · ${row.timedSeats} seat(s) timed`);
     const unpriced = row.sums.unpricedMessages ? ` (${row.sums.unpricedMessages} unpriced)` : "";
     lines.push(`  ${"".padEnd(20)} turns ${money(row.sums.costReported)} reported${unpriced} · ${num(row.sums.input)} in / ${num(row.sums.output)} out · ${row.failures} failed · routes ${row.route} · verify ${row.verify} check(s) · saved ${row.saved}${row.failedWrites ? `, ${row.failedWrites} write failure(s)` : ""}`);
+  }
+  lines.push("");
+  lines.push("outcomes (what the runs were for, and how they ended)");
+  const labels = [...report.labels.values()].sort((a, b) => (b.outcomes.at(-1)?.at ?? "").localeCompare(a.outcomes.at(-1)?.at ?? ""));
+  if (labels.length === 0 && report.unlabelled.runs === 0) lines.push("  (no fusion runs recorded in these sessions)");
+  for (const row of labels) {
+    const latest = row.outcomes.at(-1);
+    const evidence = [...row.outcomes].reverse().find((entry) => entry.evidence)?.evidence;
+    const fusions = [...row.fusions].map(([k, v]) => `${k}×${v}`).join(", ") || "—";
+    // One session's labels are a history (latest wins); labels from several sessions for one work item are
+    // separate sessions' views of the same work, and saying "latest wins" there would imply one history.
+    const history = row.outcomes.length > 1 ? ` · ${row.outcomes.length} label(s)${row.sessions === 1 ? ", latest wins" : " from separate sessions"}` : "";
+    lines.push(`  ${row.workItem.padEnd(18)} ${String(latest?.outcome ?? "?").padEnd(9)} ${row.sessions} session(s) · ${row.runs} run(s) · ${money(row.sums.costReported)} reported${row.sums.unpricedMessages ? ` + ${row.sums.unpricedMessages} unpriced` : ""}${row.fusionTurns ? ` · ${row.fusionTurns} streamed turn(s)` : ""}`);
+    lines.push(`  ${"".padEnd(18)} via ${fusions}${evidence ? ` · evidence: ${evidence}` : ""}${history}`);
+  }
+  if (report.unlabelled.runs > 0) {
+    lines.push(`  ${"(unlabelled)".padEnd(18)} ${"".padEnd(9)} ${report.unlabelled.sessions} session(s) · ${report.unlabelled.runs} run(s) · ${money(report.unlabelled.sums.costReported)} reported${report.unlabelled.sums.unpricedMessages ? ` + ${report.unlabelled.sums.unpricedMessages} unpriced` : ""}`);
+    lines.push(`  ${"".padEnd(18)} no \`/matrix-label\` was recorded: these runs have a cost and no outcome, and are not counted as successes.`);
   }
   lines.push("");
   lines.push("tools");
@@ -474,6 +579,8 @@ function renderJson(report) {
     proxy: plain(report.proxy),
     deliberation: plain(report.deliberation),
     tools: plain(report.tools),
+    labels: plain(report.labels),
+    unlabelled: report.unlabelled,
     toolCalls: Object.fromEntries(report.toolCalls),
     gaps: report.gaps,
     unknownShapes: report.unknownShapes,
@@ -713,6 +820,73 @@ function check() {
   ok("a message the harness priced not at all counts as unpriced", noUsage.turns.get("pi/fusion:quick")?.sums.unpricedMessages === 1 && noUsage.turns.get("pi/fusion:quick")?.sums.costReported === 0, JSON.stringify(noUsage.turns.get("pi/fusion:quick")?.sums));
 
   ok("a cost below a cent does not print as zero", money(0.0000203) === "$0.000020" && money(0) === "$0.0000" && money(0.42) === "$0.42", `${money(0.0000203)} ${money(0)} ${money(0.42)}`);
+
+  // ---- outcomes: the label is the half a run cannot know about itself ---------------------------------
+  const labelled = extractSession([sessionMeta,
+    { type: "message", message: { role: "assistant", api: FUSION_API, model: "quick", usage: usage(30, 3, 0.002), content: [],
+      details: { fusion: "quick", seats: [
+        { persona: "technical", degraded: false, usage: usage(30, 3, 0.002), durationMs: 4200 },
+        { persona: "skeptic", degraded: false, usage: usage(10, 1, 0.001), durationMs: 900 }],
+        cascades: [], seatErrors: [], durationMs: 5300, usage: usage(40, 4, 0.003) } } },
+    { type: "custom_message", customType: "matrix-label", content: "#12 — review", display: true, details: { workItem: "#12", outcome: "review", evidence: "https://example.test/pull/1" } },
+    { type: "custom_message", customType: "matrix-label", content: "#12 — landed", display: true, details: { workItem: "#12", outcome: "landed" } },
+    { type: "custom_message", customType: "matrix-label", content: "half a label", display: true, details: { workItem: "#12" } },
+  ], { file: "labelled.jsonl", harness: "pi" });
+  const labelledReport = aggregate([labelled]);
+  const label = labelledReport.labels.get("#12");
+  ok("a label is read with its evidence, and the latest one is the outcome",
+    label?.outcomes.length === 2 && label.outcomes.at(-1).outcome === "landed" && label.outcomes[0].evidence === "https://example.test/pull/1",
+    JSON.stringify(label?.outcomes));
+  ok("a labelled work item carries its runs, its fusion turns and their cost",
+    label?.runs === 1 && label?.fusionTurns === 1 && Math.abs((label?.sums.costReported ?? 0) - 0.002) < 1e-9 && label?.fusions.get("quick") === 1,
+    JSON.stringify({ runs: label?.runs, turns: label?.fusionTurns, cost: label?.sums.costReported, fusions: label && Object.fromEntries(label.fusions) }));
+  ok("a label missing half of itself is unrecognised, not counted as a label",
+    labelled.labels.length === 2 && labelled.unknown.length === 1 && labelledReport.labels.size === 1,
+    JSON.stringify({ labels: labelled.labels.length, unknown: labelled.unknown.length }));
+  ok("a session with runs and no label is counted as unlabelled, never assumed fine",
+    report.labels.size === 0 && report.unlabelled.runs >= 1 && report.unlabelled.sessions >= 1,
+    JSON.stringify(report.unlabelled));
+  // The other carrier: a `/matrix` run has no assistant message, so its cost lives only in the record — and
+  // a streamed run's cost lives only on its message, or the same run is counted twice.
+  const commandRun = extractSession([sessionMeta,
+    { type: "custom_message", customType: "matrix-answer", content: "answer", display: true,
+      details: { fusion: "quick", mode: "single", seats: [{ persona: "technical", degraded: false, usage: usage(30, 3, 0.002) }], cascades: [], seatErrors: [], durationMs: 1500, usage: usage(30, 3, 0.002) } },
+    { type: "custom_message", customType: "matrix-label", content: "#12 — landed", display: true, details: { workItem: "#12", outcome: "landed" } },
+  ], { file: "command-run.jsonl", harness: "omp" });
+  const commandReport = aggregate([commandRun]);
+  ok("a `/matrix` run's cost is counted from its record, which is the only carrier it has",
+    Math.abs((commandReport.labels.get("#12")?.sums.costReported ?? 0) - 0.002) < 1e-9 && commandReport.labels.get("#12")?.runs === 1,
+    JSON.stringify({ cost: commandReport.labels.get("#12")?.sums, runs: commandReport.labels.get("#12")?.runs }));
+  ok("a streamed run is not counted twice (its record repeats its message's usage)",
+    Math.abs((label?.sums.costReported ?? 0) - 0.002) < 1e-9 && Math.abs((label?.sums.totalTokens ?? 0) - 33) < 1e-9,
+    JSON.stringify(label?.sums));
+
+  const slow = labelledReport.deliberation.get("pi/quick");
+  ok("per-seat wall clock: the run clock and the slowest seat are read",
+    slow?.runMs === 5300 && slow?.timedSeats === 2 && slow?.slowestSeat?.durationMs === 4200 && slow?.slowestSeat?.persona === "technical",
+    JSON.stringify({ runMs: slow?.runMs, seats: slow?.timedSeats, slowest: slow?.slowestSeat }));
+  const spentReport = aggregate([extractSession([sessionMeta,
+    { type: "message", message: { role: "assistant", api: FUSION_API, model: "quick", usage: usage(5, 1, 0.001), content: [],
+      details: { proxied: { alias: "glm-flash", thinking: "low", attempts: [
+        { alias: "glm-flash", reason: "quota", detail: "no", usage: usage(100, 10, 0) },
+        { alias: "glm-flash", reason: "transient", detail: "also no" }] } } } },
+  ], { file: "spent.jsonl", harness: "pi" })]);
+  const spent = spentReport.proxy.get("pi/quick");
+  ok("what a failed route spent is counted, and an attempt with no usage adds nothing",
+    spent?.attemptsSpent.input === 100 && spent?.attemptsSpent.output === 10 && spent?.attemptsSpent.unpricedMessages === 1 && spent?.attempts.get("transient") === 1,
+    JSON.stringify(spent?.attemptsSpent));
+  // the text surface comes through the same assembly the CLI uses, so a rendering claim is checked there
+  const twoSessions = render(buildReport({ sessions: [labelled, commandRun], roots: [{ harness: "pi", root: "/tmp/fixture", files: 2, missing: false }], unreadable: [],
+    store: { read: 2, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }));
+  ok("labels from separate sessions say so rather than implying one history",
+    /3 label\(s\) from separate sessions/.test(twoSessions) && !/latest wins/.test(twoSessions),
+    twoSessions.split("\n").find((l) => l.includes("label(s)")) ?? "no line");
+
+  const text = render(buildReport({ sessions: [labelled], roots: [{ harness: "pi", root: "/tmp/fixture", files: 1, missing: false }], unreadable: [],
+    store: { read: 1, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }));
+  ok("the text report prints the outcome, the evidence and the unlabelled count",
+    /#12\s+landed/.test(text) && /https:\/\/example\.test\/pull\/1/.test(text) && /2 label\(s\), latest wins/.test(text),
+    text.split("\n").find((l) => l.includes("#12")) ?? "no label line");
 
   const failures = results.filter((r) => !r.pass);
   for (const r of results) console.log(`  ${r.pass ? "ok  " : "FAIL"} ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);
