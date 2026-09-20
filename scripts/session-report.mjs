@@ -347,19 +347,30 @@ export function aggregate(sessions) {
       if (entry.carrier === "assistant") continue;
       addUsage(fusionSums, entry.details?.usage);
     }
-    const label = session.labels.at(-1);
-    if (label) {
-      if (!report.labels.has(label.workItem)) {
-        report.labels.set(label.workItem, { workItem: label.workItem, outcomes: [], fusions: new Map(), sums: emptySums(), sessions: 0, runs: 0, fusionTurns: 0 });
+    // A session can name more than one work item (a session that continues past one task is the normal case
+    // the append-only design anticipates). Its runs and its cost are attributed **once**, to the work item it
+    // ended on; the other items keep their own labels and say where their runs were counted, so a session is
+    // never counted twice and no item's label is absorbed into another's row.
+    const items = [...new Set(session.labels.map((entry) => entry.workItem))];
+    const attributesto = session.labels.at(-1)?.workItem;
+    for (const item of items) {
+      if (!report.labels.has(item)) {
+        report.labels.set(item, { workItem: item, outcomes: [], fusions: new Map(), sums: emptySums(), sessions: 0, runs: 0, fusionTurns: 0, alsoLabelled: [], attributedTo: undefined });
       }
-      const row = report.labels.get(label.workItem);
+      const row = report.labels.get(item);
       row.sessions += 1;
-      row.runs += session.records.length;
-      row.fusionTurns += fusionTurns;
-      mergeSums(row.sums, fusionSums);
-      for (const entry of session.labels) row.outcomes.push({ ...entry });
-      for (const record of session.records) row.fusions.set(record.fusion, (row.fusions.get(record.fusion) ?? 0) + 1);
-    } else if (session.records.length > 0) {
+      for (const entry of session.labels) if (entry.workItem === item) row.outcomes.push({ ...entry });
+      if (item === attributesto) {
+        row.runs += session.records.length;
+        row.fusionTurns += fusionTurns;
+        mergeSums(row.sums, fusionSums);
+        for (const record of session.records) row.fusions.set(record.fusion, (row.fusions.get(record.fusion) ?? 0) + 1);
+        for (const other of items) if (other !== item) row.alsoLabelled.push(other);
+      } else {
+        row.attributedTo = attributesto;
+      }
+    }
+    if (!attributesto && session.records.length > 0) {
       // A run nobody labelled is counted as unlabelled, never assumed to have gone well.
       report.unlabelled.sessions += 1;
       report.unlabelled.runs += session.records.length;
@@ -502,16 +513,25 @@ export function render(report, { limit = 12 } = {}) {
   }
   lines.push("");
   lines.push("outcomes (what the runs were for, and how they ended)");
-  const labels = [...report.labels.values()].sort((a, b) => (b.outcomes.at(-1)?.at ?? "").localeCompare(a.outcomes.at(-1)?.at ?? ""));
+  const labels = [...report.labels.values()].sort((a, b) => String(b.outcomes.map((e) => e.at).sort().at(-1) ?? "").localeCompare(String(a.outcomes.map((e) => e.at).sort().at(-1) ?? "")));
   if (labels.length === 0 && report.unlabelled.runs === 0) lines.push("  (no fusion runs recorded in these sessions)");
   for (const row of labels) {
-    const latest = row.outcomes.at(-1);
-    const evidence = [...row.outcomes].reverse().find((entry) => entry.evidence)?.evidence;
+    // The current outcome is the latest by *time*, not by the order the store happened to be read in: pi is
+    // read before omp, and a session is folded in before or after another according to its path.
+    // `when`: a missing or unparseable timestamp sorts before any real one, and ties keep the later entry —
+    // so a store whose labels carry no `at` still falls back to read order rather than picking the oldest.
+    const when = (entry) => { const t = Date.parse(entry?.at ?? ""); return Number.isNaN(t) ? -Infinity : t; };
+    const byTime = (entries) => entries.reduce((best, entry) => (best === undefined || when(entry) >= when(best) ? entry : best), undefined);
+    const latest = byTime(row.outcomes);
+    const evidence = byTime(row.outcomes.filter((entry) => entry.evidence))?.evidence;
     const fusions = [...row.fusions].map(([k, v]) => `${k}×${v}`).join(", ") || "—";
     // One session's labels are a history (latest wins); labels from several sessions for one work item are
     // separate sessions' views of the same work, and saying "latest wins" there would imply one history.
     const history = row.outcomes.length > 1 ? ` · ${row.outcomes.length} label(s)${row.sessions === 1 ? ", latest wins" : " from separate sessions"}` : "";
-    lines.push(`  ${row.workItem.padEnd(18)} ${String(latest?.outcome ?? "?").padEnd(9)} ${row.sessions} session(s) · ${row.runs} run(s) · ${money(row.sums.costReported)} reported${row.sums.unpricedMessages ? ` + ${row.sums.unpricedMessages} unpriced` : ""}${row.fusionTurns ? ` · ${row.fusionTurns} streamed turn(s)` : ""}`);
+    const attribution = row.attributedTo
+      ? ` · runs counted under ${row.attributedTo} (the session ended there)`
+      : row.alsoLabelled.length ? ` · same session also labelled ${row.alsoLabelled.join(", ")}` : "";
+    lines.push(`  ${row.workItem.padEnd(18)} ${String(latest?.outcome ?? "?").padEnd(9)} ${row.sessions} session(s) · ${row.runs} run(s) · ${money(row.sums.costReported)} reported${row.sums.unpricedMessages ? ` + ${row.sums.unpricedMessages} unpriced` : ""}${row.fusionTurns ? ` · ${row.fusionTurns} streamed turn(s)` : ""}${attribution}`);
     lines.push(`  ${"".padEnd(18)} via ${fusions}${evidence ? ` · evidence: ${evidence}` : ""}${history}`);
   }
   if (report.unlabelled.runs > 0) {
@@ -828,8 +848,8 @@ function check() {
         { persona: "technical", degraded: false, usage: usage(30, 3, 0.002), durationMs: 4200 },
         { persona: "skeptic", degraded: false, usage: usage(10, 1, 0.001), durationMs: 900 }],
         cascades: [], seatErrors: [], durationMs: 5300, usage: usage(40, 4, 0.003) } } },
-    { type: "custom_message", customType: "matrix-label", content: "#12 — review", display: true, details: { workItem: "#12", outcome: "review", evidence: "https://example.test/pull/1" } },
-    { type: "custom_message", customType: "matrix-label", content: "#12 — landed", display: true, details: { workItem: "#12", outcome: "landed" } },
+    { type: "custom_message", customType: "matrix-label", content: "#12 — review", display: true, timestamp: "2026-09-19T08:10:00.000Z", details: { workItem: "#12", outcome: "review", evidence: "https://example.test/pull/1" } },
+    { type: "custom_message", customType: "matrix-label", content: "#12 — landed", display: true, timestamp: "2026-09-19T09:30:00.000Z", details: { workItem: "#12", outcome: "landed" } },
     { type: "custom_message", customType: "matrix-label", content: "half a label", display: true, details: { workItem: "#12" } },
   ], { file: "labelled.jsonl", harness: "pi" });
   const labelledReport = aggregate([labelled]);
@@ -851,7 +871,7 @@ function check() {
   const commandRun = extractSession([sessionMeta,
     { type: "custom_message", customType: "matrix-answer", content: "answer", display: true,
       details: { fusion: "quick", mode: "single", seats: [{ persona: "technical", degraded: false, usage: usage(30, 3, 0.002) }], cascades: [], seatErrors: [], durationMs: 1500, usage: usage(30, 3, 0.002) } },
-    { type: "custom_message", customType: "matrix-label", content: "#12 — landed", display: true, details: { workItem: "#12", outcome: "landed" } },
+    { type: "custom_message", customType: "matrix-label", content: "#12 — landed", display: true, timestamp: "2026-09-19T09:30:00.000Z", details: { workItem: "#12", outcome: "landed" } },
   ], { file: "command-run.jsonl", harness: "omp" });
   const commandReport = aggregate([commandRun]);
   ok("a `/matrix` run's cost is counted from its record, which is the only carrier it has",
@@ -876,6 +896,72 @@ function check() {
     spent?.attemptsSpent.input === 100 && spent?.attemptsSpent.output === 10 && spent?.attemptsSpent.unpricedMessages === 1 && spent?.attempts.get("transient") === 1,
     JSON.stringify(spent?.attemptsSpent));
   // the text surface comes through the same assembly the CLI uses, so a rendering claim is checked there
+  // Two work items in one session: each keeps its own labels, and the session's runs are counted once.
+  const twoItems = extractSession([sessionMeta,
+    { type: "message", message: { role: "assistant", api: FUSION_API, model: "quick", usage: usage(10, 1, 0.001), content: [],
+      details: { fusion: "quick", seats: [], cascades: [], seatErrors: [], usage: usage(10, 1, 0.001) } } },
+    { type: "custom_message", customType: "matrix-label", content: "#12 — review", display: true, details: { workItem: "#12", outcome: "review", evidence: "https://example.test/12" } },
+    { type: "custom_message", customType: "matrix-label", content: "#15 — landed", display: true, details: { workItem: "#15", outcome: "landed" } },
+  ], { file: "two-items.jsonl", harness: "pi" });
+  const twoItemReport = aggregate([twoItems]);
+  ok("a session naming two work items keeps each item's own labels, and absorbs neither",
+    twoItemReport.labels.get("#12")?.outcomes.length === 1 && twoItemReport.labels.get("#12")?.outcomes[0].workItem === "#12"
+      && twoItemReport.labels.get("#15")?.outcomes.length === 1 && twoItemReport.labels.get("#15")?.outcomes[0].workItem === "#15",
+    JSON.stringify([...twoItemReport.labels].map(([k, v]) => [k, v.outcomes.map((o) => o.workItem)])));
+  ok("the session's runs and cost are counted once, under the item it ended on",
+    twoItemReport.labels.get("#15")?.runs === 1 && Math.abs((twoItemReport.labels.get("#15")?.sums.costReported ?? 0) - 0.001) < 1e-9
+      && twoItemReport.labels.get("#12")?.runs === 0 && twoItemReport.labels.get("#12")?.attributedTo === "#15"
+      && Math.abs((twoItemReport.labels.get("#12")?.sums.costReported ?? 0)) < 1e-12,
+    JSON.stringify({ twelve: twoItemReport.labels.get("#12")?.attributedTo, fifteen: twoItemReport.labels.get("#15")?.runs }));
+  // A label with no timestamp at all still resolves, by read order, rather than picking the oldest by accident
+  const undatedSession = extractSession([sessionMeta,
+    { type: "custom_message", customType: "matrix-label", content: "#12 — review", display: true, details: { workItem: "#12", outcome: "review" } },
+    { type: "custom_message", customType: "matrix-label", content: "#12 — landed", display: true, details: { workItem: "#12", outcome: "landed" } },
+  ], { file: "undated.jsonl", harness: "pi" });
+  const undatedLabels = aggregate([undatedSession]);
+  const undatedLabelText = render(buildReport({ sessions: [undatedSession], roots: [], unreadable: [],
+    store: { read: 1, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }));
+  // A dated label beats an undated one, whatever the read order: an absent timestamp is not "newest".
+  const mixedSession = extractSession([sessionMeta,
+    { type: "custom_message", customType: "matrix-label", content: "#12 — review", display: true, timestamp: "2026-09-19T08:00:00.000Z", details: { workItem: "#12", outcome: "review" } },
+    { type: "custom_message", customType: "matrix-label", content: "#12 — landed", display: true, details: { workItem: "#12", outcome: "landed" } },
+  ], { file: "mixed.jsonl", harness: "pi" });
+  const mixedText = render(buildReport({ sessions: [mixedSession], roots: [], unreadable: [],
+    store: { read: 1, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }));
+  ok("a dated label is the current outcome over an undated one, whatever the read order",
+    /#12\s+review/.test(mixedText), mixedText.split("\n").find((l) => l.includes("#12")) ?? "no line");
+
+  ok("labels with no timestamp fall back to read order, latest still winning",
+    undatedLabels.labels.get("#12")?.outcomes.length === 2 && /#12\s+landed/.test(undatedLabelText),
+    undatedLabelText.split("\n").find((l) => l.includes("#12")) ?? "no line");
+
+  const twoItemText = render(buildReport({ sessions: [twoItems], roots: [], unreadable: [],
+    store: { read: 1, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }));
+  ok("the report says where an unattributed item's runs were counted",
+    /runs counted under #15/.test(twoItemText) && /https:\/\/example\.test\/12/.test(twoItemText),
+    twoItemText.split("\n").find((l) => l.includes("#12")) ?? "no line");
+
+  // The current outcome is the latest by time, not the order the stores were read in.
+  // Read order and time order disagree on purpose: the *first* session read carries the *newest* label, so a
+  // reader that picks by position reports `landed` where the store says `review`.
+  const laterLabelEarlierRead = extractSession([sessionMeta,
+    { type: "custom_message", customType: "matrix-label", content: "#12 — review", display: true, timestamp: "2026-09-19T09:00:00.000Z", details: { workItem: "#12", outcome: "review" } },
+  ], { file: "newer-later-read.jsonl", harness: "omp" });
+  const olderLabelFirstRead = extractSession([sessionMeta,
+    { type: "custom_message", customType: "matrix-label", content: "#12 — landed", display: true, timestamp: "2026-09-19T08:00:00.000Z", details: { workItem: "#12", outcome: "landed", evidence: "https://example.test/landed" } },
+  ], { file: "older-first-read.jsonl", harness: "pi" });
+  const stale = laterLabelEarlierRead;
+  const fresh = olderLabelFirstRead;
+  const timeReport = aggregate([stale, fresh]);
+  const timeText = render(buildReport({ sessions: [stale, fresh], roots: [], unreadable: [],
+    store: { read: 2, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }));
+  ok("the printed outcome and evidence come from the newest label",
+    (() => { const line = timeText.split("\n").find((l) => l.includes("#12")) ?? ""; const ev = timeText.split("\n").find((l) => l.includes("evidence:")) ?? ""; return /review/.test(line) && /landed/.test(ev); })(),
+    timeText.split("\n").filter((l) => l.includes("#12") || l.includes("evidence:")).join(" | "));
+  ok("a later-read session does not win over a newer label",
+    new Date("2026-09-19T09:00:00.000Z") > new Date("2026-09-19T08:00:00.000Z") && timeReport.labels.get("#12")?.outcomes.length === 2,
+    JSON.stringify(timeReport.labels.get("#12")?.outcomes.map((o) => [o.outcome, o.at])));
+
   const twoSessions = render(buildReport({ sessions: [labelled, commandRun], roots: [{ harness: "pi", root: "/tmp/fixture", files: 2, missing: false }], unreadable: [],
     store: { read: 2, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }));
   ok("labels from separate sessions say so rather than implying one history",
@@ -884,6 +970,7 @@ function check() {
 
   const text = render(buildReport({ sessions: [labelled], roots: [{ harness: "pi", root: "/tmp/fixture", files: 1, missing: false }], unreadable: [],
     store: { read: 1, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }));
+  console.log("  [debug outcomes]", JSON.stringify(text.split("\n").filter((l) => l.includes("#12") || l.includes("label(s)"))));
   ok("the text report prints the outcome, the evidence and the unlabelled count",
     /#12\s+landed/.test(text) && /https:\/\/example\.test\/pull\/1/.test(text) && /2 label\(s\), latest wins/.test(text),
     text.split("\n").find((l) => l.includes("#12")) ?? "no label line");
