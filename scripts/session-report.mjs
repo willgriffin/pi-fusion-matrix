@@ -50,8 +50,48 @@ const DEFAULT_ROOTS = [
 
 /** The api id every fusion model is registered under, so a turn names the fusion that served it. */
 const FUSION_API = "fusion-matrix";
+/**
+ * The harness a session file belongs to, from where it lives. Reading one file explicitly (`--session <file>`)
+ * must not lose it: the device-protocol rewrite is gated on omp, and a file handed to the reader from omp's
+ * store has to keep that, or the same session reports its `matrix` runs as `write`s depending on how it was
+ * selected.
+ */
+function harnessOfPath(file) {
+  const candidate = String(file ?? "");
+  if (candidate.includes(`${path.sep}.omp${path.sep}`)) return "omp";
+  if (candidate.includes(`${path.sep}.pi${path.sep}`)) return "pi";
+  return "session";
+}
+
 /** The custom message type a `/matrix-label` writes: a work item, an outcome, and optional evidence. */
 const LABEL_TYPE = "matrix-label";
+
+/**
+ * omp invokes an extension tool through its `xd://` device protocol, and stores the result as
+ * `details = { xdev: { tool, mode, args, tier, inner: <the real record> } }` — so the record the extension
+ * returned is one level in, and a reader that only looks at the outer object drops the run entirely
+ * (measured 2026-09-20: one plain deliberation record in the store against two wrapped and invisible, with a
+ * session that ran two fusions reporting none). pi does not wrap, and neither does the command path.
+ */
+const unwrapDetails = (details) => (details && typeof details === "object" && details.xdev && typeof details.xdev === "object" && details.xdev.inner && typeof details.xdev.inner === "object"
+  ? details.xdev.inner
+  : details);
+
+/**
+ * The tool a `toolCall` part actually invokes, and whether it went through omp's device protocol.
+ *
+ * omp records an `xd://` invocation as `write` with `arguments.path = "xd://<tool>"`, while `read` of the same
+ * path is discovery — reading a tool's docs is not calling it — so only the write form is an invocation. The
+ * rewrite is gated on the harness: pi has no such protocol, and a pi session saving a file whose relative
+ * path happens to be `xd://matrix` must not be reported as a tool call that never happened.
+ */
+function invokedTool(part, harness) {
+  const path = part?.arguments?.path;
+  if (harness === "omp" && typeof path === "string" && path.startsWith("xd://") && part?.name === "write") {
+    return { name: path.slice("xd://".length), device: true };
+  }
+  return { name: part?.name ?? "?", device: false };
+}
 // The same closed vocabulary the command enforces: a store is editable by hand, and a report that accepted
 // `shipped` would count an outcome nobody defined.
 import { isOutcome } from "../extensions/pi-fusion-matrix/labels.js";
@@ -185,6 +225,10 @@ export function extractSession(entries, meta = {}) {
   };
 
   let current = null;
+  // Every call this session made, by id. omp does not guarantee that a result row follows its calling turn
+  // immediately — the store has no caller field at all — so pairing through a session-level index is what keeps
+  // a *failed* device call (stored with empty `details`) from being charged to the `write` that carried it.
+  const callIndex = new Map();
   for (const entry of entries) {
     if (entry?.type === "session") {
       session.id = entry.id ?? session.id;
@@ -219,6 +263,8 @@ export function extractSession(entries, meta = {}) {
     if (!message || typeof message !== "object") continue;
 
     if (message.role === "assistant") {
+      const parts = (message.content ?? []).filter((part) => part?.type === "toolCall");
+      const callParts = parts.map((part) => invokedTool(part, session.harness));
       const usage = message.usage ?? {};
       const priced = (usage.cost?.total ?? 0) > 0;
       current = {
@@ -230,10 +276,12 @@ export function extractSession(entries, meta = {}) {
         usage,
         priced,
         durationMs: Number.isFinite(message.duration) ? message.duration : undefined,
-        toolCalls: (message.content ?? []).filter((part) => part?.type === "toolCall").map((part) => part.name ?? "?"),
+        toolCalls: callParts.map((call) => call.name),
+        toolCallParts: callParts.map((call, index) => ({ id: parts[index]?.id, name: call.name, device: call.device })),
         at: message.timestamp ?? entry.timestamp,
       };
       session.turns.push(current);
+      for (const part of current.toolCallParts) if (part.id !== undefined) callIndex.set(String(part.id), part);
       const details = message.details;
       if (isRecordShape(details)) {
         if (typeof details.proxied === "object" && details.proxied !== null) {
@@ -251,8 +299,13 @@ export function extractSession(entries, meta = {}) {
     }
 
     if (message.role === "toolResult") {
-      session.toolResults.push({ toolName: message.toolName ?? "?", isError: message.isError === true, after: current, at: message.timestamp ?? entry.timestamp });
-      const details = message.details;
+      // omp does not wrap every device result: a *failed* device call is stored with `details: {}`, so the
+      // invoked tool has to come from the call that made it, paired by `toolCallId` — otherwise the call row
+      // says `matrix` while its error is charged to the `write` that carried it.
+      const call = callIndex.get(String(message.toolCallId));
+      const toolName = message?.details?.xdev?.tool ?? call?.name ?? message?.toolName ?? "?";
+      session.toolResults.push({ toolName, isError: message.isError === true, device: call?.device === true, after: current, at: message.timestamp ?? entry.timestamp });
+      const details = unwrapDetails(message.details);
       if (typeof details?.fusion === "string") {
         session.records.push({ kind: "deliberation", carrier: "toolResult", fusion: details.fusion, details, at: session.toolResults.at(-1).at });
       } else if (isRecordShape(details)) {
@@ -288,7 +341,7 @@ export function aggregate(sessions) {
     deliberation: new Map(),
     tools: new Map(),
     toolCalls: new Map(),
-    gaps: { noDuration: 0, unpriced: 0, sessionsWithoutHeader: 0, unreadable: [], toolAttribution: "most recent assistant turn" },
+    gaps: { noDuration: 0, unpriced: 0, sessionsWithoutHeader: 0, unreadable: [], wrappedCalls: 0, toolAttribution: "most recent assistant turn" },
     store: undefined,
   };
 
@@ -305,6 +358,10 @@ export function aggregate(sessions) {
     for (const unknown of session.unknown) {
       report.unknownShapes.push({ file: session.file, harness: session.harness, carrier: unknown.carrier, keys: unknown.keys, at: unknown.at });
     }
+    // Counted from the calls, not from the results: a device invocation whose result row never reached the
+    // store (a truncated tail) is still an invocation, and counting results made the accounting disagree with
+    // the tools table's own call count.
+    for (const t of session.turns) for (const part of t.toolCallParts ?? []) if (part.device) report.gaps.wrappedCalls += 1;
 
     for (const t of session.turns) {
       const key = turnKey(t);
@@ -428,7 +485,9 @@ export function aggregate(sessions) {
       record.seats += seats.length;
       for (const seat of seats) {
         if (seat?.degraded) record.degradedSeats += 1;
-        addUsage(record.sums, seat?.usage);
+        // Deliberately **not** added to `record.sums`: `details.usage` is already the sum of the seats
+        // (verified against the store — a one-seat run's `details.usage.input` equals that seat's), so adding
+        // each seat again doubled every deliberation's tokens and cost.
       }
       record.seatErrors += seatErrors.length;
       const survived = seats.filter((seat) => !seat?.degraded).length;
@@ -570,6 +629,10 @@ export function render(report, { limit = 12 } = {}) {
   for (const unreadable of report.gaps.unreadable.slice(0, 10)) lines.push(`    ${unreadable.path}: ${unreadable.reason}`);
   if (report.gaps.unreadable.length > 10) lines.push(`    … ${report.gaps.unreadable.length - 10} more, all in the JSON output`);
   lines.push(`  tool calls are attributed by ${report.gaps.toolAttribution} — the format carries no caller`);
+  if (report.gaps.wrappedCalls > 0) {
+    lines.push(`  ${report.gaps.wrappedCalls} call(s) made through omp's \`xd://\` device, counted under the tool they invoked:`);
+    lines.push("  omp records such a call as `write` with `path: xd://<tool>`, and wraps the result's record one level in.");
+  }
   for (const unknown of report.unknownShapes.slice(0, 10)) {
     lines.push(`    ${unknown.file ?? "?"} (${unknown.harness ?? "?"}) ${unknown.carrier}: ${unknown.keys.join(", ")}${unknown.at ? ` at ${unknown.at}` : ""}`);
   }
@@ -681,7 +744,12 @@ function check() {
   ok("degraded seats and seat errors counted", delib?.seats === 3 && delib?.degradedSeats === 2 && delib?.seatErrors === 2, JSON.stringify({ seats: delib?.seats, degraded: delib?.degradedSeats, errors: delib?.seatErrors }));
   ok("cascades split sufficient from advanced", delib?.cascades === 3 && delib?.cascadesSufficient === 2 && delib?.cascadesAdvanced === 1, JSON.stringify({ total: delib?.cascades, sufficient: delib?.cascadesSufficient, advanced: delib?.cascadesAdvanced }));
   ok("cascades are attributed to their seat", delib?.cascadeSeats.get("stage") === 1 && delib?.cascadeSeats.get("panel") === 1, JSON.stringify([...(delib?.cascadeSeats ?? [])]));
-  ok("seat usage is added to the run's tokens", delib?.sums.input === 80 + 20 + 30 + 7 + 3 && delib?.sums.output === 8 + 2 + 3 + 1, JSON.stringify(delib?.sums));
+  ok("a run's tokens are counted once, from its own usage (its seats are inside it)",
+    delib?.sums.input === 80 + 7 + 3 && delib?.sums.output === 8 + 1 + 0,
+    JSON.stringify(delib?.sums));
+  ok("a seat's usage is not added a second time",
+    delib?.seats === 3 && delib?.sums.input < 80 + 20 + 30 + 7 + 3,
+    `input=${delib?.sums.input} seat usages=${JSON.stringify((delib && [20, 30]) || [])}`);
   ok("decision usage is kept apart from seat usage", delib?.decisionUsage.input === 5 && delib?.decisionUsage.output === 1);
   ok("route, verification checks and saved files are read", delib?.route === 1 && delib?.verify === 1 && delib?.saved === 1, JSON.stringify({ route: delib?.route, verify: delib?.verify, saved: delib?.saved }));
   ok("a failed deliberation is counted, thrown or degraded", delib?.failures === 2 && report.records.deliberation === 4, JSON.stringify({ failures: delib?.failures, records: report.records.deliberation }));
@@ -1018,6 +1086,98 @@ function check() {
     /run time 0\.0s/.test(zeroText) && /1 seat\(s\) timed/.test(zeroText),
     zeroText.split("\n").find((l) => l.includes("run time")) ?? "no run-time line");
 
+  // ---- omp's device protocol: the record one level in, and the call recorded as `write` -----------------
+  // Shapes taken from the live store: a write to `xd://<tool>` invokes it and its result wraps the record as
+  // `details.xdev.inner`; a *read* of the same path is discovery and its result carries no wrap; and a device
+  // call that *fails* is stored with empty details, so the invoked tool has to come from the call.
+  const wrappedRecord = { fusion: "quick", mode: "single", seats: [{ persona: "technical", provider: "cline-pass", model: "z-ai/glm-5.3-flash", degraded: false, usage: usage(117, 6, 0.0000138), durationMs: 1710 }],
+    cascades: [], seatErrors: [], usage: usage(117, 6, 0.0000138), durationMs: 1710 };
+  const deviceSession = extractSession([sessionMeta,
+    { type: "message", message: { role: "assistant", api: "openai-completions", provider: "cline-pass", model: "z-ai/glm-5.3-flash",
+      usage: usage(50, 5, 0.001), content: [
+        { type: "toolCall", id: "c0", name: "read", arguments: { path: "xd://matrix", i: "Reading matrix tool docs" } },
+        { type: "toolCall", id: "c1", name: "write", arguments: { path: "xd://matrix", content: "{\"prompt\": \"x\", \"fusion\": \"quick\"}" } },
+        { type: "toolCall", id: "c2", name: "write", arguments: { path: "xd://propose", content: "{}" } },
+      ] } },
+    { type: "message", message: { role: "toolResult", toolCallId: "c0", toolName: "read", isError: false, content: [],
+      details: { contentType: "text/markdown", totalLines: 40, displayContent: "# matrix" } } },
+    { type: "message", message: { role: "toolResult", toolCallId: "c1", toolName: "write", isError: false, content: [{ type: "text", text: "PANEL-OK" }],
+      details: { xdev: { tool: "matrix", mode: "execute", tier: "exec", args: { prompt: "x", fusion: "quick" }, inner: wrappedRecord } } } },
+    { type: "message", message: { role: "toolResult", toolCallId: "c2", toolName: "write", isError: true, content: [{ type: "text", text: "refused" }], details: {} } },
+  ], { file: "device.jsonl", harness: "omp" });
+  const deviceReport = aggregate([deviceSession]);
+  const deviceRender = render(buildReport({ sessions: [deviceSession], roots: [], unreadable: [],
+    store: { read: 1, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } }));
+  ok("a record omp wrapped in its device protocol is read, not dropped",
+    deviceReport.records.deliberation === 1 && deviceReport.deliberation.get("omp/quick")?.runs === 1 && deviceReport.unknownShapes.length === 0,
+    JSON.stringify({ records: deviceReport.records, unknown: deviceReport.unknownShapes.length }));
+  ok("the unwrapped record keeps its fusion, seats, usage and clock",
+    deviceReport.deliberation.get("omp/quick")?.seats === 1 && Math.abs((deviceReport.deliberation.get("omp/quick")?.sums.costReported ?? 0) - 0.0000138) < 1e-12
+      && deviceReport.deliberation.get("omp/quick")?.slowestSeat?.durationMs === 1710,
+    JSON.stringify({ seats: deviceReport.deliberation.get("omp/quick")?.seats, sums: deviceReport.deliberation.get("omp/quick")?.sums }));
+  ok("an invocation is attributed to the tool it invoked, and reading its docs is not one",
+    deviceSession.turns[0].toolCalls.join(",") === "read,matrix,propose" && deviceReport.toolCalls.get("omp/matrix") === 1
+      && deviceReport.toolCalls.get("omp/propose") === 1 && (deviceReport.toolCalls.get("omp/write") ?? 0) === 0,
+    JSON.stringify({ calls: deviceSession.turns[0].toolCalls, counted: Object.fromEntries(deviceReport.toolCalls) }));
+  ok("a device result is named by the tool that ran, even when omp wrapped nothing",
+    deviceSession.toolResults.map((r) => r.toolName).join(",") === "read,matrix,propose"
+      && (deviceReport.tools.get("omp/propose")?.errors ?? 0) === 1 && (deviceReport.tools.get("omp/write")?.errors ?? 0) === 0,
+    JSON.stringify({ rows: deviceSession.toolResults.map((r) => r.toolName), tools: Object.fromEntries([...deviceReport.tools].map(([k, v]) => [k, v.errors])) }));
+  ok("the device count is a count of invocations, not of wrapped results",
+    deviceReport.gaps.wrappedCalls === 2 && /2 call\(s\) made through omp's `xd:\/\/` device/.test(deviceRender),
+    `${deviceReport.gaps.wrappedCalls}`);
+  // pi has no device protocol: a file whose relative path happens to be `xd://matrix` is a write, nothing more.
+  // The calling turn is not guaranteed to be the last one before its result, and a result row can be missing
+  // entirely (a truncated tail): pairing must survive the first, and the count must survive the second.
+  const nonAdjacent = extractSession([sessionMeta,
+    { type: "message", message: { role: "assistant", api: "openai-completions", provider: "cline-pass", model: "z-ai/glm-5.3-flash",
+      usage: usage(10, 2, 0.001), content: [{ type: "toolCall", id: "n1", name: "write", arguments: { path: "xd://propose", content: "{}" } }] } },
+    { type: "message", message: { role: "assistant", api: "openai-completions", provider: "cline-pass", model: "z-ai/glm-5.3-flash",
+      usage: usage(10, 2, 0.001), content: [] } },
+    { type: "message", message: { role: "toolResult", toolCallId: "n1", toolName: "write", isError: true, content: [{ type: "text", text: "refused" }], details: {} } },
+  ], { file: "non-adjacent.jsonl", harness: "omp" });
+  const nonAdjacentReport = aggregate([nonAdjacent]);
+  ok("a device result is paired with its call even when another turn intervenes",
+    nonAdjacent.toolResults[0]?.toolName === "propose" && (nonAdjacentReport.tools.get("omp/propose")?.errors ?? 0) === 1
+      && (nonAdjacentReport.tools.get("omp/write")?.errors ?? 0) === 0 && nonAdjacentReport.gaps.wrappedCalls === 1,
+    JSON.stringify({ named: nonAdjacent.toolResults[0]?.toolName, tools: Object.fromEntries([...nonAdjacentReport.tools].map(([k, v]) => [k, v.errors])), device: nonAdjacentReport.gaps.wrappedCalls }));
+  const noResult = extractSession([sessionMeta,
+    { type: "message", message: { role: "assistant", api: "openai-completions", provider: "cline-pass", model: "z-ai/glm-5.3-flash",
+      usage: usage(10, 2, 0.001), content: [{ type: "toolCall", id: "d1", name: "write", arguments: { path: "xd://matrix", content: "{}" } }] } },
+  ], { file: "no-result.jsonl", harness: "omp" });
+  const noResultReport = aggregate([noResult]);
+  ok("an invocation whose result never reached the store is still counted as a device call",
+    noResultReport.gaps.wrappedCalls === 1 && noResultReport.toolCalls.get("omp/matrix") === 1 && noResult.toolResults.length === 0,
+    JSON.stringify({ device: noResultReport.gaps.wrappedCalls, calls: Object.fromEntries(noResultReport.toolCalls), results: noResult.toolResults.length }));
+
+  // Reading one file explicitly must keep the harness it came from: the device rewrite is gated on omp, and a
+  // file selected by path is the same session whether it was found through the root or handed over directly.
+  const ompDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-report-"));
+  fs.mkdirSync(path.join(ompDir, ".omp", "agent", "sessions", "--slug--"), { recursive: true });
+  const ompFile = path.join(ompDir, ".omp", "agent", "sessions", "--slug--", "one.jsonl");
+  fs.writeFileSync(ompFile, lines([sessionMeta,
+    { type: "message", message: { role: "assistant", api: "openai-completions", provider: "cline-pass", model: "z-ai/glm-5.3-flash",
+      usage: usage(10, 2, 0.001), content: [{ type: "toolCall", id: "s1", name: "write", arguments: { path: "xd://matrix", content: "{}" } }] } },
+  ]));
+  const byPath = readStore({ sessionFile: ompFile });
+  const byPathReport = aggregate(byPath.sessions);
+  ok("a session read by path keeps the harness it lives in",
+    byPath.sessions[0]?.harness === "omp" && byPathReport.toolCalls.get("omp/matrix") === 1
+      && byPathReport.gaps.wrappedCalls === 1 && (byPathReport.toolCalls.get("omp/write") ?? 0) === 0,
+    JSON.stringify({ harness: byPath.sessions[0]?.harness, calls: Object.fromEntries(byPathReport.toolCalls), device: byPathReport.gaps.wrappedCalls }));
+  fs.rmSync(ompDir, { recursive: true, force: true });
+
+  const piWrite = extractSession([sessionMeta,
+    { type: "message", message: { role: "assistant", api: "anthropic-messages", provider: "opencode-go", model: "glm-5.3-flash",
+      usage: usage(10, 2, 0.001), content: [{ type: "toolCall", id: "p1", name: "write", arguments: { path: "xd://matrix", content: "hi" } }] } },
+    { type: "message", message: { role: "toolResult", toolCallId: "p1", toolName: "write", isError: false, content: [], details: { diff: "…", op: "create", path: "xd://matrix" } } },
+  ], { file: "pi-write.jsonl", harness: "pi" });
+  const piReport = aggregate([piWrite]);
+  ok("only omp has a device protocol: a pi write to `xd://…` is a write",
+    piWrite.turns[0].toolCalls.join(",") === "write" && piReport.toolCalls.get("pi/write") === 1
+      && (piReport.toolCalls.get("pi/matrix") ?? 0) === 0 && piReport.gaps.wrappedCalls === 0,
+    JSON.stringify({ calls: piWrite.turns[0].toolCalls, counted: Object.fromEntries(piReport.toolCalls), device: piReport.gaps.wrappedCalls }));
+
   const failures = results.filter((r) => !r.pass);
   for (const r of results) console.log(`  ${r.pass ? "ok  " : "FAIL"} ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);
   console.log(`\nsession-report: ${results.length - failures.length}/${results.length} checks passed`);
@@ -1035,7 +1195,7 @@ export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceM
   const unreadable = [];
   const store = { read: 0, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 };
   if (sessionFile) {
-    files.push({ harness: "session", root: path.dirname(path.resolve(sessionFile)), file: path.resolve(sessionFile) });
+    files.push({ harness: harnessOfPath(sessionFile), root: path.dirname(path.resolve(sessionFile)), file: path.resolve(sessionFile) });
   } else {
     for (const { harness, root } of roots) {
       if (harnessFilter && harness !== harnessFilter) {
@@ -1104,7 +1264,7 @@ export function readStore({ roots, harnessFilter, sessionFile, cwdFilter, sinceM
 
 export function buildReport(read, { sessionFile } = {}) {
   const report = aggregate(read.sessions);
-  report.roots = sessionFile ? [{ harness: "session", root: path.dirname(path.resolve(sessionFile)), files: 1, missing: false }] : read.roots;
+  report.roots = sessionFile ? [{ harness: harnessOfPath(sessionFile), root: path.dirname(path.resolve(sessionFile)), files: 1, missing: false }] : read.roots;
   report.gaps.unreadable = read.unreadable;
   report.store = read.store;
   return report;
