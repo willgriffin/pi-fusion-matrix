@@ -1575,7 +1575,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     prints its snippet while leaving every tracked file byte-identical (asserted by hash).
 
 22. **The run record survives, and the report reads it** — `node scripts/session-report.mjs --check`
-    passes 86/86 (measured; seven cases are permission-dependent and print as skipped under root), each check having been shown
+    passes 88/88 (measured; seven cases are permission-dependent and print as skipped under root), each check having been shown
     to fail under a temporary mutation of the reader, then in a scratch `cwd` (Step 8's prerequisites):
     `node scripts/session-report.mjs --cwd <scratch> --json` on the store *before* a `/matrix` run shows
     zero deliberation records, and after `/matrix quick "…"` in **both** pi and omp it shows one, with the
@@ -1680,7 +1680,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     same store reported no deliberation records at all. Each must fail when the unwrap, the attribution, the
     result naming, the unwrapped count or the single-count rule is mutated.
 
-29. **Plan windows, and the join to our refusals** — `node scripts/session-report.mjs --check` passes 86/86, the
+29. **Plan windows, and the join to our refusals** — `node scripts/session-report.mjs --check` passes 88/88, the
     new ones covering: the ledger read read-only with the *latest* reading standing for each window; a reset the
     provider never stated printed as "no reset stated" and never as 1970; a missing ledger named as an absence;
     and the join counting a refusal as explained only by a reading that covers its moment (exhausted versus ok),

@@ -664,16 +664,12 @@ function renderTurns(title, records, { limit = Infinity } = {}) {
 }
 
 /**
- * The plan windows the harness recorded, and what they read when our runs were refused.
- *
- * The join is deliberately narrow: a refusal is only called explained when a reading taken *before* it covers
- * that moment — a window read afterwards says nothing about what the provider thought at the time, and calling
- * it a cause would turn a coincidence into one.
- */
-/**
- * Refusals grouped by provider, and what the ledger read at each moment. `uncovered` counts the refusals no
- * reading covers — older than the ledger's history, or for a provider it never recorded — which are the ones a
- * reader must not assume the plan explains.
+ * The plan windows the harness recorded, and what they read when our runs were refused: refusals grouped by
+ * provider, with what the ledger read at each moment. The join is deliberately narrow — a refusal is only
+ * called explained by a reading taken *before* it that had not reset, because a window read afterwards says
+ * nothing about what the provider thought at the time, and calling it a cause would turn a coincidence into
+ * one. `uncovered` counts the refusals no reading covers — older than the ledger's history, or for a provider it
+ * never recorded — which are the ones a reader must not assume the plan explains.
  */
 export function joinPlanWindows(report, plans) {
   const refusals = report.quotaRefusals ?? [];
