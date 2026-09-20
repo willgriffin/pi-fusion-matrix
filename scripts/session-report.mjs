@@ -427,7 +427,10 @@ export function aggregate(sessions) {
       const key = turnKey(t);
       const record = turn(report.turns, key, { fusion: t.api === FUSION_API });
       record.turns += 1;
-      if (t.provider) report.providers.add(t.provider);
+      // A fusion turn's `provider` is this extension's own api id, not a provider a plan ledger could ever
+      // record: adding it made the join report `fusion-matrix` as "a provider we used with no window", which is
+      // a structural fact dressed up as an absence.
+      if (t.provider && t.api !== FUSION_API) report.providers.add(t.provider);
       // `t.usage` is always an object: `extractSession` normalises a message the harness stored without one,
       // so a turn priced by nobody still reaches the counter instead of being reported as neither priced nor
       // unpriced (measured 2026-09-19 on a streamed fusion turn, which stores no `usage` at all).
@@ -521,7 +524,7 @@ export function aggregate(sessions) {
         for (const attempt of attempts) {
           record.attempts.set(attempt?.reason ?? "?", (record.attempts.get(attempt?.reason ?? "?") ?? 0) + 1);
           // A refusal is a *moment*: kept with its time so the plan windows can be asked what they read then.
-          if (attempt?.reason === "quota") report.quotaRefusals.push({ at: Date.parse(entry.at ?? ""), provider: proxied.provider, fusion: entry.fusion, carrier: "proxy" });
+          if (attempt?.reason === "quota") report.quotaRefusals.push({ at: Date.parse(entry.at ?? ""), provider: proxied.provider ?? "unknown", fusion: entry.fusion, carrier: "proxy" });
           // The tokens a route burned before it failed: only present when the target actually spent them.
           if (attempt?.usage) addUsage(record.attemptsSpent, attempt.usage);
         }
@@ -592,7 +595,9 @@ export function aggregate(sessions) {
       const seatErrors = Array.isArray(details.seatErrors) ? details.seatErrors : [];
       for (const seat of (Array.isArray(details.seats) ? details.seats : [])) {
         for (const attempt of (Array.isArray(seat?.attempts) ? seat.attempts : [])) {
-          if (attempt?.reason === "quota") report.quotaRefusals.push({ at: Date.parse(entry.at ?? ""), provider: seat.provider, fusion: entry.fusion, carrier: "deliberation" });
+          // A seat whose candidates all failed before resolution has no provider: named "unknown" rather than
+          // printing `undefined` as if it were one.
+          if (attempt?.reason === "quota") report.quotaRefusals.push({ at: Date.parse(entry.at ?? ""), provider: seat.provider ?? "unknown", fusion: entry.fusion, carrier: "deliberation" });
         }
       }
       record.seats += seats.length;
@@ -1522,6 +1527,32 @@ async function check() {
     ok("a window that resets before the refusal does not explain it",
       byProvider["kimi-code"]?.ok === 0 && byProvider["kimi-code"]?.exhausted === 0,
       JSON.stringify(byProvider["kimi-code"]));
+  }
+
+  if (sqlite !== null) {
+    const now = Date.parse("2026-09-20T10:00:00Z");
+    // Providers come from the run records, and a fusion turn's provider is this extension's api id: it must not
+    // appear as a provider the ledger failed to record.
+    const fusionTurn = aggregate([extractSession([sessionMeta,
+      { type: "message", message: { role: "assistant", api: FUSION_API, provider: "fusion-matrix", model: "quick", usage: usage(5, 1, 0.001), content: [] } },
+      { type: "message", message: { role: "assistant", api: "openai-completions", provider: "cline-pass", model: "z-ai/glm-5.3-flash", usage: usage(5, 1, 0.001), content: [] } },
+    ], { file: "providers.jsonl", harness: "omp" })]);
+    const providersJoin = joinPlanWindows(fusionTurn, { available: true, windows: [{ provider: "cline-pass", limitId: "5h", label: "5h", status: "ok", usedFraction: 0, resetsAt: 0, recordedAt: now - 60000 }] });
+    ok("this extension's own api id is not a provider we failed to find a window for",
+      providersJoin.uncoveredProviders.length === 0 && fusionTurn.providers.has("cline-pass") && !fusionTurn.providers.has("fusion-matrix"),
+      JSON.stringify({ uncovered: providersJoin.uncoveredProviders, providers: [...fusionTurn.providers] }));
+
+    // A seat that never resolved a provider names the gap rather than printing `undefined`.
+    const unresolvedSeat = aggregate([extractSession([sessionMeta,
+      { type: "custom_message", customType: "matrix-answer", content: "x", display: true, timestamp: "2026-09-20T10:00:00Z",
+        details: { fusion: "quick", mode: "single", seats: [{ persona: "technical", degraded: true, error: "all candidates failed: quota", attempts: [{ alias: "a", reason: "quota", detail: "quota" }] }],
+          cascades: [], seatErrors: [{ persona: "technical", reason: "quota" }] } },
+    ], { file: "unresolved.jsonl", harness: "omp" })]);
+    const unresolvedJoin = joinPlanWindows(unresolvedSeat, { available: true, windows: [] });
+    ok("a refusal with no provider resolved is named, not printed as `undefined`",
+      unresolvedJoin.byProvider[0]?.provider === "unknown" && unresolvedSeat.quotaRefusals[0]?.provider === "unknown"
+        && !/undefined/.test(render(buildReport({ sessions: [], roots: [], unreadable: [], store: { read: 0, unparsed: 0, withoutHeader: 0, excludedByCwd: 0, excludedBySince: 0, skippedRoots: [], unattributable: [], parseFailures: [], parseFailuresNamed: 0 } })).replace(/^[\s\S]*plan windows/, "") + JSON.stringify(unresolvedJoin)),
+      JSON.stringify(unresolvedJoin.byProvider));
   }
 
   const failures = results.filter((r) => !r.pass);
