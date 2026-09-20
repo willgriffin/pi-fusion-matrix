@@ -244,6 +244,10 @@ function firstCandidate(candidates) {
  * the writing seat's candidate.
  */
 export function executorOf(config, fusion) {
+  // A fusion that declares `execute: false` is never a session model: a tool-bearing turn runs its pipeline
+  // instead of proxying. That is what makes a reviewer rung pinnable at all — pinned *with* tools, an executor
+  // proxies to its writing seat and the panel never runs, so the review would silently be one model's.
+  if (fusion?.execute === false) return null;
   const stages = config?.modes?.[fusion?.mode]?.stages ?? [];
   const persona = stages[stages.length - 1]?.single ?? null;
   const declared = typeof fusion?.proxy?.alias === "string" && fusion.proxy.alias ? fusion.proxy.alias : null;
@@ -472,7 +476,18 @@ export function validateConfig(config, { sources } = {}) {
         err(`fusion "${id}": thinking "${level}" unknown`);
       }
     }
+    if (fusion.execute !== undefined && typeof fusion.execute !== "boolean") {
+      err(`fusion "${id}": execute must be true or false`);
+    }
+    if (fusion.review !== undefined && (fusion.review !== true || fusion.execute !== false)) {
+      // A reviewer runs the rung *as its model*, so it has to be a deliberating rung: `review: true` without
+      // `execute: false` would proxy the pinned review to the writer, which is the failure this marks.
+      err(`fusion "${id}": review requires execute: false — a reviewer runs this rung as its model, and an execute face would answer instead of deliberating`);
+    }
     if (fusion.proxy !== undefined) {
+      if (fusion.execute === false) {
+        err(`fusion "${id}": proxy and execute: false cannot both be declared; proxy is answered by the writing seat this fusion has declared it never uses`);
+      }
       const declared = isObject(fusion.proxy) ? fusion.proxy.alias : undefined;
       if (!isObject(fusion.proxy)) {
         err(`fusion "${id}": proxy is not an object`);
@@ -493,6 +508,17 @@ export function validateConfig(config, { sources } = {}) {
     }
     for (const persona of Object.keys(fusion.prompts ?? {})) {
       if (!used.has(persona)) err(`fusion "${id}": prompt override for unused persona "${persona}"`);
+    }
+    if (fusion.review === true) {
+      if (!fusion.route) err(`fusion "${id}": review requires route — the class it answers is what selects the rung`);
+      // Every route target has to be a deliberating rung too: the class changes which models run, and a target
+      // with an execute face would answer the review with one model instead of its panel.
+      for (const [option, value] of Object.entries(fusion.route?.criteria ?? {})) {
+        const target = isObject(value) ? value.then : undefined;
+        if (target && config.fusions?.[target]?.execute !== false) {
+          err(`fusion "${id}": review option "${option}" routes to "${target}", which declares no execute: false — a reviewer pinned to it would proxy to its writing seat instead of deliberating`);
+        }
+      }
     }
     if (fusion.fileAgent && fusion.fileAgent !== false) {
       if (!fusion.fileAgent.alias || !aliases[fusion.fileAgent.alias]) err(`fusion "${id}": fileAgent alias "${fusion.fileAgent?.alias}" is not an alias`);

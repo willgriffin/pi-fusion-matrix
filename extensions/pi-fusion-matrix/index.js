@@ -238,7 +238,8 @@ export default async function (pi) {
         const level = executorThinking(config, fusion);
         const executes = executor
           ? `${executor.alias} @${level ?? HARNESS_THINKING}${executor.declared ? " (proxy alias)" : ` (writing seat${executor.persona ? ` ${executor.persona}` : ""})`}`
-          : "— (no writing seat; every turn deliberates)";
+          : fusion.execute === false ? "— (declared never a session model; every turn deliberates)"
+            : "— (no writing seat; every turn deliberates)";
         lines.push(`  ${id}: ${fusion.mode}${fusion.fileAgent ? " +fileAgent" : ""}${fusion.route ? " +route" : ""}${fusion.verify ? " +verify" : ""}\n    ${roster}\n    executes: ${executes}`);
       }
       lines.push("");

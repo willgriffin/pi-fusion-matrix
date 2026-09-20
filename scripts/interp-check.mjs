@@ -211,6 +211,66 @@ const harnessContext = {
 };
 const harnessOptions = { sessionId: "session-1", reasoning: "high", temperature: 0.3, metadata: { user_id: "u1" }, thinkingBudgets: { high: 4096 } };
 
+/* ------------------------------------------------------------------ the review route */
+
+// The classes, as the decision backend would answer them. The seam is already injectable, so these contracts
+// do not depend on the stub's modes: one canned answer per class, asserted against the rung that must run.
+const decideAs = (choice, confidence = 0.95) => async () => ({ backend: "canned", model: "canned", answers: { choice: { choice, confidence } }, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+// the loader keys fusions by id; the object itself carries none, so the router is built the way a run sees it
+const smrt = { ...config.fusions["smrt-review"], id: "smrt-review" };
+const routeOf = async (choice, confidence) => routeFusion({ config, fusion: smrt, prompt: "a packet", decide: decideAs(choice, confidence), emit: silent });
+
+const mechanical = await routeOf("mechanical");
+check("review route: a mechanical change goes to the cheap single-seat review",
+  mechanical.routing?.routedTo === "review-quick" && mechanical.fusion.id === "review-quick" && mechanical.routing.answer?.choice === "mechanical",
+  JSON.stringify(mechanical.routing));
+const standard = await routeOf("standard");
+check("review route: an ordinary change goes to the committee",
+  standard.routing?.routedTo === "review-check" && standard.fusion.id === "review-check",
+  JSON.stringify(standard.routing));
+// `high` declares no target on purpose: running this fusion *is* the deep review, so the record says escalated,
+// not declined — a deliberate escalation that reads as a decline is a lie in the audit trail.
+const high = await routeOf("high");
+check("review route: the boundary class escalates to the router's own deep review",
+  high.fusion.id === "smrt-review" && high.routing?.escalated === "high" && high.routing.declined === undefined,
+  JSON.stringify(high.routing));
+const unsure = await routeOf("mechanical", 0.2);
+check("review route: an unsure answer escalates rather than routing cheap",
+  unsure.fusion.id === "smrt-review" && String(unsure.routing?.declined).includes("confidence"),
+  JSON.stringify(unsure.routing));
+
+// The gate that makes a reviewer pinnable: `execute: false` means a *tool-bearing* turn runs the pipeline
+// instead of proxying. Without it a task agent pinned to this rung would get its writer and no panel.
+calls.length = 0;
+const reviewTurn = await driveStream(fusionStream(makeProxyPeer([]))(fusionModel("review-check"), harnessContext, harnessOptions));
+check("an execute: false rung deliberates on a tool-bearing turn instead of proxying",
+  reviewTurn.final.details?.proxied === undefined && calls.length > 0
+    && reviewTurn.events.some((event) => typeof event.partial?.content?.[0]?.text === "string" || typeof event.delta === "string"),
+  `seat calls=${calls.length}, proxied=${Boolean(reviewTurn.final.details?.proxied)}`);
+
+// The disposition is data: severities counted, verdict as stated, findings recorded — and a malformed one is
+// recorded as malformed rather than wrapped into something that reads like a clean review.
+const dispositionModel = (payload) => async (args) => ({ text: typeof payload === "string" ? payload : JSON.stringify(payload),
+  usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", toolCalls: [] });
+const reviewRun = await runPipeline({ config, sources, fusion: { ...config.fusions["review-quick"], id: "review-quick" }, prompt: "a packet",
+  callModel: dispositionModel({ verdict: "findings", summary: "one boundary is unhandled", findings: [
+    { severity: "blocking", path: "extensions/pi-fusion-matrix/run.js", line: 42, criterion: "no silent degradation", claim: "a refusal is swallowed" },
+    { severity: "editorial", path: "README.md", line: 12, criterion: "docs match the code", claim: "a count is stale" },
+    { severity: "invented", path: "x", line: 1, criterion: "c", claim: "a model made this severity up" },
+  ] }), decide, emit: silent, registry });
+const recorded = reviewRun.details;
+check("a review run records its findings, their severities and the verdict",
+  recorded.verdict === "findings" && recorded.findings?.length === 3
+    && recorded.severityCounts?.blocking === 1 && recorded.severityCounts?.editorial === 1 && recorded.severityCounts?.unknown === 1
+    && recorded.findings[0].path === "extensions/pi-fusion-matrix/run.js" && recorded.findings[0].line === 42,
+  JSON.stringify({ verdict: recorded.verdict, counts: recorded.severityCounts }));
+const malformedRun = await runPipeline({ config, sources, fusion: { ...config.fusions["review-quick"], id: "review-quick" }, prompt: "a packet",
+  callModel: dispositionModel("I could not read the diff, sorry."), decide, emit: silent, registry });
+check("a malformed disposition is recorded as malformed, not as a clean review",
+  malformedRun.details.malformedDisposition?.persona === "review-synth" && malformedRun.details.findings === undefined
+    && malformedRun.details.verdict === undefined,
+  JSON.stringify(malformedRun.details.malformedDisposition));
+
 // 7. proxy: the harness's context goes to the writing seat's alias verbatim, and its events come back
 const seen = [];
 calls.length = 0;
@@ -430,12 +490,13 @@ check("registration: a rung with no execute face keeps the package default",
 
 let info = "";
 await commands.get("matrix-info").handler(undefined, { ui: { notify: (text) => { info = text; } } });
-check("matrix-info: every fusion prints its execute face",
+check("matrix-info: every fusion prints its execute face, and the review rungs print the declaration",
   / {2}quick: single\n[\s\S]*? {4}executes: glm-flash @low \(proxy alias\)/.test(info)
     && / {2}best: pair-judged\n[\s\S]*? {4}executes: glm-flash @high \(writing seat synth\)/.test(info)
-    && / {2}review-check: committee-cascaded[^\n]*\n[\s\S]*? {4}executes: kimi @harness \(writing seat synth\)/.test(info)
-    && /executes: — \(no writing seat/.test(info),
-  info.split("\n").filter((line) => line.includes("executes:")).slice(0, 3).join(" | "));
+    && / {2}review-check: review-committee[^\n]*\n[\s\S]*? {4}executes: — \(declared never a session model/.test(info)
+    && / {2}smrt-review: review-committee[^\n]*\n[\s\S]*? {4}executes: — \(declared never a session model/.test(info)
+    && / {2}opinions: opinion[^\n]*\n[\s\S]*? {4}executes: — \(no writing seat/.test(info),
+  info.split("\n").filter((line) => line.includes("executes:")).join(" | "));
 
 // A seat's own clock: the harness records none for a call we make ourselves, so the record has to.
 const timedRun = await runPipeline({ config, sources, fusion: { ...config.fusions["review-check"], id: "review-check" }, prompt: "time it", callModel, decide, emit: silent, registry });

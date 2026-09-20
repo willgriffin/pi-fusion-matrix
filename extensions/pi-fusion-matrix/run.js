@@ -206,8 +206,16 @@ export async function routeFusion({ config, fusion, prompt, decide, emit, signal
     return { fusion, routing };
   }
   if (!target) {
-    const routing = { answer, threshold, declined: "no option matched" };
-    emit.delta(` ├─ ↪ route declined (${option ?? "no answer"}); running ${fusion.id}\n`);
+    // An option that matches but carries no `then` is a *choice to run this fusion* — the review router's
+    // `high` class, and the escalation a route takes when the strongest rung is its own. Calling that a decline
+    // would misdescribe a deliberate decision in `details.routing`, which the report reads.
+    const matched = option !== undefined && route.criteria?.[option] !== undefined;
+    const routing = matched
+      ? { answer, threshold, escalated: option }
+      : { answer, threshold, declined: "no option matched" };
+    emit.delta(matched
+      ? ` ├─ ↪ "${option}" runs ${fusion.id} (the option declares no target)\n`
+      : ` ├─ ↪ route declined (${option ?? "no answer"}); running ${fusion.id}\n`);
     return { fusion, routing };
   }
   if (!isSufficient(answer, sufficientWhen)) {

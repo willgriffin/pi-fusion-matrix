@@ -526,6 +526,28 @@ write result ends the run with a confirmation rather than starting a second deli
 tool and command paths there is no such gate, so the extension confines writes to the session
 directory, refuses absolute paths and `..`, and reports what it refused.
 
+## Reviewing with a fusion
+
+Reviews are their own traffic: a packet (a diff, the criteria it was written against, the validation evidence)
+goes in, and a *disposition* — a verdict and findings with severities — comes back. `smrt-review` picks the rung
+by blast radius, and each rung is a deliberating rung that can never be a session model:
+
+```bash
+omp -p "@/tmp/packet.md" --model fusion-matrix/smrt-review      # routed: cheap, committee, or deep
+omp -p "@/tmp/packet.md" --model fusion-matrix/review-check     # the committee, unrouted
+omp -p "@/tmp/packet.md" --model fusion-matrix/review-quick     # one adversarial seat, then the disposition
+```
+
+The last seat of a review rung answers in JSON, and the run records it: `details.verdict`, `details.findings`
+(`severity` from `blocking | major | minor | editorial`, `path`, `line`, `criterion`, `claim`) and
+`details.severityCounts`; a malformed disposition is recorded as `details.malformedDisposition` rather than
+reading as clean. Severity is what decides whether another review is worth buying — an `editorial` finding
+never is — which is the point of recording it at all.
+
+`execute: false` on these rungs is not decoration: with an execute face, a tool-bearing turn to a review rung
+would *proxy to its writing seat*, so the panel would never run and the review would be one model's opinion.
+The loader refuses that combination, along with a `review` router whose targets could do it.
+
 ## Fallback and reporting
 
 Two layers, independently configured and always reported. Lines from real runs:

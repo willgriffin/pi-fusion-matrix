@@ -1228,6 +1228,49 @@ roster so the two faces are legible together. Phase 2 — a per-task verdict wit
 a session ledger of decisions that carries no content — is designed in #9 and deferred; the fallback
 when a classifier is unreachable, and whether route observations influence a verdict, stay open there.
 
+### Step 10 — The review route: a class decides which models review
+
+Reviews are a second kind of traffic, not a fusion of a task. A review does not act on a repository and its
+input is a *packet* — a diff, the acceptance criteria it was written against, and the validation evidence — so
+its rungs are configured for judging rather than doing, and the class of the change decides which rung runs.
+
+| class | what it means | rung |
+|---|---|---|
+| `mechanical` | docs, comments, formatting, a config value with no behaviour change — nothing a test could catch instead | `review-quick` (one adversarial seat, then the disposition) |
+| `standard` | an ordinary behaviour change, contained within one component | `review-check` (committee, cascaded, disposition) |
+| `high` | a boundary: auth, authorization, tenancy, payments, schema or data migration, a public API contract, release tooling, anything irreversible, or a blast radius the packet cannot bound | `smrt-review`'s own mode — the deep committee, with the boundary question in its verification |
+
+`smrt-review` is a `route` fusion in the shape of `default-smrt`, with two deliberate differences:
+
+- **its own mode is the deep review.** A route that declines runs the fusion's own stages, so an unsure class
+  escalates to the deepest review instead of quietly taking the cheap one — and a route option that matches but
+  declares no `then` is recorded as `routing.escalated`, not as a decline, because a deliberate escalation that
+  reads as a decline is a lie in the audit trail;
+- **an option may carry no target on purpose.** The `high` class is that option: it means "run this fusion".
+
+**`execute: false` — a rung that is never a session model.** Pinning a reviewer is the whole point (a `task`
+agent whose model is `fusion-matrix/smrt-review`), and an execute face breaks it: a tool-bearing turn to a
+fusion with an executor *proxies to its writing seat*, so the panel never runs and the review silently becomes
+one model's opinion. A rung that declares `execute: false` runs its pipeline instead, whatever tools the turn
+carries. Load errors, because each one is a silent degradation waiting to happen:
+
+- `execute: false` together with a `proxy` block (a proxy is answered by the writing seat the fusion has
+  declared it never uses);
+- `review: true` with `execute` anything but `false` (the reviewer runs the rung as its model);
+- `review: true` without a `route` (the class is what selects the rung);
+- a `review: true` route whose target does not itself declare `execute: false` (a pinned reviewer would proxy).
+
+**The disposition is data.** A review rung's last seat is the `review-synth` persona (`output: "json"`), and its
+answer is recorded on the run as `details.verdict`, `details.findings` (`{severity, path, line, criterion,
+claim}` each, severity from `blocking | major | minor | editorial`, anything else kept as `unknown` rather than
+dropped) and `details.severityCounts`. A malformed disposition is recorded as `details.malformedDisposition` —
+never wrapped into something that reads like a clean review. Severity is what decides whether another review is
+bought: an `editorial` finding never does, and a run whose findings are all `editorial` is visible as such.
+
+Two limits, stated rather than discovered later: the *class decision* sees the packet truncated to the decision
+backend's state budget (its head and tail — the panel gets it whole), and a review rung has no tools, so a packet
+that does not contain the diff is not a review.
+
 ## Critical files & anchors
 
 Reference-only — read from the vendored copy of upstream `@quarkos/pi-fusion` (referred to below as
@@ -1585,6 +1628,16 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     tools table and `2 call(s) made through omp's xd:// device` in the accounting — where before the fix the
     same store reported no deliberation records at all. Each must fail when the unwrap, the attribution, the
     result naming, the unwrapped count or the single-count rule is mutated.
+
+30. **The review route** — `node scripts/interp-check.mjs` passes 51/51, the new ones covering: a mechanical
+    class routing to `review-quick`, a standard one to `review-check`, the boundary class escalating to
+    `smrt-review`'s own mode with `routing.escalated` (not `declined`), an unsure answer escalating rather than
+    routing cheap; an `execute: false` rung deliberating on a *tool-bearing* turn with no `details.proxied`; a
+    review run recording `verdict`, `findings`, their `severityCounts`, and a malformed disposition recorded as
+    malformed. The four load errors are the `config` rules: `execute: false` with `proxy`, `review` without
+    `execute: false`, `review` without `route`, and a review route target that is an executor. Then live: a
+    packet reviewed through `omp -p --model fusion-matrix/smrt-review`, reading the class it chose, the rung
+    that ran, and the disposition with its severities.
 
 ## Assumptions & contingencies
 

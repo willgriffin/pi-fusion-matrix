@@ -142,6 +142,48 @@ function normaliseJsonSeat(text) {
   return JSON.stringify({ unique_insights: [String(text ?? "")] }, null, 2);
 }
 
+/**
+ * The severities a review finding may carry, worst first. Closed where it is recorded: a model that invents a
+ * severity is kept as `unknown` rather than dropped, because a finding nobody can sort is still a finding.
+ */
+export const SEVERITIES = ["blocking", "major", "minor", "editorial"];
+
+/** Findings by severity, in the closed order, plus `unknown` for one nobody could sort. */
+function countSeverities(findings = []) {
+  const counts = Object.fromEntries(SEVERITIES.map((severity) => [severity, 0]));
+  for (const finding of findings) counts[finding.severity ?? "unknown"] = (counts[finding.severity ?? "unknown"] ?? 0) + 1;
+  return counts;
+}
+
+const normaliseFinding = (finding) => {
+  const value = finding && typeof finding === "object" ? finding : {};
+  return {
+    severity: SEVERITIES.includes(value.severity) ? value.severity : "unknown",
+    path: typeof value.path === "string" && value.path ? value.path : undefined,
+    line: Number.isInteger(value.line) ? value.line : undefined,
+    criterion: typeof value.criterion === "string" && value.criterion ? value.criterion : undefined,
+    claim: typeof value.claim === "string" ? value.claim : undefined,
+  };
+};
+
+/**
+ * A JSON seat's answer as both *text for the next stage* and *the disposition it declared*. The record is the
+ * point: a review whose findings exist only as prose cannot be counted, and a verdict the model never stated is
+ * not invented here — `findings` is always present, `verdict` only when it said one, and a parse failure is
+ * recorded as malformed rather than wrapped into something that reads like a clean review.
+ */
+function dispositionOf(persona, text) {
+  if (persona?.output !== "json") return { text };
+  const { ok, value } = parseJsonOutput(text);
+  if (!ok) return { text: normaliseJsonSeat(text), malformed: "the disposition was not JSON" };
+  const findings = Array.isArray(value.findings) ? value.findings.map(normaliseFinding) : [];
+  const verdict = typeof value.verdict === "string" ? value.verdict : undefined;
+  return {
+    text: JSON.stringify(value, null, 2),
+    disposition: { ...(verdict ? { verdict } : {}), summary: typeof value.summary === "string" ? value.summary : undefined, findings },
+  };
+}
+
 function temperatureFor(persona, model, override) {
   const base = override ?? persona.temperature;
   return String(model).toLowerCase().includes("kimi") ? 1.0 : base;
@@ -395,8 +437,9 @@ async function runSeatInner({
           await new Promise((resolve) => setTimeout(resolve, 2000));
           const retried = await call(!noTemperature.has(key));
           if (retried.stopReason !== "error") {
+            const retriedDisposition = dispositionOf(persona, retried.text);
             return {
-              persona: personaName, text: persona.output === "json" ? normaliseJsonSeat(retried.text) : retried.text,
+              persona: personaName, text: retriedDisposition.text, disposition: retriedDisposition.disposition, malformed: retriedDisposition.malformed,
               provider: resolved.provider, model: resolved.model, alias: resolved.alias,
               template: seat.template, thinking, usage: retried.usage, substitutions, cascades, attempts,
               degraded: false, calls,
@@ -409,8 +452,9 @@ async function runSeatInner({
         continue;
       }
 
+      const seatDisposition = dispositionOf(persona, message.text);
       return {
-        persona: personaName, text: persona.output === "json" ? normaliseJsonSeat(message.text) : message.text,
+        persona: personaName, text: seatDisposition.text, disposition: seatDisposition.disposition, malformed: seatDisposition.malformed,
         provider: resolved.provider, model: resolved.model, alias: resolved.alias,
         template: seat.template, thinking, usage: message.usage, substitutions, cascades, attempts,
         degraded: false, calls,
@@ -467,6 +511,8 @@ export async function runPipeline({
   const stages = [];
   const seatRecords = [];
   const runStartedAt = Date.now();
+  let lastDisposition = null;
+  let malformedDisposition = null;
   const rounds = [];
   const substitutions = [];
   const cascades = [];
@@ -537,6 +583,8 @@ export async function runPipeline({
         record.calls += roundSeats.reduce((total, seat) => total + (seat.calls ?? 0), 0);
         stagesRun += 1;
         for (const seat of roundSeats) {
+          if (seat.disposition) lastDisposition = { persona: seat.persona, ...seat.disposition };
+          if (seat.malformed) malformedDisposition = { persona: seat.persona, reason: seat.malformed };
           accumulateUsage(usage, seat.usage);
           if (seat.decisionUsage) accumulateUsage(decisionUsage, seat.decisionUsage);
           seatRecords.push({
@@ -575,6 +623,8 @@ export async function runPipeline({
       });
       record.calls = seat.calls ?? 0;
       stagesRun += 1;
+      if (seat.disposition) lastDisposition = { persona: seat.persona, ...seat.disposition };
+      if (seat.malformed) malformedDisposition = { persona: seat.persona, reason: seat.malformed };
       accumulateUsage(usage, seat.usage);
       if (seat.decisionUsage) accumulateUsage(decisionUsage, seat.decisionUsage);
       seatRecords.push({
@@ -699,7 +749,12 @@ export async function runPipeline({
     decisionUsage,
     // `seatErrors` is always present, empty array included: a run that degraded quietly is a wrong answer.
     details: { fusion: fusion.id, mode: fusion.mode, stages, seats: seatRecords, seatErrors, rounds, substitutions,
-      cascades: [...cascades, ...cascadeRecords], durationMs: Date.now() - runStartedAt },
+      cascades: [...cascades, ...cascadeRecords], durationMs: Date.now() - runStartedAt,
+      // A review's numbers live here: the deciding seat's verdict and findings with their severities, the count
+      // per severity (so a run whose findings are all `editorial` is visible as such), and — when a JSON seat
+      // produced something unparseable — that fact, because a malformed disposition must not read as clean.
+      ...(lastDisposition ? { verdict: lastDisposition.verdict, severityCounts: countSeverities(lastDisposition.findings), findings: lastDisposition.findings } : {}),
+      ...(malformedDisposition ? { malformedDisposition } : {}) },
     stagesRun,
   };
 }
