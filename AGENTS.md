@@ -85,6 +85,12 @@ Two kinds, and the difference is deliberate:
 - `test/*.test.mjs` — unit tests, `node --test`, one file per module, run by `npm test`. Every
   exported decision (validation rules, truncation, the failure taxonomy, deadline handling) has one
   here. These are the tests a change to one module must not break.
+- **Coverage is a ratchet, and it is measured over the modules the unit tests load.** `npm test` carries
+  `--test-coverage-{lines,branches,functions}` thresholds, so removing a test fails the run even when every
+  remaining test passes. The floor is pinned just under the achieved figure and raised by each slice that adds
+  tests; lowering it is a reviewed decision recorded in the commit that does it. What it does *not* cover is
+  the contract runner below — a percentage over a script whose job is to wire canned collaborators would reward
+  the wrong thing — so a module with no unit test contributes no number rather than a flattering one.
 - `scripts/interp-check.mjs` — the offline *contract* runner: whole `runPipeline` runs against canned
   collaborators, no keys, no network, no quota. Its job is the wiring between modules and the shape
   of a run; it is not where a single module's behaviour belongs, and it must still pass when every
@@ -95,7 +101,7 @@ Two kinds, and the difference is deliberate:
 Run before shipping, from the repository root:
 
 ```bash
-npm test                                                                # unit tests
+npm test                                                                # unit tests, and the coverage floor
 npm run lint                                                            # eslint, and the two repo guards
 npm run format:check                                                    # prettier, code only
 npm run lint:commits                                                    # conventional commits
