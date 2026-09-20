@@ -143,13 +143,13 @@ export function configLayers({ cwd = process.cwd() } = {}) {
  * default stays every layer that exists.
  */
 export function loadMatrixConfig({ cwd = process.cwd(), layers: wanted } = {}) {
-  const layers = wanted === undefined
-    ? configLayers({ cwd })
-    : configLayers({ cwd }).filter((layer) => wanted.includes(layer.kind));
+  const layers = wanted === undefined ? configLayers({ cwd }) : configLayers({ cwd }).filter((layer) => wanted.includes(layer.kind));
   if (layers.length === 0) {
-    throw new Error(wanted === undefined
-      ? "no matrix.json found; the packaged config is missing"
-      : `no matrix.json found in layer(s) ${JSON.stringify(wanted)}`);
+    throw new Error(
+      wanted === undefined
+        ? "no matrix.json found; the packaged config is missing"
+        : `no matrix.json found in layer(s) ${JSON.stringify(wanted)}`,
+    );
   }
   let config = {};
   const sources = { personas: {}, aliases: {}, modes: {}, fusions: {}, backends: {} };
@@ -173,7 +173,7 @@ export function loadMatrixConfig({ cwd = process.cwd(), layers: wanted } = {}) {
  */
 export function promptPath(prompt, source) {
   if (typeof prompt !== "string") return null;
-  if (prompt.includes("\n")) return null;                       // inline text, not a path
+  if (prompt.includes("\n")) return null; // inline text, not a path
   const dir = source?.dir ?? REPO_ROOT;
   if (path.isAbsolute(prompt)) return source?.trusted === false ? null : prompt;
   const resolved = path.resolve(dir, prompt);
@@ -301,7 +301,10 @@ export function validateConfig(config, { sources } = {}) {
   const aliases = config.aliases ?? {};
   if (Object.keys(aliases).length === 0) err("no aliases defined");
   for (const [name, alias] of Object.entries(aliases)) {
-    if (!isObject(alias)) { err(`alias "${name}" is not an object`); continue; }
+    if (!isObject(alias)) {
+      err(`alias "${name}" is not an object`);
+      continue;
+    }
     if (!alias.model) err(`alias "${name}" has no model; set the vendor id sent upstream`);
     if (!Array.isArray(alias.providers) || alias.providers.length === 0) err(`alias "${name}" has no providers`);
     for (const ref of alias.providers ?? []) {
@@ -328,14 +331,22 @@ export function validateConfig(config, { sources } = {}) {
   const personas = config.personas ?? {};
   if (Object.keys(personas).length === 0) err("no personas defined");
   for (const [name, persona] of Object.entries(personas)) {
-    if (!isObject(persona)) { err(`persona "${name}" is not an object`); continue; }
-    if (!persona.prompt) { err(`persona "${name}" has no prompt`); continue; }
+    if (!isObject(persona)) {
+      err(`persona "${name}" is not an object`);
+      continue;
+    }
+    if (!persona.prompt) {
+      err(`persona "${name}" has no prompt`);
+      continue;
+    }
     if (sources) {
       const source = sources.personas[name];
       if (promptPath(persona.prompt, source) === null && !persona.prompt.includes("\n")) {
-        err(source?.trusted === false
-          ? `persona "${name}" prompt path must be relative and inside ${source.dir} when it comes from the session directory`
-          : `persona "${name}" prompt path does not exist: ${persona.prompt}`);
+        err(
+          source?.trusted === false
+            ? `persona "${name}" prompt path must be relative and inside ${source.dir} when it comes from the session directory`
+            : `persona "${name}" prompt path does not exist: ${persona.prompt}`,
+        );
       } else if (resolvePrompt(persona.prompt, source) === null) {
         err(`persona "${name}" prompt path does not exist: ${persona.prompt}`);
       }
@@ -357,15 +368,27 @@ export function validateConfig(config, { sources } = {}) {
   if (Object.keys(modes).length === 0) err("no modes defined");
   for (const [modeName, mode] of Object.entries(modes)) {
     const stages = mode?.stages;
-    if (!Array.isArray(stages) || stages.length === 0) { err(`mode "${modeName}": no stages`); continue; }
-    let panel = false, single = false, score = false, produced = 0;
+    if (!Array.isArray(stages) || stages.length === 0) {
+      err(`mode "${modeName}": no stages`);
+      continue;
+    }
+    let panel = false,
+      single = false,
+      score = false,
+      produced = 0;
     const named = new Set();
 
     stages.forEach((stage, i) => {
       const where = `mode "${modeName}" stage ${i}`;
-      if (!isObject(stage)) { err(`${where}: not an object`); return; }
+      if (!isObject(stage)) {
+        err(`${where}: not an object`);
+        return;
+      }
       const kinds = STAGE_KINDS.filter((k) => stage[k] !== undefined);
-      if (kinds.length !== 1) { err(`${where}: must set exactly one of ${STAGE_KINDS.join("/")}`); return; }
+      if (kinds.length !== 1) {
+        err(`${where}: must set exactly one of ${STAGE_KINDS.join("/")}`);
+        return;
+      }
 
       for (const persona of stage.parallel ?? []) {
         if (!personaNames.has(persona)) err(`${where}: unknown persona "${persona}"`);
@@ -427,9 +450,15 @@ export function validateConfig(config, { sources } = {}) {
   if (Object.keys(fusions).length === 0) err("no fusions defined");
   for (const [id, fusion] of Object.entries(fusions)) {
     if (/[:/]/.test(id)) err(`fusion id "${id}" may not contain ":" or "/"`);
-    if (!isObject(fusion)) { err(`fusion "${id}" is not an object`); continue; }
+    if (!isObject(fusion)) {
+      err(`fusion "${id}" is not an object`);
+      continue;
+    }
     const mode = modes[fusion.mode];
-    if (!mode) { err(`fusion "${id}": unknown mode "${fusion.mode}"`); continue; }
+    if (!mode) {
+      err(`fusion "${id}": unknown mode "${fusion.mode}"`);
+      continue;
+    }
 
     const used = new Set();
     for (const stage of mode.stages ?? []) {
@@ -443,19 +472,29 @@ export function validateConfig(config, { sources } = {}) {
     if (extra.length) err(`fusion "${id}" has candidates its mode does not use: ${extra.join(", ")}`);
 
     for (const [persona, list] of Object.entries(fusion.candidates ?? {})) {
-      if (!Array.isArray(list) || list.length === 0) { err(`fusion "${id}" candidate list for "${persona}" is empty`); continue; }
+      if (!Array.isArray(list) || list.length === 0) {
+        err(`fusion "${id}" candidate list for "${persona}" is empty`);
+        continue;
+      }
       list.forEach((candidate, i) => {
         const where = `fusion "${id}" candidate for "${persona}" [${i}]`;
         if (typeof candidate === "string") {
           if (!aliases[candidate]) err(`${where}: unknown alias "${candidate}"`);
           return;
         }
-        if (!isObject(candidate)) { err(`${where}: not a string, alias object, or decision`); return; }
+        if (!isObject(candidate)) {
+          err(`${where}: not a string, alias object, or decision`);
+          return;
+        }
         const kind = SLOT_KINDS.filter((k) => candidate[k] !== undefined);
-        if (kind.length !== 1) { err(`${where}: must set exactly one of ${SLOT_KINDS.join("/")}`); return; }
+        if (kind.length !== 1) {
+          err(`${where}: must set exactly one of ${SLOT_KINDS.join("/")}`);
+          return;
+        }
         if (kind[0] === "alias") {
           if (!aliases[candidate.alias]) err(`${where}: unknown alias "${candidate.alias}"`);
-          if (candidate.sufficientWhen !== undefined) err(`${where}: models produce no answer to test; sufficientWhen applies to decisions`);
+          if (candidate.sufficientWhen !== undefined)
+            err(`${where}: models produce no answer to test; sufficientWhen applies to decisions`);
         } else {
           validateDecision(candidate.decide, where, config, err);
           validateSufficientWhen(candidate.sufficientWhen, where, candidate.decide, err, effectiveBackend(candidate.decide, config));
@@ -470,7 +509,9 @@ export function validateConfig(config, { sources } = {}) {
       // mean nothing: a pipeline seat is called by us, at a level we choose.
       if (level === HARNESS_THINKING) {
         if (persona !== executor?.persona) {
-          err(`fusion "${id}": thinking "${HARNESS_THINKING}" is only legal for the writing seat${executor?.persona ? ` "${executor.persona}"` : ", and this mode has none"}`);
+          err(
+            `fusion "${id}": thinking "${HARNESS_THINKING}" is only legal for the writing seat${executor?.persona ? ` "${executor.persona}"` : ", and this mode has none"}`,
+          );
         }
       } else if (!THINKING_LEVELS.includes(level)) {
         err(`fusion "${id}": thinking "${level}" unknown`);
@@ -487,11 +528,15 @@ export function validateConfig(config, { sources } = {}) {
     if (fusion.review !== undefined && (fusion.review !== true || fusion.execute !== false)) {
       // A reviewer runs the rung *as its model*, so it has to be a deliberating rung: `review: true` without
       // `execute: false` would proxy the pinned review to the writer, which is the failure this marks.
-      err(`fusion "${id}": review requires execute: false — a reviewer runs this rung as its model, and an execute face would answer instead of deliberating`);
+      err(
+        `fusion "${id}": review requires execute: false — a reviewer runs this rung as its model, and an execute face would answer instead of deliberating`,
+      );
     }
     if (fusion.proxy !== undefined) {
       if (fusion.execute === false) {
-        err(`fusion "${id}": proxy and execute: false cannot both be declared; proxy is answered by the writing seat this fusion has declared it never uses`);
+        err(
+          `fusion "${id}": proxy and execute: false cannot both be declared; proxy is answered by the writing seat this fusion has declared it never uses`,
+        );
       }
       const declared = isObject(fusion.proxy) ? fusion.proxy.alias : undefined;
       if (!isObject(fusion.proxy)) {
@@ -505,7 +550,9 @@ export function validateConfig(config, { sources } = {}) {
         // that writes nothing an executor. Such a fusion has no persona, so the thinking table's "the
         // writing seat's persona level" row would have nothing to read and a configured level would be
         // dropped in silence — this load error is the loud version of that.
-        err(`fusion "${id}": proxy needs a writing seat (a mode whose last stage is a single seat); mode "${fusion.mode}" writes nothing, so the executor would have no persona to take a thinking level from`);
+        err(
+          `fusion "${id}": proxy needs a writing seat (a mode whose last stage is a single seat); mode "${fusion.mode}" writes nothing, so the executor would have no persona to take a thinking level from`,
+        );
       }
       // A proxied turn runs no pipeline, so a route on the same fusion could never fire — two
       // contradictory declarations rather than a preference between them.
@@ -519,7 +566,9 @@ export function validateConfig(config, { sources } = {}) {
       const writer = executorOf(config, fusion);
       const answersInJson = writer && config.personas?.[writer.persona]?.output === "json";
       if (answersInJson) {
-        err(`fusion "${id}": the writing seat "${writer.persona}" answers in JSON, so this fusion must declare execute: false — a tool-bearing turn would proxy to a disposition instead of deliberating`);
+        err(
+          `fusion "${id}": the writing seat "${writer.persona}" answers in JSON, so this fusion must declare execute: false — a tool-bearing turn would proxy to a disposition instead of deliberating`,
+        );
       }
     }
     for (const persona of Object.keys(fusion.prompts ?? {})) {
@@ -532,12 +581,15 @@ export function validateConfig(config, { sources } = {}) {
       for (const [option, value] of Object.entries(fusion.route?.criteria ?? {})) {
         const target = isObject(value) ? value.then : undefined;
         if (target && config.fusions?.[target]?.execute !== false) {
-          err(`fusion "${id}": review option "${option}" routes to "${target}", which declares no execute: false — a reviewer pinned to it would proxy to its writing seat instead of deliberating`);
+          err(
+            `fusion "${id}": review option "${option}" routes to "${target}", which declares no execute: false — a reviewer pinned to it would proxy to its writing seat instead of deliberating`,
+          );
         }
       }
     }
     if (fusion.fileAgent && fusion.fileAgent !== false) {
-      if (!fusion.fileAgent.alias || !aliases[fusion.fileAgent.alias]) err(`fusion "${id}": fileAgent alias "${fusion.fileAgent?.alias}" is not an alias`);
+      if (!fusion.fileAgent.alias || !aliases[fusion.fileAgent.alias])
+        err(`fusion "${id}": fileAgent alias "${fusion.fileAgent?.alias}" is not an alias`);
     }
     if (fusion.maxAdvance !== undefined && (!Number.isInteger(fusion.maxAdvance) || fusion.maxAdvance < 1)) {
       err(`fusion "${id}": maxAdvance must be a positive integer`);
@@ -556,7 +608,10 @@ export function validateConfig(config, { sources } = {}) {
         }
         continue;
       }
-      if (!isObject(entry)) { err(`${where}: entry is not an object`); continue; }
+      if (!isObject(entry)) {
+        err(`${where}: entry is not an object`);
+        continue;
+      }
       validateDecision(entry, where, config, err);
     }
 
@@ -569,7 +624,10 @@ export function validateConfig(config, { sources } = {}) {
   if (!decide.defaultBackend) err("decide.defaultBackend is not set");
   else if (!backends[decide.defaultBackend]) err(`decide.defaultBackend "${decide.defaultBackend}" is not a backend`);
   for (const [name, backend] of Object.entries(backends)) {
-    if (!isObject(backend)) { err(`backend "${name}" is not an object`); continue; }
+    if (!isObject(backend)) {
+      err(`backend "${name}" is not an object`);
+      continue;
+    }
     if (!["typesafe", "semif"].includes(backend.kind)) err(`backend "${name}": unknown kind "${backend.kind}"`);
     if (!backend.url) err(`backend "${name}": no url`);
     if (backend.kind === "typesafe" && (!backend.apiKeyEnv || !backend.model)) {
@@ -585,7 +643,9 @@ export function validateConfig(config, { sources } = {}) {
     // and machine layers may define one; a repository may not.
     const origin = sources?.backends?.[name];
     if (origin && origin.kind === "cwd") {
-      err(`backend "${name}" is declared by the session directory; decision backends may only come from the packaged or machine-wide config`);
+      err(
+        `backend "${name}" is declared by the session directory; decision backends may only come from the packaged or machine-wide config`,
+      );
     }
     // The canonical env var per kind, so config can never name an arbitrary variable to read, and a
     // non-loopback backend must name one at all.
@@ -641,7 +701,10 @@ function effectiveBackend(spec, config) {
  * (noul/choice/score) stays for typed questions a backend can answer several of at once.
  */
 function validateDecision(spec, where, config, err, { allowActions = false, scoreLevels = false } = {}) {
-  if (!isObject(spec)) { err(`${where}: decision is not an object`); return; }
+  if (!isObject(spec)) {
+    err(`${where}: decision is not an object`);
+    return;
+  }
   // A `score` stage rates each item of `over` against a list of levels rather than choosing between
   // named options, so it is the one surface where `criteria` is an array. Nothing else may use that
   // form: an array elsewhere is a config mistake, not a second spelling of an option map.
@@ -649,7 +712,10 @@ function validateDecision(spec, where, config, err, { allowActions = false, scor
   const hasCriteria = isObject(spec.criteria);
   const hasQuestions = isObject(spec.questions);
   if (levels) {
-    if (!scoreLevels) { err(`${where}: criteria must be an option map; rating levels belong to a score stage`); return; }
+    if (!scoreLevels) {
+      err(`${where}: criteria must be an option map; rating levels belong to a score stage`);
+      return;
+    }
     if (spec.questions !== undefined) err(`${where}: a score stage declares criteria or questions, not both`);
     if (!spec.instructions) err(`${where}: a score stage needs instructions`);
     if (levels.length < 2) err(`${where}: score criteria needs at least two levels`);
@@ -667,7 +733,10 @@ function validateDecision(spec, where, config, err, { allowActions = false, scor
     if (entries.length > 16) err(`${where}: criteria has ${entries.length} options, above the 16 backends accept`);
     for (const [id, value] of entries) {
       if (value === null || typeof value === "string") continue;
-      if (!isObject(value)) { err(`${where}: criteria "${id}" must be a description string, null, or an action object`); continue; }
+      if (!isObject(value)) {
+        err(`${where}: criteria "${id}" must be a description string, null, or an action object`);
+        continue;
+      }
       if (value.description !== undefined && typeof value.description !== "string") {
         err(`${where}: criteria "${id}" description must be a string`);
       }
@@ -679,8 +748,14 @@ function validateDecision(spec, where, config, err, { allowActions = false, scor
     const entries = Object.entries(spec.questions);
     if (entries.length === 0) err(`${where}: questions is empty`);
     for (const [id, question] of entries) {
-      if (!isObject(question)) { err(`${where}: question "${id}" is not an object`); continue; }
-      if (!["noul", "choice", "score"].includes(question.type)) { err(`${where}: question "${id}" type "${question.type}" unknown`); continue; }
+      if (!isObject(question)) {
+        err(`${where}: question "${id}" is not an object`);
+        continue;
+      }
+      if (!["noul", "choice", "score"].includes(question.type)) {
+        err(`${where}: question "${id}" type "${question.type}" unknown`);
+        continue;
+      }
       if (!question.instructions) err(`${where}: question "${id}" has no instructions`);
       if (question.type === "score" && (!Array.isArray(question.criteria) || question.criteria.length < 2)) {
         err(`${where}: score question "${id}" needs at least two levels`);
@@ -698,7 +773,9 @@ function validateDecision(spec, where, config, err, { allowActions = false, scor
   // config error instead of a mid-run substitution.
   const backend = effectiveBackend(spec, config);
   if (hasQuestions && backend?.kind === "semif") {
-    err(`${where}: backend "${backend.name}" is SemIf and takes one question per request; use a criteria decision or the questions form on a typesafe backend`);
+    err(
+      `${where}: backend "${backend.name}" is SemIf and takes one question per request; use a criteria decision or the questions form on a typesafe backend`,
+    );
   }
 }
 
@@ -708,7 +785,10 @@ function validateDecision(spec, where, config, err, { allowActions = false, scor
  */
 export function validateSufficientWhen(sufficientWhen, where, decision, err, backend) {
   if (sufficientWhen === undefined) return;
-  if (!isObject(sufficientWhen)) { err(`${where}: sufficientWhen is not an object`); return; }
+  if (!isObject(sufficientWhen)) {
+    err(`${where}: sufficientWhen is not an object`);
+    return;
+  }
   const conditions = ["choiceIs", "noulAbove", "scoreAbove", "scoreBelow", "minConfidence"].filter((k) => sufficientWhen[k] !== undefined);
   if (conditions.length === 0) err(`${where}: sufficientWhen has no condition, so it would always pass`);
   // SemIf reports probabilities and nothing else: no confidence, no score. A gate over either would
@@ -735,7 +815,10 @@ export function validateSufficientWhen(sufficientWhen, where, decision, err, bac
 
 export function validateRoute(route, fusionId, config, err) {
   const where = `fusion "${fusionId}" route`;
-  if (!isObject(route)) { err(`${where}: not an object`); return; }
+  if (!isObject(route)) {
+    err(`${where}: not an object`);
+    return;
+  }
   validateDecision(route, where, config, err, { allowActions: true });
   const entries = Object.entries(route.criteria ?? {});
   let targets = 0;
@@ -745,7 +828,8 @@ export function validateRoute(route, fusionId, config, err) {
     if (!config.fusions?.[value.then]) err(`${where}: option "${option}" routes to unknown fusion "${value.then}"`);
     else {
       if (value.then === fusionId) err(`${where}: option "${option}" routes to this fusion`);
-      if (config.fusions[value.then].route) err(`${where}: option "${option}" routes to "${value.then}", which declares its own route (two hops)`);
+      if (config.fusions[value.then].route)
+        err(`${where}: option "${option}" routes to "${value.then}", which declares its own route (two hops)`);
     }
   }
   if (targets === 0) err(`${where}: no option carries then, so the route can never fire`);

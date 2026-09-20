@@ -61,7 +61,8 @@ if (!to) {
 }
 // `--from` wins; otherwise the merge base with the default branch. A branch that has already merged (or a
 // detached checkout) has no merge base to find, and saying so beats linting the whole history.
-const base = value("from") ?? ["origin/main", "origin/master", "main", "master"].map((ref) => git(["merge-base", "HEAD", ref])).find(Boolean);
+const base =
+  value("from") ?? ["origin/main", "origin/master", "main", "master"].map((ref) => git(["merge-base", "HEAD", ref])).find(Boolean);
 if (!base) {
   console.log("lint:commits — no merge base with a default branch; nothing to check");
   process.exit(0);

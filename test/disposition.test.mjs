@@ -13,11 +13,21 @@ import assert from "node:assert/strict";
 import { dispositionOf } from "../extensions/pi-fusion-matrix/pipeline.js";
 
 const jsonSeat = { output: "json" };
-const finding = { severity: "blocking", path: "extensions/pi-fusion-matrix/pipeline.js", line: 42, criterion: "c1", claim: "the refusal is swallowed" };
+const finding = {
+  severity: "blocking",
+  path: "extensions/pi-fusion-matrix/pipeline.js",
+  line: 42,
+  criterion: "c1",
+  claim: "the refusal is swallowed",
+};
 const answer = (value) => dispositionOf(jsonSeat, typeof value === "string" ? value : JSON.stringify(value));
 
 test("a well-formed disposition is recorded, and its text is the object", () => {
-  const result = answer({ verdict: "findings", summary: "one boundary is unhandled", findings: [finding, { ...finding, severity: "editorial", line: null }] });
+  const result = answer({
+    verdict: "findings",
+    summary: "one boundary is unhandled",
+    findings: [finding, { ...finding, severity: "editorial", line: null }],
+  });
   assert.equal(result.malformed, undefined);
   assert.equal(result.disposition.verdict, "findings");
   assert.equal(result.disposition.findings.length, 2);
@@ -62,7 +72,11 @@ test("an answer that does not claim to be a disposition is left alone", () => {
 });
 
 test("an answer that is not a JSON object is malformed, and says what was asked for", () => {
-  for (const [payload, text] of [["I could not read the diff, sorry.", "prose"], ["[1, 2, 3]", "a top-level array"], ['"a string"', "a bare string"]]) {
+  for (const [payload, text] of [
+    ["I could not read the diff, sorry.", "prose"],
+    ["[1, 2, 3]", "a top-level array"],
+    ['"a string"', "a bare string"],
+  ]) {
     const result = dispositionOf(jsonSeat, payload);
     assert.equal(result.malformed, "the answer was not a JSON object", `${text} must be reported`);
     assert.equal(result.disposition, undefined);

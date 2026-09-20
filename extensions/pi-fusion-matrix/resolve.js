@@ -31,7 +31,8 @@ export function isObject(v) {
 /** A candidate is an alias id, an alias object with a per-seat provider override, or a decision. */
 export function normalizeCandidate(candidate) {
   if (typeof candidate === "string") return { kind: "alias", alias: candidate };
-  if (isObject(candidate) && candidate.decide !== undefined) return { kind: "decide", spec: candidate.decide, sufficientWhen: candidate.sufficientWhen };
+  if (isObject(candidate) && candidate.decide !== undefined)
+    return { kind: "decide", spec: candidate.decide, sufficientWhen: candidate.sufficientWhen };
   if (isObject(candidate) && candidate.alias !== undefined) {
     return { kind: "alias", alias: candidate.alias, providers: candidate.providers, thinking: candidate.thinking };
   }

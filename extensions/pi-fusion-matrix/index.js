@@ -52,16 +52,17 @@ export default async function (pi) {
   const decide = createDecide({ config });
 
   // The file agent's `write` tool needs one schema, and the builder for it is harness-specific. omp
-// injects one on the extension API (`pi.zod`, so `z.object({ path: z.string() })`); pi expects the
-// extension to bring `typebox` (`Type.Object({ path: Type.String() })`) — a bundled peer resolved from
-// pi's own installation. Memoized, and resolved at the first tool call rather than at load, so a
-// harness whose peer cannot be found still registers its models and reports the failure per seat.
+  // injects one on the extension API (`pi.zod`, so `z.object({ path: z.string() })`); pi expects the
+  // extension to bring `typebox` (`Type.Object({ path: Type.String() })`) — a bundled peer resolved from
+  // pi's own installation. Memoized, and resolved at the first tool call rather than at load, so a
+  // harness whose peer cannot be found still registers its models and reports the failure per seat.
   let writeParametersCache = null;
-  const getWriteParameters = () => (writeParametersCache ??= (async () => {
-    if (pi.zod) return pi.zod.object({ path: pi.zod.string(), content: pi.zod.string() });
-    const { Type } = await loadTypebox();
-    return Type.Object({ path: Type.String(), content: Type.String() });
-  })());
+  const getWriteParameters = () =>
+    (writeParametersCache ??= (async () => {
+      if (pi.zod) return pi.zod.object({ path: pi.zod.string(), content: pi.zod.string() });
+      const { Type } = await loadTypebox();
+      return Type.Object({ path: Type.String(), content: Type.String() });
+    })());
 
   // `createFusionStream` asks for its registry once, when a run starts, so the getter has to know the
   // session by then: one stream function per session (not per run, and not one shared between them).
@@ -70,7 +71,15 @@ export default async function (pi) {
     const key = sessionId ?? "";
     let stream = streams.get(key);
     if (!stream) {
-      stream = createFusionStream({ config, sources, getRegistry: () => getRegistry(sessionId), decide, callModel, getPi, getWriteParameters });
+      stream = createFusionStream({
+        config,
+        sources,
+        getRegistry: () => getRegistry(sessionId),
+        decide,
+        callModel,
+        getPi,
+        getWriteParameters,
+      });
       streams.set(key, stream);
     }
     return stream;
@@ -112,8 +121,8 @@ export default async function (pi) {
 
   pi.registerProvider(providerId, {
     name: config.providerName ?? "Fusion Matrix",
-    baseUrl: "http://127.0.0.1:1/unused",   // never used: only our own api id matches these models
-    apiKey: "unused",                       // provider-composer requires apiKey or oauth
+    baseUrl: "http://127.0.0.1:1/unused", // never used: only our own api id matches these models
+    apiKey: "unused", // provider-composer requires apiKey or oauth
     api: "fusion-matrix",
     models: fusionIds.map(registeredModel),
     streamSimple: (model, context, options) => streamForSession(options?.sessionId)(model, context, options),
@@ -122,13 +131,17 @@ export default async function (pi) {
   pi.registerTool({
     name: "matrix",
     label: "Matrix",
-    description: "Run a named fusion — a configured pipeline of models deliberating on one question. Use it for design decisions, architectural choices, and reviews that benefit from independent expert analysis plus a synthesis.",
+    description:
+      "Run a named fusion — a configured pipeline of models deliberating on one question. Use it for design decisions, architectural choices, and reviews that benefit from independent expert analysis plus a synthesis.",
     promptSnippet: "Run a multi-model deliberation on a design question",
     parameters: {
       type: "object",
       properties: {
         prompt: { type: "string", description: "The question or design task to analyze." },
-        fusion: { type: "string", description: `Fusion id (${fusionIds.join(", ")}). Defaults to ${config.defaultFusion ?? fusionIds[0]}.` },
+        fusion: {
+          type: "string",
+          description: `Fusion id (${fusionIds.join(", ")}). Defaults to ${config.defaultFusion ?? fusionIds[0]}.`,
+        },
       },
       required: ["prompt"],
     },
@@ -138,7 +151,16 @@ export default async function (pi) {
         return { content: [{ type: "text", text: `unknown fusion "${fusion}"; known: ${fusionIds.join(", ")}` }], details: { fusion } };
       }
       try {
-        const result = await runOnce({ config, sources, fusion, prompt: params.prompt, getRegistry: () => getRegistry(sessionIdOf(ctx)), decide, callModel, getWriteParameters });
+        const result = await runOnce({
+          config,
+          sources,
+          fusion,
+          prompt: params.prompt,
+          getRegistry: () => getRegistry(sessionIdOf(ctx)),
+          decide,
+          callModel,
+          getWriteParameters,
+        });
         return { content: [{ type: "text", text: result.text }], details: { fusion, ...result.details } };
       } catch (error) {
         const message = error?.message ?? String(error);
@@ -158,7 +180,10 @@ export default async function (pi) {
       const [first, ...rest] = text.split(/\s+/);
       const fusion = config.fusions[first] ? first : (config.defaultFusion ?? fusionIds[0]);
       const prompt = config.fusions[first] ? rest.join(" ") : text;
-      if (!prompt) { ctx.ui.notify("usage: /matrix <id> <prompt>", "error"); return; }
+      if (!prompt) {
+        ctx.ui.notify("usage: /matrix <id> <prompt>", "error");
+        return;
+      }
 
       ctx.ui.setStatus("matrix", `🧠 ${fusion}…`);
 
@@ -181,7 +206,17 @@ export default async function (pi) {
       };
 
       try {
-        const result = await runOnce({ config, sources, fusion, prompt, getRegistry: () => getRegistry(sessionIdOf(ctx)), decide, callModel, onProgress: (line) => ctx.ui.setStatus("matrix", line), getWriteParameters });
+        const result = await runOnce({
+          config,
+          sources,
+          fusion,
+          prompt,
+          getRegistry: () => getRegistry(sessionIdOf(ctx)),
+          decide,
+          callModel,
+          onProgress: (line) => ctx.ui.setStatus("matrix", line),
+          getWriteParameters,
+        });
         await record(result.text, { fusion, ...result.details });
       } catch (error) {
         const message = error?.message ?? String(error);
@@ -209,7 +244,10 @@ export default async function (pi) {
       // takes the last one as the current outcome rather than rewriting history.
       const details = { workItem, outcome, ...(evidence ? { evidence } : {}) };
       try {
-        await pi.sendMessage({ customType: "matrix-label", content: `${workItem} — ${outcome}${evidence ? ` (${evidence})` : ""}`, display: true, details }, { triggerTurn: false });
+        await pi.sendMessage(
+          { customType: "matrix-label", content: `${workItem} — ${outcome}${evidence ? ` (${evidence})` : ""}`, display: true, details },
+          { triggerTurn: false },
+        );
       } catch (error) {
         ctx.ui.notify(`the label could not be written: ${error?.message ?? String(error)}`, "error");
       }
@@ -220,27 +258,38 @@ export default async function (pi) {
     description: "List the configured modes, fusions, seats, and provider routes",
     handler: async (_args, ctx) => {
       const lines = [];
-      lines.push(`provider: ${providerId}${config.providerName ? ` (${config.providerName})` : ""} · default fusion: ${config.defaultFusion ?? fusionIds[0]} · harness: ${harnessName()}`);
+      lines.push(
+        `provider: ${providerId}${config.providerName ? ` (${config.providerName})` : ""} · default fusion: ${config.defaultFusion ?? fusionIds[0]} · harness: ${harnessName()}`,
+      );
       lines.push(`layers: ${layers.map((l) => l.file.replace(process.env.HOME ?? "", "~")).join(" → ")}`);
       lines.push("");
       lines.push("modes:");
       for (const [name, mode] of Object.entries(config.modes)) {
-        const shape = mode.stages.map((s) => ["parallel", "single", "decide", "score", "render"].find((k) => s[k] !== undefined)).join(" → ");
-        lines.push(`  ${name}: ${shape}${mode.stages.some((s) => s.rounds) ? ` (${mode.stages.find((s) => s.rounds).rounds} rounds)` : ""}`);
+        const shape = mode.stages
+          .map((s) => ["parallel", "single", "decide", "score", "render"].find((k) => s[k] !== undefined))
+          .join(" → ");
+        lines.push(
+          `  ${name}: ${shape}${mode.stages.some((s) => s.rounds) ? ` (${mode.stages.find((s) => s.rounds).rounds} rounds)` : ""}`,
+        );
       }
       lines.push("");
       lines.push("fusions:");
       for (const [id, fusion] of Object.entries(config.fusions)) {
-        const roster = Object.entries(fusion.candidates ?? {}).map(([persona, list]) => `${persona}=${list.map((c) => (typeof c === "string" ? c : c.alias ?? "decision")).join("/")}`).join(" ");
+        const roster = Object.entries(fusion.candidates ?? {})
+          .map(([persona, list]) => `${persona}=${list.map((c) => (typeof c === "string" ? c : (c.alias ?? "decision"))).join("/")}`)
+          .join(" ");
         // The other face of the same definition: which alias answers a tool-bearing turn, and at what
         // level. A `—` is a fusion whose mode writes nothing, so every turn it gets deliberates.
         const executor = executorOf(config, fusion);
         const level = executorThinking(config, fusion);
         const executes = executor
           ? `${executor.alias} @${level ?? HARNESS_THINKING}${executor.declared ? " (proxy alias)" : ` (writing seat${executor.persona ? ` ${executor.persona}` : ""})`}`
-          : fusion.execute === false ? "— (declared never a session model; every turn deliberates)"
+          : fusion.execute === false
+            ? "— (declared never a session model; every turn deliberates)"
             : "— (no writing seat; every turn deliberates)";
-        lines.push(`  ${id}: ${fusion.mode}${fusion.fileAgent ? " +fileAgent" : ""}${fusion.route ? " +route" : ""}${fusion.verify ? " +verify" : ""}\n    ${roster}\n    executes: ${executes}`);
+        lines.push(
+          `  ${id}: ${fusion.mode}${fusion.fileAgent ? " +fileAgent" : ""}${fusion.route ? " +route" : ""}${fusion.verify ? " +verify" : ""}\n    ${roster}\n    executes: ${executes}`,
+        );
       }
       lines.push("");
       lines.push("aliases:");
@@ -257,9 +306,17 @@ export default async function (pi) {
   pi.registerCommand("matrix-doctor", {
     description: "Validate the config, check provider connectivity, and report catalogue drift",
     handler: async (args, ctx) => {
-      const { findings, exit } = await runDoctor({ config, sources, registry: getRegistry(sessionIdOf(ctx)), online: /\bonline\b/.test(String(args ?? "")) });
+      const { findings, exit } = await runDoctor({
+        config,
+        sources,
+        registry: getRegistry(sessionIdOf(ctx)),
+        online: /\bonline\b/.test(String(args ?? "")),
+      });
       const snippet = repairSnippet(findings);
-      ctx.ui.notify(`${formatFindings(findings)}${snippet ? `\n\nsuggested models.json additions:\n${snippet}` : ""}\n\nexit ${exit}`, exit === EXIT.clean ? "info" : "error");
+      ctx.ui.notify(
+        `${formatFindings(findings)}${snippet ? `\n\nsuggested models.json additions:\n${snippet}` : ""}\n\nexit ${exit}`,
+        exit === EXIT.clean ? "info" : "error",
+      );
     },
   });
 }
@@ -277,7 +334,10 @@ async function runOnce({ config, sources, fusion, prompt, getRegistry, decide, c
   const notes = [];
   const substitutionLines = [];
   const emit = {
-    delta: (text) => { notes.push(text.trim()); onProgress?.(text.trim().slice(0, 120)); },
+    delta: (text) => {
+      notes.push(text.trim());
+      onProgress?.(text.trim().slice(0, 120));
+    },
     // The provider path renders a substitution inline; a tool result has no stream to render into, so
     // the same ` ├─ ↩ …` line is kept here for `notes` and prepended to the text the caller returns.
     substitution: (entry) => {
@@ -294,20 +354,41 @@ async function runOnce({ config, sources, fusion, prompt, getRegistry, decide, c
   // answers and `{{judge}}` the judge's, which the final text cannot stand in for.
   const vars = run.vars ?? { prompt, panel: "", judge: run.text, synthesis: run.text, cwd: process.cwd() };
   const verification = await verifyRun({ config, fusion: routed.fusion, vars, decide, emit, runGate: makeRunGate() });
-  const files = await fileAgentStep({ config, fusion: routed.fusion, prompt, synthesis: run.text, registry: getRegistry(), callModel, emit, getWriteParameters });
+  const files = await fileAgentStep({
+    config,
+    fusion: routed.fusion,
+    prompt,
+    synthesis: run.text,
+    registry: getRegistry(),
+    callModel,
+    emit,
+    getWriteParameters,
+  });
 
   // Confined to the project. The content is model output derived from panel responses, so a path that
   // escapes the workspace — absolute, or `..` — is refused and reported rather than written. (The
   // provider stream path hands writes to pi's own permission-gated `write` tool; this path has no such
   // gate, so it has to enforce its own.)
-  const root = (() => { try { return fs.realpathSync(process.cwd()); } catch { return process.cwd(); } })();
+  const root = (() => {
+    try {
+      return fs.realpathSync(process.cwd());
+    } catch {
+      return process.cwd();
+    }
+  })();
   const saved = [];
   const failedWrites = [];
   for (const call of files.toolCalls ?? []) {
     const target = call?.arguments?.path;
     const content = call?.arguments?.content;
-    if (!target || typeof content !== "string") { failedWrites.push(`${target ?? "(no path)"}: no content`); continue; }
-    if (path.isAbsolute(target)) { failedWrites.push(`${target}: absolute paths are refused; use a path inside the project`); continue; }
+    if (!target || typeof content !== "string") {
+      failedWrites.push(`${target ?? "(no path)"}: no content`);
+      continue;
+    }
+    if (path.isAbsolute(target)) {
+      failedWrites.push(`${target}: absolute paths are refused; use a path inside the project`);
+      continue;
+    }
     const absolute = path.resolve(root, target);
     const relative = path.relative(root, absolute);
     if (relative.startsWith("..") || path.isAbsolute(relative)) {

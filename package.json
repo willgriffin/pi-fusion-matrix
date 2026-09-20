@@ -13,7 +13,9 @@
   },
   "scripts": {
     "test": "node --test",
-    "lint:commits": "node scripts/lint-commits.mjs"
+    "lint:commits": "node scripts/lint-commits.mjs",
+    "format": "prettier --write extensions scripts test",
+    "format:check": "prettier --check extensions scripts test"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -26,6 +28,7 @@
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.3",
-    "@commitlint/config-conventional": "^21.2.3"
+    "@commitlint/config-conventional": "^21.2.3",
+    "prettier": "^3.9.8"
   }
 }

@@ -1,3 +1,9 @@
 node_modules/
 *.log
 .DS_Store
+
+# Local environment and credentials: `.envrc` was swept into a commit by `git add -A`, and a file that holds a
+# key must be impossible to commit by accident, not merely discouraged.
+.envrc
+.env
+.env.*

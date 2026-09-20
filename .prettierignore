@@ -1,0 +1,9 @@
+# Hand-wrapped prose and a hand-maintained config: the plan is written to be read in a terminal, and
+# matrix.json carries deliberate non-ASCII separators. Formatting either would churn every line of text
+# that nobody asked to change.
+docs/
+matrix.json
+README.md
+AGENTS.md
+package-lock.json
+node_modules/

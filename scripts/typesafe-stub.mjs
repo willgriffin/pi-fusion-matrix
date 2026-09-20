@@ -28,31 +28,59 @@ function answerFor(question) {
   if (question.type === "score") {
     const levels = question.criteria?.length ?? 3;
     const index = mode === "ambiguous" ? 0 : levels - 1;
-    const probabilities = Object.fromEntries(Array.from({ length: levels }, (_, i) => [String(i), i === index ? confidence : (1 - confidence) / Math.max(1, levels - 1)]));
-    return { type: "score", score: index, legend: Object.fromEntries(Array.from({ length: levels }, (_, i) => [String(i), question.criteria[i]])), probabilities, confidence };
+    const probabilities = Object.fromEntries(
+      Array.from({ length: levels }, (_, i) => [String(i), i === index ? confidence : (1 - confidence) / Math.max(1, levels - 1)]),
+    );
+    return {
+      type: "score",
+      score: index,
+      legend: Object.fromEntries(Array.from({ length: levels }, (_, i) => [String(i), question.criteria[i]])),
+      probabilities,
+      confidence,
+    };
   }
   const ids = Object.keys(question.criteria ?? {});
   const winner = ids[0];
-  const probabilities = Object.fromEntries(ids.map((id) => [id, id === winner ? confidence : (1 - confidence) / Math.max(1, ids.length - 1)]));
+  const probabilities = Object.fromEntries(
+    ids.map((id) => [id, id === winner ? confidence : (1 - confidence) / Math.max(1, ids.length - 1)]),
+  );
   return { type: "choice", choice: winner, probabilities, confidence };
 }
 
 const server = http.createServer((req, res) => {
-  const send = (code, body) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
+  const send = (code, body) => {
+    res.writeHead(code, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  };
   if (req.method === "GET" && req.url === "/health") return send(200, { status: "ok", mode, models: ["jev-stub"] });
   if (req.method === "POST" && req.url === "/__mode") {
     let body = "";
-    req.on("data", (chunk) => { body += chunk; });
-    req.on("end", () => { try { mode = JSON.parse(body).mode ?? mode; } catch { /* keep */ } send(200, { mode }); });
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      try {
+        mode = JSON.parse(body).mode ?? mode;
+      } catch {
+        /* keep */
+      }
+      send(200, { mode });
+    });
     return;
   }
   if (req.method !== "POST" || !req.url?.startsWith("/v1/systemone")) return send(404, { error: "not found" });
 
   let body = "";
-  req.on("data", (chunk) => { body += chunk; });
+  req.on("data", (chunk) => {
+    body += chunk;
+  });
   req.on("end", () => {
     let payload;
-    try { payload = JSON.parse(body); } catch { return send(400, { error: "invalid json" }); }
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return send(400, { error: "invalid json" });
+    }
     if (!payload.state || !payload.questions || !payload.model) return send(422, { error: "state, model and questions are required" });
     const answers = {};
     for (const [id, question] of Object.entries(payload.questions)) answers[id] = answerFor(question);

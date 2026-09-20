@@ -19,7 +19,10 @@ import { runDoctor, formatFindings, repairSnippet } from "../extensions/pi-fusio
 
 const args = process.argv.slice(2);
 const has = (flag) => args.includes(`--${flag}`);
-const value = (name, fallback) => { const i = args.indexOf(`--${name}`); return i === -1 ? fallback : args[i + 1]; };
+const value = (name, fallback) => {
+  const i = args.indexOf(`--${name}`);
+  return i === -1 ? fallback : args[i + 1];
+};
 
 const cwd = value("cwd", process.cwd());
 let loaded;

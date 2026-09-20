@@ -17,7 +17,7 @@ export default {
       // modules
       "config", "resolve", "pipeline", "decide", "doctor", "run", "labels", "index",
       // operator tools and repository furniture
-      "scripts", "tools", "docs", "tests", "ci", "deps",
+      "scripts", "tools", "docs", "tests", "ci", "deps", "format", "lint",
       // concerns, as the log already uses them
       "proxy", "review", "route", "cascade", "seats", "streaming", "telemetry", "security",
     ]],
