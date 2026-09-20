@@ -12,7 +12,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { loadMatrixConfig, validateConfig, harnessName, REPO_ROOT } from "./config.js";
+import { loadMatrixConfig, validateConfig, harnessName, executorOf, executorThinking, HARNESS_THINKING, REPO_ROOT } from "./config.js";
 import { loadPi, loadTypebox, makeCallModel, createFusionStream } from "./run.js";
 import { createDecide } from "./decide.js";
 import { runDoctor, formatFindings, repairSnippet, EXIT } from "./doctor.js";
@@ -78,22 +78,43 @@ export default async function (pi) {
   const providerId = config.providerId ?? "fusion-matrix";
   const fusionIds = Object.keys(config.fusions);
 
+  /**
+   * The model pi registers for a fusion. A fusion with an execute face advertises the executor's
+   * numbers and capability rather than a facade: the harness sizes its context budget from
+   * `contextWindow` and reads `maxTokens` to tell a truncated answer from a finished one
+   * (`_checkCompaction`'s `isRecoverableLength`), so an 8192 default in front of a 384K-output model
+   * either clips an edit or sends the loop recovering from a truncation that never happened. The alias
+   * declares them because registration runs before any session exists to resolve a catalogue template,
+   * and its declared numbers win; `fusion.model` is the fallback, and all there is for a fusion that
+   * only deliberates.
+   */
+  const registeredModel = (id) => {
+    const fusion = config.fusions[id];
+    const executor = executorOf(config, fusion);
+    const alias = executor ? config.aliases?.[executor.alias] : undefined;
+    return {
+      id,
+      name: fusion.name ?? `Fusion · ${id}`,
+      api: "fusion-matrix",
+      provider: providerId,
+      // A deliberation seat's level comes from config per persona, so a fusion with no execute face
+      // advertises none — the pre-Step-8 value. A proxying fusion has to let the harness pass
+      // `--thinking` through, which pi and omp both gate on this flag, so it advertises the executor's
+      // own capability unless that alias declares otherwise.
+      reasoning: executor ? (alias?.reasoning ?? true) : false,
+      input: ["text"],
+      contextWindow: alias?.contextWindow ?? fusion.model?.contextWindow ?? 128000,
+      maxTokens: alias?.maxTokens ?? fusion.model?.maxTokens ?? 8192,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    };
+  };
+
   pi.registerProvider(providerId, {
     name: config.providerName ?? "Fusion Matrix",
     baseUrl: "http://127.0.0.1:1/unused",   // never used: only our own api id matches these models
     apiKey: "unused",                       // provider-composer requires apiKey or oauth
     api: "fusion-matrix",
-    models: fusionIds.map((id) => ({
-      id,
-      name: config.fusions[id].name ?? `Fusion · ${id}`,
-      api: "fusion-matrix",
-      provider: providerId,
-      reasoning: false,
-      input: ["text"],
-      contextWindow: config.fusions[id].model?.contextWindow ?? 128000,
-      maxTokens: config.fusions[id].model?.maxTokens ?? 8192,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    })),
+    models: fusionIds.map(registeredModel),
     streamSimple: (model, context, options) => streamForSession(options?.sessionId)(model, context, options),
   });
 
@@ -189,7 +210,14 @@ export default async function (pi) {
       lines.push("fusions:");
       for (const [id, fusion] of Object.entries(config.fusions)) {
         const roster = Object.entries(fusion.candidates ?? {}).map(([persona, list]) => `${persona}=${list.map((c) => (typeof c === "string" ? c : c.alias ?? "decision")).join("/")}`).join(" ");
-        lines.push(`  ${id}: ${fusion.mode}${fusion.fileAgent ? " +fileAgent" : ""}${fusion.route ? " +route" : ""}${fusion.verify ? " +verify" : ""}\n    ${roster}`);
+        // The other face of the same definition: which alias answers a tool-bearing turn, and at what
+        // level. A `—` is a fusion whose mode writes nothing, so every turn it gets deliberates.
+        const executor = executorOf(config, fusion);
+        const level = executorThinking(config, fusion);
+        const executes = executor
+          ? `${executor.alias} @${level ?? HARNESS_THINKING}${executor.declared ? " (proxy alias)" : ` (writing seat${executor.persona ? ` ${executor.persona}` : ""})`}`
+          : "— (no writing seat; every turn deliberates)";
+        lines.push(`  ${id}: ${fusion.mode}${fusion.fileAgent ? " +fileAgent" : ""}${fusion.route ? " +route" : ""}${fusion.verify ? " +verify" : ""}\n    ${roster}\n    executes: ${executes}`);
       }
       lines.push("");
       lines.push("aliases:");

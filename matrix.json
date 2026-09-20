@@ -12,12 +12,16 @@
     },
     "glm-flash": {
       "model": "glm-5.3-flash",
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
       "providers": [
         "opencode-go"
       ]
     },
     "kimi": {
       "model": "kimi-k3",
+      "contextWindow": 1048576,
+      "maxTokens": 131072,
       "providers": [
         "opencode-go",
         {
@@ -28,6 +32,8 @@
     },
     "deepseek-flash": {
       "model": "deepseek-v4.1-flash",
+      "contextWindow": 1000000,
+      "maxTokens": 384000,
       "providers": [
         "opencode-go"
       ]
@@ -46,6 +52,8 @@
     },
     "qwen-flash": {
       "model": "qwen3.8-flash",
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
       "providers": [
         "opencode-go"
       ]

@@ -1,8 +1,10 @@
 /**
  * doctor.js — reconcile configuration against reality.
  *
- * Four checks, and the exit status separates "broken" from "out of date" so CI and a pre-run hook can
- * tell the difference: 0 clean, 1 config errors, 2 connectivity, 3 reachability or drift.
+ * Five checks, and the exit status separates "broken" from "out of date" so CI and a pre-run hook can
+ * tell the difference: 0 clean, 1 config errors, 2 connectivity, 3 reachability or drift. The fifth —
+ * whether a fusion's executor alias declares the model metadata its registered model advertises — is
+ * informational, like the single-route note: it is a config decision the operator made, not a fault.
  *
  * Rules this file obeys, from the spec's no-silent-degradation invariant:
  *   - repairs are additive only: an id may be offered for pi's own picker, an alias's `model` never
@@ -14,7 +16,7 @@
  *     not repaired.
  */
 
-import { validateConfig } from "./config.js";
+import { validateConfig, executorOf } from "./config.js";
 import { providerStatus } from "./resolve.js";
 
 export const EXIT = { clean: 0, config: 1, connect: 2, drift: 3 };
@@ -86,6 +88,23 @@ export async function runDoctor({ config, sources, registry, online = false, fet
   for (const [name, count] of Object.entries(routesPerAlias)) {
     if (count === 1) {
       add("info", "connect", `alias "${name}" has a single route, so a quota or outage on ${refId((aliases[name].providers ?? [])[0])} has no fallback`);
+    }
+  }
+
+  // ---- registered metadata (offline) ----
+  // A fusion with an execute face advertises its executor's numbers to the harness, which sizes its
+  // context budget from `contextWindow` and reads `maxTokens` to tell a truncated answer from a finished
+  // one. An alias that declares neither leaves the registered model on the 128000/8192 default — the
+  // facade that either clips an edit or makes the loop recover from a truncation that never happened —
+  // so re-pointing a writer at an alias whose numbers nobody wrote down is reported here rather than
+  // discovered mid-turn. It is a finding, never a repair: the numbers are a decision about that model.
+  for (const [id, fusion] of Object.entries(config.fusions ?? {})) {
+    const executor = executorOf(config, fusion);
+    if (!executor) continue;
+    const missing = ["contextWindow", "maxTokens"].filter((field) => aliases[executor.alias]?.[field] === undefined && fusion.model?.[field] === undefined);
+    if (missing.length > 0) {
+      add("info", "metadata", `fusion "${id}" executes as "${executor.alias}", which declares no ${missing.join(" and no ")}, so its registered model advertises the package default for ${missing.length > 1 ? "both" : "it"}`,
+        `declare ${missing.map((field) => `\`aliases.${executor.alias}.${field}\``).join(" and ")} from that model's own limits`);
     }
   }
 
