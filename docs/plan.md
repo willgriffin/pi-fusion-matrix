@@ -1368,11 +1368,14 @@ backend's state budget (its head and tail — the panel gets it whole), and a re
 that does not contain the diff is not a review.
 
 **The panels answer findings as data.** The three review personas (`review-skeptic`, `review-technical`,
-`review-systems`) are `output: "json"` and answer the same schema the disposition validates, so each seat's
-findings ride *its own* seat record (`details.seats[].findings`) beside the model that raised them. That is what
+`review-systems`) are `output: "json"` and answer the same schema the disposition validates, and their rung
+declares them alongside the synthesis it ends on — which is what makes each seat's findings ride *its own* seat
+record (`details.seats[].findings`) beside the model that raised them. That is what
 makes a model and what it found a single lookup, accumulated over every session the store holds — see the
 report's seats-by-model section — instead of something only a reader of the transcript can know. What the run
-*itself* concludes is still the synthesis's: a panel seat's findings are evidence, not the disposition.
+*itself* concludes is still the synthesis's: a panel seat's findings are evidence, not the disposition, and the
+declaration is deliberately the *set* of seats the rung judges rather than a single name — a one-name declaration
+would drop the panels' findings from the store and with them the seat's own record of what it found.
 
 **The verify bar is per question, and the review rungs are calibrated.** `question.warnBelow` (default 0.5) is
 the value below which a `noul` answer raises a warning, and it has to be per question because one backend scores
@@ -1804,7 +1807,16 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     red (the whole declared machinery collapses), and with it hard-coded to `true` — the old, shape-inferred
     behaviour — exactly the two new checks go red and each names what it caught. The three packaged review rungs
     declare their seats — each exactly the seats its own mode runs, whose last stage seat is the synthesis — and
-    `review-quick` declares the two its single-seat mode runs rather than the committee's four.
+    `review-quick` declares the two its single-seat mode runs rather than the committee's four. Each load rule is
+    mutation-proven on a copy of the tree: disabling one reddens the rules test alone and the failure names that
+    rule's own fixture — the empty list, a name the mode does not run, a name whose answer is not JSON, a list
+    without the last stage seat, a mode that writes no single answer, `review: true` without a declaration, or a
+    review route to a rung that declares none. Two further mutations are reported as they behave rather than as
+    they were hoped to: dropping the non-array guard makes `personas: null` throw inside the validator instead of
+    failing with a named error (which is why the guard is there), and removing `review-quick`'s declaration
+    reddens three checks because the router's route target loses the declaration rule 7 requires of it. The
+    declaration is a *list*, not a single name: `personas` in the plural, with the singular spelling and a bare
+    string both named load errors, since `"review-synth"` would otherwise iterate its own letters.
 
 ## Assumptions & contingencies
 

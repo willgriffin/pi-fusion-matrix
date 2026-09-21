@@ -66,6 +66,18 @@ test("every disposition rule is a named load error", () => {
       { fusions: { "review-quick": { disposition: { personas: null } } } },
       /disposition needs a non-empty personas list/,
     ],
+    // A *list* of names, not a name: a string would iterate its own letters. The issue's own spelling
+    // (`persona`) has to fail with the key that is read rather than pass as an unknown extra key.
+    [
+      "a names value that is not a list",
+      { fusions: { "review-quick": { disposition: { personas: "review-synth" } } } },
+      /disposition needs a non-empty personas list/,
+    ],
+    [
+      "the singular spelling",
+      { fusions: { quick: { disposition: { persona: "technical" } } } },
+      /disposition needs a non-empty personas list/,
+    ],
     [
       "a persona the mode does not run",
       { fusions: { "review-quick": { disposition: { personas: ["review-skeptic", "review-synth", "judge"] } } } },
@@ -83,6 +95,11 @@ test("every disposition rule is a named load error", () => {
       "a declaration that leaves out the last stage seat",
       { fusions: { "review-quick": { disposition: { personas: ["review-skeptic"] } } } },
       /disposition must name the mode's last stage seat "review-synth"/,
+    ],
+    [
+      "a declaration on a mode that writes no single answer",
+      { fusions: { debate: { disposition: { personas: ["technical"] } } } },
+      /disposition needs a writing seat — mode "debate" ends in no single seat/,
     ],
     [
       "a review rung with no declaration",
