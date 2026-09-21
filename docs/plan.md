@@ -1515,12 +1515,17 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    `node scripts/typesafe-probe.mjs --backend https://api.typesafe.ai/v1/systemone`; it must exit 0 and
    print the answering `model` (`jev-1.13.0`). Then run `review-check` live
    (`/matrix review-check "…"`) and confirm
-   `details.verification[].result` carries three typed answers (`noul`, `noul`, `choice`) and that each
+   `details.verification[].result` carries three typed answers (`noul`, `noul`, `noul`) and that each
    `choice`/`score` answer has `confidence`. A `401` here means the key is absent or wrong, not that
    the wiring is broken. **Verified live 2026-09-18**: the probe exits 0 printing `jev-1.13.0`, and a
    live `review-check` run cascaded (`decision insufficient (agrees, conf 0.81, needs >= 0.85)` → the
    judge ran → the synthesis answered), with verify reporting `grounded_in_panel=0.22` and
-   `contradiction_handling=ignores` as two warnings that changed nothing.
+   `contradiction_handling=ignores` as two warnings that changed nothing. **Amended 2026-09-21**: that
+   second question is now `engages_disagreement`, a `noul` score with a `warnBelow` bar. A `choice`
+   answer cannot carry a bar, and the review policy that reads these records treats a choice result such
+   as `ignores` as a review that *cannot* be clean rather than as a warning — so the same signal is asked
+   for as a score, which both readers can calibrate. The live sentence above stands as what that run
+   reported; the question it names no longer exists.
 10. **Conservative invariants** — (a) temporarily set `verify[0]` to a question the synthesis cannot
    satisfy (for example `noul` "the answer contains the exact phrase BANANA") and confirm the run
    still completes with one `⚠️ verify:` delta and an unchanged synthesis — verification must never

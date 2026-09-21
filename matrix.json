@@ -551,14 +551,14 @@
                 "false": "Contains claims with no support in the deliberation"
               }
             },
-            "contradiction_handling": {
-              "type": "choice",
-              "instructions": "How the answer handles the judge's contradictions.",
+            "engages_disagreement": {
+              "type": "noul",
+              "instructions": "The answer engages with the judge's contradictions: it resolves them, or says why it cannot, rather than passing over them.",
               "criteria": {
-                "resolves": "Picks a side and says why",
-                "acknowledges": "Notes the disagreement without choosing",
-                "ignores": "Does not mention it"
-              }
+                "true": "Resolves the disagreement, or names it and says why it stands",
+                "false": "Passes over the disagreement"
+              },
+              "warnBelow": 0.35
             }
           }
         }
