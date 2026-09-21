@@ -41,13 +41,13 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_ROOTS = [
+export const DEFAULT_ROOTS = [
   { harness: "pi", root: path.join(os.homedir(), ".pi/agent/sessions") },
   { harness: "omp", root: path.join(os.homedir(), ".omp/agent/sessions") },
 ];
 
 /** The api id every fusion model is registered under, so a turn names the fusion that served it. */
-const FUSION_API = "fusion-matrix";
+export const FUSION_API = "fusion-matrix";
 /**
  * The harness a session file belongs to, from where it lives. Reading one file explicitly (`--session <file>`)
  * must not lose it: the device-protocol rewrite is gated on omp, and a file handed to the reader from omp's
@@ -388,6 +388,10 @@ export function extractSession(entries, meta = {}) {
         usage,
         priced,
         durationMs: Number.isFinite(message.duration) ? message.duration : undefined,
+        // omp records a time-to-first-token alongside `duration`; the report prints neither yet, but the
+        // metrics store's turn row does (#14), so the reader captures it — a field the reader drops is a
+        // field no consumer can ever ask for.
+        ttftMs: Number.isFinite(message.ttft) ? message.ttft : undefined,
         toolCalls: callParts.map((call) => call.name),
         toolCallParts: callParts.map((call, index) => ({ id: parts[index]?.id, name: call.name, device: call.device })),
         at: message.timestamp ?? entry.timestamp,
@@ -908,7 +912,7 @@ export function aggregate(sessions) {
  * the session's tree). One implementation, because two readers now ask the question — the run's disposition and
  * each seat's own findings — and two answers to "is this path real?" would be one too many.
  */
-const pathClaim = (finding, cwd) => {
+export const pathClaim = (finding, cwd) => {
   const where = typeof finding?.path === "string" && finding.path ? finding.path : undefined;
   if (where === undefined) return { where, found: undefined, outside: false };
   // The claim has to *resolve inside* the session's tree to be checkable at all. An absolute path never is, and
@@ -921,7 +925,7 @@ const pathClaim = (finding, cwd) => {
 };
 
 /** Whether a finding asserts a claim at all — a path, a criterion and a claim, which is the schema's contract. */
-const isFinding = (value) =>
+export const isFinding = (value) =>
   Boolean(
     value &&
     typeof value === "object" &&
@@ -937,7 +941,7 @@ const isFinding = (value) =>
  * may reword its claim, so comparing claims would report every finding dropped. A finding the disposition does
  * not carry at its location is one the synthesis declined — the number a roster decision is argued from.
  */
-const sameFinding = (finding) => `${finding.path}:${finding.line ?? ""}`;
+export const sameFinding = (finding) => `${finding.path}:${finding.line ?? ""}`;
 
 const median = (sorted) => (sorted.length === 0 ? undefined : sorted[Math.floor(sorted.length / 2)]);
 const num = (n) => new Intl.NumberFormat("en-US").format(Math.round(n));
