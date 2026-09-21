@@ -581,7 +581,7 @@ export function aggregate(sessions) {
     // never counted twice and no item's label is absorbed into another's row.
     const items = [...new Set(session.labels.map((entry) => entry.workItem))];
     const attributesto = session.labels.at(-1)?.workItem;
-    for (const item of items) {
+    const ensureRow = (item) => {
       if (!report.labels.has(item)) {
         report.labels.set(item, {
           workItem: item,
@@ -595,28 +595,62 @@ export function aggregate(sessions) {
           attributedTo: undefined,
         });
       }
-      const row = report.labels.get(item);
+      return report.labels.get(item);
+    };
+    // Runs that name their own work item are attributed from the *record*, before any label is consulted. That
+    // is the whole point of the field: a review runner launched for #21 has a session nobody can type a command
+    // into, and its cost has to land on #21 anyway. A work item with runs and no outcome prints `?` rather than
+    // disappearing or being counted as a success.
+    const selfAttributed = session.records.filter((record) => typeof record.details?.workItem === "string" && record.details.workItem);
+    for (const record of selfAttributed) {
+      const row = ensureRow(record.details.workItem);
+      row.runs += 1;
+      row.fusionTurns += record.carrier === "assistant" ? 1 : 0;
+      addUsage(row.sums, record.details.usage);
+      row.fusions.set(record.fusion, (row.fusions.get(record.fusion) ?? 0) + 1);
+    }
+    // What is left belongs to the session's own label, if it has one. The sums are recomputed rather than
+    // reused: a *streamed* run's record repeats the usage its message already carried, so the message of a
+    // self-attributed record is excluded by the `at` the two share — otherwise the same tokens would be
+    // counted on the work item and on the session.
+    const selfAttributedAt = new Set(selfAttributed.filter((record) => record.carrier === "assistant").map((record) => record.at));
+    const rest = session.records.filter((record) => !selfAttributed.includes(record));
+    const restSums = emptySums();
+    let restTurns = 0;
+    for (const t of session.turns) {
+      if (t.api !== FUSION_API) continue;
+      if (selfAttributedAt.has(t.at)) continue;
+      restTurns += 1;
+      addUsage(restSums, t.usage);
+    }
+    for (const record of rest) {
+      if (record.carrier === "assistant") continue;
+      addUsage(restSums, record.details?.usage);
+    }
+    for (const item of items) {
+      const row = ensureRow(item);
       row.sessions += 1;
       for (const entry of session.labels) if (entry.workItem === item) row.outcomes.push({ ...entry });
       if (item === attributesto) {
         // This item *is* the endpoint here, so a note from an earlier session's redirection is stale: leaving
         // it would print "runs counted under #15" on a row that counts its own runs.
         row.attributedTo = undefined;
-        row.runs += session.records.length;
-        row.fusionTurns += fusionTurns;
-        mergeSums(row.sums, fusionSums);
-        for (const record of session.records) row.fusions.set(record.fusion, (row.fusions.get(record.fusion) ?? 0) + 1);
+        row.runs += rest.length;
+        row.fusionTurns += restTurns;
+        mergeSums(row.sums, restSums);
+        for (const record of rest) row.fusions.set(record.fusion, (row.fusions.get(record.fusion) ?? 0) + 1);
         for (const other of items) if (other !== item) row.alsoLabelled.push(other);
       } else {
         row.attributedTo = attributesto;
       }
     }
-    if (!attributesto && session.records.length > 0) {
-      // A run nobody labelled is counted as unlabelled, never assumed to have gone well.
+    if (rest.length > 0 && !attributesto) {
+      // A run nobody labelled — and that did not name its own work item — is counted as unlabelled, never
+      // assumed to have gone well.
       report.unlabelled.sessions += 1;
-      report.unlabelled.runs += session.records.length;
-      report.unlabelled.fusionTurns += fusionTurns;
-      mergeSums(report.unlabelled.sums, fusionSums);
+      report.unlabelled.runs += rest.length;
+      report.unlabelled.fusionTurns += restTurns;
+      mergeSums(report.unlabelled.sums, restSums);
     }
 
     for (const entry of session.records) {
@@ -1924,6 +1958,114 @@ async function check() {
     "a label missing half of itself is unrecognised, not counted as a label",
     labelled.labels.length === 2 && labelled.unknown.length === 1 && labelledReport.labels.size === 1,
     JSON.stringify({ labels: labelled.labels.length, unknown: labelled.unknown.length }),
+  );
+
+  // A run that names its own work item, in a session nobody labelled: a review runner launched for one piece of
+  // work has a session no command can be typed into, so the item travels on the record and the report attributes
+  // the run from there. Its outcome is unknown, and says so rather than reading as a success.
+  const selfAttributed = extractSession(
+    [
+      sessionMeta,
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          api: FUSION_API,
+          provider: "fusion-matrix",
+          model: "smrt-review",
+          timestamp: "2026-09-20T10:00:00.000Z",
+          usage: usage(500, 60, 0.004),
+          content: [],
+          details: {
+            fusion: "smrt-review",
+            seats: [],
+            seatErrors: [],
+            cascades: [],
+            durationMs: 1000,
+            workItem: "#21",
+            usage: usage(500, 60, 0.004),
+          },
+        },
+      },
+      {
+        type: "custom_message",
+        customType: "matrix-answer",
+        content: "a run through the tool path",
+        display: true,
+        timestamp: "2026-09-20T10:05:00.000Z",
+        details: { fusion: "review-check", seats: [], seatErrors: [], cascades: [], workItem: "#21", usage: usage(200, 20, 0.001) },
+      },
+    ],
+    { file: "self-attributed.jsonl", harness: "omp" },
+  );
+  const selfReport = buildReport({ sessions: [selfAttributed], roots: [], unreadable: [] });
+  const selfRow = selfReport.labels.get("#21");
+  const selfText = render(selfReport);
+  ok(
+    "a run that names its own work item is attributed to it, with its cost, and no label",
+    selfRow?.runs === 2 &&
+      selfRow?.outcomes.length === 0 &&
+      Math.abs(selfRow.sums.costReported - 0.005) < 1e-9 &&
+      selfRow.fusions.get("smrt-review") === 1 &&
+      selfRow.fusions.get("review-check") === 1,
+    JSON.stringify({ runs: selfRow?.runs, cost: selfRow?.sums.costReported, fusions: selfRow && Object.fromEntries(selfRow.fusions) }),
+  );
+  ok(
+    "a work item with runs and no outcome is shown as `?`, not dropped and not a success",
+    /\s#21\s+\?\s/.test(selfText) && /#21/.test(selfText) && !/\(unlabelled\)/.test(selfText),
+    selfText
+      .split("\n")
+      .filter((l) => l.includes("#21"))
+      .join(" // ") || "no #21 row",
+  );
+  // The streamed run's record repeats the usage its message carries: attributing both would count the same
+  // tokens on the work item and on the session, which is the double-count this reader exists to avoid.
+  const bothSession = extractSession(
+    [
+      sessionMeta,
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          api: FUSION_API,
+          provider: "fusion-matrix",
+          model: "quick",
+          timestamp: "2026-09-20T11:00:00.000Z",
+          usage: usage(300, 30, 0.003),
+          content: [],
+          details: {
+            fusion: "quick",
+            seats: [],
+            seatErrors: [],
+            cascades: [],
+            durationMs: 900,
+            workItem: "#30",
+            usage: usage(300, 30, 0.003),
+          },
+        },
+      },
+      {
+        type: "custom_message",
+        customType: "matrix-label",
+        content: "#22 — review",
+        display: true,
+        details: { workItem: "#22", outcome: "review" },
+      },
+    ],
+    { file: "both.jsonl", harness: "omp" },
+  );
+  const bothReport = buildReport({ sessions: [bothSession], roots: [], unreadable: [] });
+  ok(
+    "a self-attributed run is not also counted on the session's label",
+    bothReport.labels.get("#30")?.runs === 1 &&
+      Math.abs(bothReport.labels.get("#30")?.sums.costReported - 0.003) < 1e-9 &&
+      (bothReport.labels.get("#22")?.runs ?? 0) === 0 &&
+      Math.abs(bothReport.labels.get("#22")?.sums.costReported ?? 0) < 1e-9,
+    JSON.stringify({
+      attributed: bothReport.labels.get("#30")?.sums.costReported,
+      labelled: bothReport.labels.get("#22")?.sums.costReported,
+      labelledRuns: bothReport.labels.get("#22")?.runs,
+    }),
   );
   ok(
     "a session with runs and no label is counted as unlabelled, never assumed fine",

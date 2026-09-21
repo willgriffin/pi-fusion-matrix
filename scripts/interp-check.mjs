@@ -939,11 +939,12 @@ check(
 // are the two surfaces a user sees before any run, and both follow from the executor rule.
 const registered = new Map();
 const commands = new Map();
+const tools = new Map();
 const sentMessages = [];
 const stubApi = {
   on: () => {},
   registerProvider: (id, definition) => registered.set(id, definition),
-  registerTool: () => {},
+  registerTool: (definition) => tools.set(definition.name, definition),
   registerCommand: (name, definition) => commands.set(name, definition),
   sendMessage: async (message, options) => {
     sentMessages.push({ message, options });
@@ -1104,6 +1105,42 @@ check(
     sentMessages.at(-1).message.details?.outcome === "review" &&
     sentMessages.at(-1).message.details?.evidence === undefined,
   JSON.stringify(sentMessages.at(-1)?.message?.details),
+);
+
+// The same label through the *tool*, because a label nobody has to remember to type is the point: an agent
+// records the outcome itself at the moment it knows one. One implementation, two front doors — asserted by
+// driving both and comparing what they wrote, since two implementations would drift the moment one changed.
+const commandWritten = sentMessages.at(-1).message;
+const toolLabel = tools.get("matrix-label");
+const toolResult = await toolLabel.execute("call_1", { workItem: "#12", outcome: "review", evidence: `#12 review` }, undefined, undefined, {
+  ui: { notify },
+});
+const toolWritten = sentMessages.at(-1).message;
+check(
+  "matrix-label: the tool writes exactly what the command writes",
+  sentMessages.at(-1).message !== commandWritten &&
+    toolWritten?.customType === "matrix-label" &&
+    toolWritten.details?.workItem === "#12" &&
+    toolWritten.details?.outcome === "review" &&
+    toolWritten.details?.evidence === "#12 review" &&
+    sentMessages.at(-1)?.options?.triggerTurn === false &&
+    /#12 — review/.test(String(toolWritten.content)) &&
+    toolLabel.parameters?.required?.includes("workItem") &&
+    toolLabel.parameters?.properties?.outcome?.enum?.includes("landed"),
+  JSON.stringify({ tool: toolWritten?.details, required: toolLabel?.parameters?.required }),
+);
+check(
+  "matrix-label: the tool reports what it recorded, and refuses what the vocabulary does not have",
+  /recorded #12 — review/.test(toolResult?.content?.[0]?.text ?? "") &&
+    toolResult?.details?.outcome === "review" &&
+    sentMessages.length === labelsBefore + 3,
+  JSON.stringify(toolResult?.details),
+);
+const refused = await toolLabel.execute("call_2", { workItem: "#12", outcome: "shipped" }, undefined, undefined, { ui: { notify } });
+check(
+  "matrix-label: the tool refuses an outcome outside the vocabulary, and writes nothing",
+  sentMessages.length === labelsBefore + 3 && /no label written: outcome must be one of/.test(refused?.content?.[0]?.text ?? ""),
+  refused?.content?.[0]?.text ?? "no result",
 );
 
 /* ------------------------------------------------------------ review findings */

@@ -1065,15 +1065,24 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
   counted *and* named with its file, line number and reason, and the first ten of every diagnostic list are
   followed by an omitted-count marker. A reader that silently skipped any of these would make a missing
   record look like a clean run;
-- **the outcome is a label, not an inference.** `/matrix-label <work-item> <outcome> [evidence]` records what
-  the session's runs were for and how they ended, as a `matrix-label` custom message: an append-only label
-  whose latest entry is the current outcome, so a session that was in review and then landed carries both.
-  The vocabulary is closed (`landed`, `review`, `findings`, `ci-red`, `blocked`, `abandoned`) because a
-  free-text outcome cannot be counted, and an unrecognised one is refused without writing anything. The
-  label is the one fact a run cannot know about itself: the report joins it to the runs, their fusion turns
-  and their cost, and counts a session that produced runs without a label as **unlabelled** rather than
-  assuming it went well. A hand-written label missing either half is named as an unrecognised shape, not
-  counted;
+- **the outcome is a label, and the work item is not.** Two halves, and only one of them needs a human.
+  **The work item travels on the run**: the `matrix` tool takes an optional `workItem`, and `MATRIX_WORK_ITEM`
+  supplies one for a whole process — the shape a review runner has, launched for a known piece of work in a
+  session nobody can type a command into. It lands in `details.workItem`, and the report attributes a run from
+  the *record* first, falling back to the session's label. That is what makes a review run's cost land on the
+  issue it reviewed without anyone remembering anything.
+  **The outcome is written by two front doors over one implementation**: `/matrix-label <work-item> <outcome>
+  [evidence]` for a person, and a `matrix-label` **tool** for an agent, so the agent records the outcome at the
+  moment it knows one instead of a human being asked to type it afterwards. Either writes a `matrix-label`
+  custom message — an append-only label whose latest entry is the current outcome, so a session that was in
+  review and then landed carries both — and the vocabulary is closed (`landed`, `review`, `findings`, `ci-red`,
+  `blocked`, `abandoned`) because a free-text outcome cannot be counted. An unrecognised one is refused without
+  writing anything, by both doors. The label is the one fact a run cannot know about itself: the report joins
+  it to the runs, their fusion turns and their cost, counts a session that produced runs without a label as
+  **unlabelled** rather than assuming it went well, and shows a work item that has runs and no outcome as `?` —
+  counted and visible, never dropped and never a success. A hand-written label missing either half is named as
+  an unrecognised shape, not counted. A run's cost is attributed **once**: a streamed run's record repeats the
+  usage its message carries, so the message of a self-attributed record is excluded by the `at` the two share;
 - **it reads what omp recorded, rather than what omp's record looks like.** omp invokes an extension tool
   through its `xd://` device protocol: the call is stored as `write` (or `read`, for reading a tool's docs)
   with `arguments.path = "xd://<tool>"`, and the result's record is wrapped one level in, as
