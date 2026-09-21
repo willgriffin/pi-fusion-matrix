@@ -1809,10 +1809,10 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     `{"label":"mechanical"}` as unjudged, and the new one that pins an undeclared seat's `{"verdict":"banana"}` as
     unable to make the run malformed. The declared seat answering `{"summary":"…"}` stays green under that
     mutation, because a declared seat is judged either way; the two reds are the checks that state the *scope*.
-    The three packaged review rungs declare the seats that answer findings — the three panels and the synthesis,
-    their mode's last stage seat among them — and deliberately leave the mid-panel `judge` undeclared, since its
-    `{"label":"…"}` answer is not a disposition and is what the two checks above pin.
-    `review-quick` declares the two its single-seat mode runs rather than the committee's four. Each load rule is
+    The two committee rungs declare the four seats that answer findings — the three panels and the synthesis their
+    mode's last stage ends on — and deliberately leave the mid-panel `judge` undeclared, since its `{"label":"…"}`
+    answer is not a disposition and is what the two checks above pin. `review-quick` declares the two its
+    single-seat mode runs rather than the committee's four. Each load rule is
     mutation-proven on a copy of the tree: disabling one reddens the rules test alone and the failure names that
     rule's own fixture — the empty list, a name the mode does not run, a name whose answer is not JSON, a list
     without the last stage seat, a mode that writes no single answer, `review: true` without a declaration, or a
