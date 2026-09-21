@@ -39,6 +39,7 @@ import {
   adopt,
   applyKey,
   buildState,
+  commitProposal,
   detailFor,
   diff,
   frameFor,
@@ -625,6 +626,57 @@ test("the picker scrolls to keep the option it will choose on screen", () => {
   const text = Array.from({ length: 14 }, (_, row) => gridLine(frame, row)).join("\n");
   assert.match(text, /▸ alias-39/, "the highlighted option is on screen, not scrolled past");
   assert.doesNotMatch(text, /alias-0$|▸ alias-0\b/, "and the window moved with it");
+});
+
+test("the write path re-reads the layer and the base, and refuses what it cannot stand on", async () => {
+  // The save branches were unexercised: the checks asserted the validator's return value but never
+  // called the writer, so deleting either refusal would have left the suite green. This drives
+  // `commitProposal` itself, against real files, and asserts the filesystem's state each time.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tui-save-"));
+  const file = path.join(dir, "pi-fusion-matrix.json");
+  const opts = { dbPath: path.join(dir, "no-store.db"), layerFile: file };
+  const world = { ...state(), layerFile: file, layerConfig: {} };
+  const proposal = (patch) => ({ summary: "test change", errors: [], patch, layerFile: file });
+
+  // (1) a layer that will not parse: refused, and the operator's file untouched.
+  fs.writeFileSync(file, "{ this is not json");
+  const unreadable = await commitProposal({ ...world, pending: proposal({ note: 1 }) }, opts);
+  assert.equal(unreadable.wrote, false, "an unreadable layer writes nothing");
+  assert.match(unreadable.state.message, /refused: .*does not parse as JSON/);
+  assert.equal(fs.readFileSync(file, "utf8"), "{ this is not json", "and leaves their file exactly as it was");
+
+  // (2) the layer changed on disk after the proposal was built: refused, nothing overwritten.
+  fs.writeFileSync(file, `${JSON.stringify({ aliases: { glm: { providers: ["opencode-go"] } } }, null, 2)}\n`);
+  const moved = await commitProposal({ ...world, pending: proposal({ note: 1 }) }, opts);
+  assert.equal(moved.wrote, false, "a proposal built over a layer that has since moved writes nothing");
+  assert.match(moved.state.message, /refused: the layer changed since this proposal was built/);
+  assert.equal(fs.readFileSync(file, "utf8").includes("note"), false, "so a concurrent edit is not clobbered");
+
+  // (3) a patch the loader rejects: refused before mkdir, so no file appears at all.
+  fs.rmSync(file);
+  const invalid = await commitProposal(
+    { ...world, pending: proposal({ fusions: { quick: { candidates: { technical: ["ghost"] } } } }) },
+    opts,
+  );
+  assert.equal(invalid.wrote, false, "a change the loader refuses writes nothing");
+  assert.match(invalid.state.message, /^refused: /);
+  assert.equal(fs.existsSync(file), false, "and no directory or file is created for it");
+
+  // (4) a proposal the loader accepts writes exactly the proposal, and spends the pending one.
+  const patch = { fusions: { quick: { candidates: { technical: ["kimi"] } } } };
+  const ok = await commitProposal({ ...world, pending: proposal(patch) }, opts);
+  assert.equal(ok.wrote, true, "a clean proposal is written");
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), patch, "the file is the proposal, not a merge with what was read");
+  assert.equal(ok.state.pending, null, "the pending proposal is spent");
+  assert.match(ok.state.message, /^saved: /);
+
+  // (5) a proposal that changes nothing never reaches the filesystem.
+  fs.rmSync(file);
+  const noop = await commitProposal({ ...world, pending: { ...proposal({}), saveable: false } }, opts);
+  assert.equal(noop.wrote, false, "a no-op writes nothing");
+  assert.equal(fs.existsSync(file), false, "and creates nothing");
+
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test("a proposal writes only its own path into the layer it names", () => {

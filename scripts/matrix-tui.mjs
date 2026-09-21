@@ -555,6 +555,66 @@ export const adopt = (current, reloaded) => {
   };
 };
 
+/**
+ * The one path that touches the filesystem: a proposal, written. Kept small, free of terminal
+ * concerns, and deliberately paranoid — because every guard here has to hold *at the moment of
+ * writing*, not at the moment of proposing:
+ *
+ * - the layer file is re-read from disk (an operator may have edited, corrupted or replaced it since
+ *   the interface loaded), and its content must still be the content the proposal was built over;
+ * - the base config is re-loaded (a checkout changing under us changes what the loader accepts);
+ * - the loader gives its verdict on the merged result — the same `validateConfig` that decides
+ *   whether the change is legal, not a second opinion;
+ * - only then does the write happen, and it writes the proposal, never a merge of what we just read.
+ *
+ * Each refusal returns the state it refuses with its message and `wrote: false`, so a caller — and a
+ * test — can assert that nothing was written.
+ */
+export async function commitProposal(state, { dbPath, cwd = process.cwd() } = {}) {
+  const pending = state.pending;
+  if (!pending) return { state, wrote: false };
+  if (!pending.layerFile) return { state: { ...state, message: "refused: this proposal names no layer file to write" }, wrote: false };
+  if (pending.saveable === false) return { state: { ...state, message: "nothing to write — that proposal changes nothing" }, wrote: false };
+  if (pending.errors.length > 0) return { state: { ...state, message: `refused: ${pending.errors[0]}` }, wrote: false };
+
+  const fresh = readLayer(pending.layerFile);
+  if (!fresh.ok) return { state: { ...state, message: `refused: ${fresh.reason}` }, wrote: false };
+  if (JSON.stringify(fresh.config) !== JSON.stringify(state.layerConfig)) {
+    return {
+      state: { ...state, message: "refused: the layer changed since this proposal was built — reload and propose again" },
+      wrote: false,
+    };
+  }
+
+  let base;
+  try {
+    base = loadMatrixConfig({ cwd, layers: ["packaged", "cwd"] }).config;
+  } catch (error) {
+    return { state: { ...state, message: `refused: the base config no longer loads: ${error?.message ?? String(error)}` }, wrote: false };
+  }
+  const errors = validateConfig(mergeConfig(base, pending.patch), {}).map((error) =>
+    typeof error === "string" ? error : JSON.stringify(error),
+  );
+  if (errors.length > 0) return { state: { ...state, message: `refused: ${errors[0]}` }, wrote: false };
+
+  try {
+    fs.mkdirSync(path.dirname(pending.layerFile), { recursive: true });
+    fs.writeFileSync(pending.layerFile, `${JSON.stringify(pending.patch, null, 2)}\n`);
+  } catch (error) {
+    return { state: { ...state, message: `the change could not be written: ${error?.message ?? String(error)}` }, wrote: false };
+  }
+
+  try {
+    const reloaded = await loadWorld({ dbPath, layerFile: pending.layerFile, cwd });
+    return { state: { ...adopt(state, reloaded), pending: null, message: `saved: ${pending.summary}` }, wrote: true };
+  } catch (error) {
+    return {
+      state: { ...state, pending: null, message: `saved, but the view could not be reloaded: ${error?.message ?? String(error)}` },
+      wrote: true,
+    };
+  }
+}
+
 export async function main() {
   const dbPath = value("db", DEFAULT_DB);
   const catalogue = value("catalogue", DEFAULT_CATALOGUE);
@@ -607,29 +667,9 @@ export async function main() {
   };
 
   const save = async () => {
-    const pending = state.pending;
-    if (!pending || pending.errors.length > 0) return;
-    // The loader is asked again, here, against the state as it is *now*: `pending.errors` was the answer
-    // when the change was proposed, and the layer or the base config can have moved since — by an
-    // operator's edit in another window, or by the target being switched. A validated-write contract
-    // has to hold at the moment of writing, not at the moment of proposing.
-    const now = validateAgainst(state, pending.patch);
-    if (now.length > 0) {
-      state = { ...state, message: `refused: ${now[0]}` };
-      return;
-    }
-    if (state.layerReadError) {
-      state = { ...state, message: `refused: ${state.layerReadError}` };
-      return;
-    }
-    try {
-      fs.mkdirSync(path.dirname(pending.layerFile), { recursive: true });
-      fs.writeFileSync(pending.layerFile, `${JSON.stringify(pending.patch, null, 2)}\n`);
-      const reloaded = await loadWorld({ dbPath, layerFile });
-      state = { ...adopt(state, reloaded), pending: null, message: `saved: ${pending.summary}` };
-    } catch (error) {
-      state = { ...state, message: `the change could not be written: ${error?.message ?? String(error)}` };
-    }
+    // The write itself lives in `commitProposal`: it re-reads the layer and the base config from disk
+    // immediately before writing, so this call cannot carry a stale verdict to the filesystem.
+    state = (await commitProposal(state, { dbPath })).state;
   };
 
   const reload = async (note) => {
