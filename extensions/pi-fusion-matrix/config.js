@@ -574,6 +574,32 @@ export function validateConfig(config, { sources } = {}) {
     for (const persona of Object.keys(fusion.prompts ?? {})) {
       if (!used.has(persona)) err(`fusion "${id}": prompt override for unused persona "${persona}"`);
     }
+    // Which of this fusion's seats answer *findings as data*. The fusion declares it because the schema belongs
+    // to a rung, not to an answer's shape: `{"verdict":"clean"}` from a classifier is a valid label, and an
+    // answer that omits `findings` from the seat that promised them is a failure nothing else would see.
+    if (fusion.disposition !== undefined) {
+      const declared = isObject(fusion.disposition) ? fusion.disposition.personas : undefined;
+      const stages = config.modes?.[fusion.mode]?.stages ?? [];
+      const lastSeat = stages[stages.length - 1]?.single;
+      if (!Array.isArray(declared) || declared.length === 0) {
+        err(`fusion "${id}": disposition needs a non-empty personas list`);
+      } else {
+        for (const name of declared) {
+          if (!used.has(name)) err(`fusion "${id}": disposition names "${name}", which mode "${fusion.mode}" does not run`);
+          else if (config.personas?.[name]?.output !== "json")
+            err(`fusion "${id}": disposition names "${name}", whose answer is not JSON — a disposition is parsed data`);
+        }
+        // The mode's last stage is the answer the run records, so it has to be one of them: a declaration that
+        // left it out would record no verdict for the run while judging seats whose answers nobody reads.
+        if (!lastSeat) {
+          err(
+            `fusion "${id}": disposition needs a writing seat — mode "${fusion.mode}" ends in no single seat, so no answer of it is the run's`,
+          );
+        } else if (!declared.includes(lastSeat)) {
+          err(`fusion "${id}": disposition must name the mode's last stage seat "${lastSeat}" — that is the answer the run records`);
+        }
+      }
+    }
     if (fusion.review === true) {
       if (!fusion.route) err(`fusion "${id}": review requires route — the class it answers is what selects the rung`);
       // Every route target has to be a deliberating rung too: the class changes which models run, and a target
@@ -585,7 +611,16 @@ export function validateConfig(config, { sources } = {}) {
             `fusion "${id}": review option "${option}" routes to "${target}", which declares no execute: false — a reviewer pinned to it would proxy to its writing seat instead of deliberating`,
           );
         }
+        // A review *is* a disposition: a rung that answers one and declares none would record no verdict, and
+        // the record would read as a review that found nothing.
+        if (target && !config.fusions?.[target]?.disposition) {
+          err(
+            `fusion "${id}": review option "${option}" routes to "${target}", which declares no disposition — a review whose verdict is nobody's contract is not recorded`,
+          );
+        }
       }
+      if (!fusion.disposition)
+        err(`fusion "${id}": review requires disposition — the class selects a rung, and the rung's verdict is what it is for`);
     }
     if (fusion.fileAgent && fusion.fileAgent !== false) {
       if (!fusion.fileAgent.alias || !aliases[fusion.fileAgent.alias])

@@ -147,12 +147,16 @@ function normaliseJsonSeat(text) {
 }
 
 /**
- * The severities a review finding may carry, worst first. Closed where it is recorded: a model that invents a
- * severity is kept as `unknown` rather than dropped, because a finding nobody can sort is still a finding.
+ * The severities a review finding may carry, worst first. Closed, and enforced: a finding whose severity is not
+ * one of these fails the disposition's contract (`dispositionFlaw`), because a severity nobody can sort is a
+ * finding a reader cannot triage — the disposition is recorded as malformed rather than as a clean review.
  */
 export const SEVERITIES = ["blocking", "major", "minor", "editorial"];
 
-/** Findings by severity, in the closed order, plus `unknown` for one nobody could sort. */
+/**
+ * Findings by severity, in the closed order, plus `unknown` for a count that predates the rule — an older
+ * record whose finding carried a severity this build does not know is still counted rather than dropped.
+ */
 function countSeverities(findings = []) {
   const counts = Object.fromEntries(SEVERITIES.map((severity) => [severity, 0]));
   for (const finding of findings) counts[finding.severity ?? "unknown"] = (counts[finding.severity ?? "unknown"] ?? 0) + 1;
@@ -207,16 +211,16 @@ function dispositionFlaw(value) {
  * Exported because this *is* a unit: the schema is the whole contract of a review rung's last seat, and it is
  * testable without running a pipeline.
  */
-export function dispositionOf(persona, text) {
+export function dispositionOf(persona, text, { declared = false } = {}) {
   if (persona?.output !== "json") return { text };
   const { ok, value } = parseJsonOutput(text);
   if (!ok) return { text: normaliseJsonSeat(text), malformed: "the answer was not a JSON object" };
-  // Only an answer that *claims* to be a disposition is judged by the disposition's schema. Another JSON
-  // persona's answer — a classifier's label, a summariser's object — is a valid answer to a different promise,
-  // and failing it here would be this seat's schema applied to somebody else's contract. The claim is read from
-  // the answer, not from a list of personas, so a new JSON seat is judged by the schema it actually answers to.
-  const claimsDisposition = isObject(value) && ("verdict" in value || "findings" in value);
-  if (!claimsDisposition) return { text: JSON.stringify(value, null, 2) };
+  // The schema is the *fusion's*, not the answer's: a seat its fusion declared as a disposition is judged, and
+  // judged whether or not its answer looks like one — omitting `verdict`/`findings` fails the contract the
+  // fusion declared, which is the failure an inference could not see. Every other JSON seat's answer is data for
+  // the next stage: a classifier's label is a valid answer to a different promise, and this schema is not that
+  // seat's to impose.
+  if (!declared) return { text: JSON.stringify(value, null, 2) };
   const flaw = dispositionFlaw(value);
   if (flaw) return { text: normaliseJsonSeat(text), malformed: flaw };
   return {
@@ -346,6 +350,9 @@ async function runSeatInner({
   fusionSource,
 }) {
   const seatTimeoutMs = Number.isInteger(fusion?.seatTimeoutMs) && fusion.seatTimeoutMs > 0 ? fusion.seatTimeoutMs : SEAT_TIMEOUT_MS;
+  // Whether *this* seat's answer is a disposition, according to its fusion's declaration rather than the shape
+  // of what it wrote. Read once, so both call sites below judge by the same rule.
+  const declaredDisposition = Array.isArray(fusion?.disposition?.personas) && fusion.disposition.personas.includes(personaName);
   // A fusion may override one persona's prompt. Inline text, or a path beside the layer that declared
   // the fusion — the packaged `review` synthesis override depends on this. `resolvePrompt` decides by
   // "contains a newline": right for a persona, whose prompt is normally a file, but wrong for a
@@ -611,7 +618,7 @@ async function runSeatInner({
           await new Promise((resolve) => setTimeout(resolve, 2000));
           const retried = await call(!noTemperature.has(key));
           if (retried.stopReason !== "error") {
-            const retriedDisposition = dispositionOf(persona, retried.text);
+            const retriedDisposition = dispositionOf(persona, retried.text, { declared: declaredDisposition });
             return {
               persona: personaName,
               text: retriedDisposition.text,
@@ -637,7 +644,7 @@ async function runSeatInner({
         continue;
       }
 
-      const seatDisposition = dispositionOf(persona, message.text);
+      const seatDisposition = dispositionOf(persona, message.text, { declared: declaredDisposition });
       return {
         persona: personaName,
         text: seatDisposition.text,

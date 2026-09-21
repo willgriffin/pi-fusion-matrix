@@ -646,6 +646,32 @@ check(
   JSON.stringify({ malformed: foreignJson.details.malformedAnswers, verdict: foreignJson.details.verdict }),
 );
 
+// The declaration is what makes a seat's answer a disposition. Two consequences, neither of which an inferred
+// contract could produce, and both of which the run record has to show.
+const declaredWithoutFindings = await runReviewCheck({
+  judge: { verdict: "clean", findings: [] },
+  "review-synth": { summary: "nothing to report" },
+});
+check(
+  "a declared seat that answers without verdict or findings fails its declared contract",
+  declaredWithoutFindings.details.malformedAnswers?.[0]?.persona === "review-synth" &&
+    declaredWithoutFindings.details.verdict === undefined &&
+    declaredWithoutFindings.details.findings === undefined,
+  JSON.stringify({ malformed: declaredWithoutFindings.details.malformedAnswers, verdict: declaredWithoutFindings.details.verdict }),
+);
+
+const undeclaredClaim = await runReviewCheck({
+  judge: { verdict: "banana", findings: "oops" },
+  "review-synth": { verdict: "clean", findings: [] },
+});
+check(
+  "a seat the fusion did not declare cannot make the run malformed, whatever it claims",
+  undeclaredClaim.details.malformedAnswers === undefined &&
+    undeclaredClaim.details.verdict === "clean" &&
+    undeclaredClaim.details.dispositionBy === "review-synth",
+  JSON.stringify({ malformed: undeclaredClaim.details.malformedAnswers, verdict: undeclaredClaim.details.verdict }),
+);
+
 // A malformed answer that arrives *after* a valid one wins outright; that ordering is the one that must never
 // read as clean.
 const shadowed = await runReviewCheck({ judge: { verdict: "clean", findings: [] }, "review-synth": "not a disposition at all" });

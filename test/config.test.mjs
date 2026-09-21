@@ -36,6 +36,80 @@ test("a verify question's warning bar is a number between 0 and 1, or a named lo
   }
 });
 
+test("the packaged review rungs declare their disposition seats", () => {
+  // The declaration is what makes the schema the *rung's*: these seats answer findings as data, and the mode's
+  // last stage seat is one of them, because that answer is the one the run records.
+  for (const rung of ["review-quick", "review-check", "smrt-review"]) {
+    const declared = packaged.fusions[rung].disposition?.personas ?? [];
+    const stages = packaged.modes[packaged.fusions[rung].mode].stages;
+    const lastSeat = stages[stages.length - 1].single;
+    assert.ok(declared.length > 0, `${rung} declares a disposition`);
+    assert.ok(declared.includes(lastSeat), `${rung} includes its last stage seat "${lastSeat}"`);
+    assert.ok(
+      declared.every((name) => packaged.personas[name]?.output === "json"),
+      `${rung}'s declared seats answer JSON`,
+    );
+  }
+});
+
+test("every disposition rule is a named load error", () => {
+  const rules = [
+    [
+      "an empty declaration",
+      { fusions: { "review-quick": { disposition: { personas: [] } } } },
+      /disposition needs a non-empty personas list/,
+    ],
+    // `mergeConfig` deep-merges and ignores `undefined`, so a rule that needs a key *gone* is expressed as a
+    // fusion that never had it rather than as a patch that tries to remove one.
+    [
+      "no personas key",
+      { fusions: { "review-quick": { disposition: { personas: null } } } },
+      /disposition needs a non-empty personas list/,
+    ],
+    [
+      "a persona the mode does not run",
+      { fusions: { "review-quick": { disposition: { personas: ["review-skeptic", "review-synth", "judge"] } } } },
+      /disposition names "judge", which mode "review-single" does not run/,
+    ],
+    [
+      "a persona whose answer is not JSON",
+      {
+        personas: { "review-technical": { output: "text" } },
+        fusions: { "review-quick": { disposition: { personas: ["review-skeptic", "review-synth", "review-technical"] } } },
+      },
+      /disposition names "review-technical", whose answer is not JSON/,
+    ],
+    [
+      "a declaration that leaves out the last stage seat",
+      { fusions: { "review-quick": { disposition: { personas: ["review-skeptic"] } } } },
+      /disposition must name the mode's last stage seat "review-synth"/,
+    ],
+    [
+      "a review rung with no declaration",
+      { fusions: { quick: { review: true, route: { criteria: { mechanical: { description: "x", then: "review-quick" } } } } } },
+      /review requires disposition/,
+    ],
+    [
+      "a review route to a rung that declares none",
+      {
+        fusions: {
+          "smrt-review": {
+            disposition: { personas: ["review-technical", "review-skeptic", "review-systems", "review-synth"] },
+            route: { criteria: { mechanical: { description: "x", then: "quick" }, high: { description: "y" } } },
+          },
+        },
+      },
+      /routes to "quick", which declares no disposition/,
+    ],
+  ];
+  const failed = rules.filter(([, patch, expected]) => !expected.test(errorsFor(patch).join("\n")));
+  assert.deepEqual(
+    failed.map(([name]) => name),
+    [],
+    `each rule must fire: ${rules.length} checked`,
+  );
+});
+
 test("the review rungs are calibrated and answer findings as data", () => {
   // Two config facts a reader depends on: the bar a warning is raised at (measured across eight review runs —
   // clean 0.23, real reviews 0.44–0.76 — so 0.35 separates the suspicious case instead of flagging everything),
