@@ -25,7 +25,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { aggregate, extractSession, parseLines } from "../scripts/session-report.mjs";
+import { aggregate, extractSession, isoTime, parseLines } from "../scripts/session-report.mjs";
 import {
   SCHEMA_VERSION,
   byFusion,
@@ -796,14 +796,55 @@ test("seats by fusion name the alias that answered and the routes that refused",
   const seats = byFusionSeat(db);
   const skeptic = seats.find((s) => s.fusion === "review-check" && s.persona === "review-skeptic");
   assert.equal(skeptic.seats, 1);
-  assert.deepEqual(skeptic.answered, { glm: 1 }, "the alias that answered, not just its model");
-  assert.deepEqual(skeptic.refusals, { "opencode-go": { quota: 1 }, zai: { transient: 1 } }, "every route that refused it, by reason");
+  assert.deepEqual({ ...skeptic.answered }, { glm: 1 }, "the alias that answered, not just its model");
+  // Keyed by provider *and* model: the SQL groups by both, and a provider running two models must not
+  // read as one route refusing twice. Compared as a consumer reads it, so the map's prototype is not
+  // part of the contract.
+  const refusalShape = (refusals) => Object.fromEntries(Object.entries(refusals).map(([route, reasons]) => [route, { ...reasons }]));
+  assert.deepEqual(
+    refusalShape(skeptic.refusals),
+    { "opencode-go/glm-5.3": { quota: 1 }, "zai/glm-5.3": { transient: 1 } },
+    "every route that refused it, by model and reason",
+  );
   const synth = seats.find((s) => s.persona === "review-synth");
   assert.equal(synth.seats, 1);
-  assert.deepEqual(synth.answered, { kimi: 1 });
-  assert.deepEqual(synth.refusals, {}, "a seat nobody refused has no refusals, rather than an absent row");
+  assert.deepEqual({ ...synth.answered }, { kimi: 1 });
+  assert.deepEqual({ ...synth.refusals }, {}, "a seat nobody refused has no refusals, rather than an absent row");
   db.close();
   fs.rmSync(dbPath, { force: true });
+});
+
+test("a record's clock is a string or absent, whatever the harness wrote", () => {
+  const entries = [
+    { type: "session", id: "s", cwd: "/tmp/x", timestamp: "2026-09-20T00:00:00.000Z" },
+    // omp writes epoch milliseconds on the message.
+    { type: "message", message: { role: "assistant", provider: "p", model: "m", timestamp: 1789862400000, content: [] } },
+    // A finite number outside the Date range — the shape that used to make toISOString throw and take
+    // the whole session's extraction with it.
+    { type: "message", message: { role: "assistant", provider: "p", model: "m", timestamp: 1.7e18, content: [] } },
+    // A message clock the normaliser cannot represent, with a usable one on the entry: the entry wins
+    // rather than the turn losing its time.
+    {
+      type: "message",
+      timestamp: "2026-09-20T00:00:05.000Z",
+      message: { role: "assistant", provider: "p", model: "m", timestamp: Number.NaN, content: [] },
+    },
+  ];
+  const session = extractSession(entries, { file: "f", harness: "omp" });
+
+  assert.equal(session.turns.length, 3);
+  assert.equal(session.turns[0].at, "2026-09-20T00:00:00.000Z", "epoch milliseconds became an ISO string");
+  assert.equal(typeof session.turns[0].at, "string");
+  assert.equal(session.turns[1].at, undefined, "an out-of-range epoch is absent, not a crash");
+  assert.equal(session.turns[2].at, "2026-09-20T00:00:05.000Z", "the entry's clock stands in for an unrepresentable message one");
+
+  // And the normaliser itself, at its edges.
+  assert.equal(isoTime(1789862400000), "2026-09-20T00:00:00.000Z");
+  assert.equal(isoTime("2026-09-20T00:00:00.000Z"), "2026-09-20T00:00:00.000Z");
+  assert.equal(isoTime(1.7e18), undefined);
+  assert.equal(isoTime(Number.NaN), undefined);
+  assert.equal(isoTime(undefined), undefined);
+  assert.equal(isoTime({}), undefined);
 });
 
 test("the CLI accounts for the store it built, and refuses a flag it does not take", { skip: noSqlite }, async () => {

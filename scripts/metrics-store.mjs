@@ -1428,9 +1428,22 @@ export function byProxyAlias(db) {
 }
 
 /**
+ * One route's name, for both halves of the join: the alias when the seat was configured with one, the
+ * provider/model when only that is known, and one sentinel when neither is — a consumer must not have to
+ * learn two words for "this route cannot be named".
+ */
+const routeKey = (alias, provider, model) =>
+  str(alias) ?? (str(provider) && str(model) ? `${provider}/${model}` : (str(provider) ?? "unknown"));
+
+/**
  * What each fusion's seat actually ran, route by route: the answer a seat gave (alias, provider,
  * model), how often, and every route that refused it. This is the join the routes tab is made of —
  * config says what a seat *may* walk, this says what it *did*.
+ *
+ * The two halves describe the *same* population: a seat with no persona is excluded from both (it is
+ * not a seat the per-persona view can report), and a refusal is keyed by the same route name the answer
+ * is, model included — the SQL groups by provider *and* model, and collapsing that in JavaScript would
+ * report one route refusing twice where two refused once each.
  */
 export function byFusionSeat(db) {
   const answered = db
@@ -1448,7 +1461,7 @@ export function byFusionSeat(db) {
     .prepare(
       `SELECT r.fusion AS fusion, s.persona AS persona, a.provider AS provider, a.model AS model, a.reason AS reason, COUNT(*) AS n
        FROM attempt a JOIN seat s ON s.run_id = a.run_id AND s.seq = a.seat_seq JOIN run r ON r.id = a.run_id
-       WHERE r.kind = 'deliberation' GROUP BY 1, 2, 3, 4, 5`,
+       WHERE r.kind = 'deliberation' AND s.persona IS NOT NULL GROUP BY 1, 2, 3, 4, 5`,
     )
     .all();
 
@@ -1465,8 +1478,10 @@ export function byFusionSeat(db) {
         seatMs: 0,
         reportedUsd: 0,
         unpricedSeats: 0,
-        answered: {},
-        refusals: {},
+        // Prototype-safe maps: an alias or provider named `__proto__` must count, not read back
+        // `Object.prototype` and write through to it.
+        answered: Object.create(null),
+        refusals: Object.create(null),
       });
     }
     return seats.get(key);
@@ -1479,13 +1494,13 @@ export function byFusionSeat(db) {
     entry.seatMs += a.seatMs;
     entry.reportedUsd += a.reportedUsd;
     entry.unpricedSeats += a.unpricedSeats;
-    const route = a.alias ?? (a.provider && a.model ? `${a.provider}/${a.model}` : "no route");
+    const route = routeKey(a.alias, a.provider, a.model);
     entry.answered[route] = (entry.answered[route] ?? 0) + a.seats;
   }
   for (const r of refused) {
     const entry = row(r.fusion ?? "(none)", r.persona);
-    const route = r.provider ?? "unknown";
-    entry.refusals[route] = entry.refusals[route] ?? {};
+    const route = routeKey(null, r.provider, r.model);
+    entry.refusals[route] = entry.refusals[route] ?? Object.create(null);
     entry.refusals[route][r.reason ?? "?"] = (entry.refusals[route][r.reason ?? "?"] ?? 0) + r.n;
   }
   return [...seats.values()].sort(
