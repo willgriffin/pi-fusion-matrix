@@ -610,7 +610,7 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
  * item travels in the environment, lands on the run record, and the report attributes the run from the record
  * rather than from a label that will never exist.
  */
-const workItemDetail = () => {
+export const workItemDetail = () => {
   const workItem = process.env.MATRIX_WORK_ITEM?.trim();
   return workItem ? { workItem } : {};
 };

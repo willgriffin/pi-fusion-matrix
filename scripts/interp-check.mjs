@@ -20,7 +20,7 @@ import path from "node:path";
 import { loadMatrixConfig, validateConfig } from "../extensions/pi-fusion-matrix/config.js";
 import { runPipeline } from "../extensions/pi-fusion-matrix/pipeline.js";
 import { createDecide } from "../extensions/pi-fusion-matrix/decide.js";
-import { routeFusion, verifyRun, createFusionStream } from "../extensions/pi-fusion-matrix/run.js";
+import { routeFusion, verifyRun, createFusionStream, workItemDetail } from "../extensions/pi-fusion-matrix/run.js";
 
 // The packaged layer only: a developer's machine-wide layer and a project layer would otherwise decide
 // what "N/N" means, and this check has to be the same number on every machine.
@@ -1059,6 +1059,35 @@ check(
     Number.isFinite(failedSeat.attempts?.[0]?.durationMs) &&
     failedSeat.attempts[0].durationMs >= 1,
   `attempts=${JSON.stringify(failedSeat?.attempts)}`,
+);
+
+// The *emission* shape, driven rather than hand-crafted: the environment's work item has to reach the record a
+// reader actually sees. (A review found this missing — the tests asserted how the report reads a work item while
+// nothing asserted that a run started with `MATRIX_WORK_ITEM` writes one, which is the half a review runner
+// depends on.)
+const previousWorkItem = process.env.MATRIX_WORK_ITEM;
+process.env.MATRIX_WORK_ITEM = "#99";
+try {
+  // Both halves through the path that *writes a record* — the stream — because a bare `runPipeline` is the
+  // interpreter, not the recorder, and asserting its details would prove nothing about what a reader sees.
+  const workItemProxy = await driveStream(fusionStream(makeProxyPeer([]))(fusionModel("proxy-flaky"), harnessContext, harnessOptions));
+  const workItemDeliberation = await driveStream(
+    fusionStream(makeProxyPeer([]))(fusionModel("review-check"), harnessContext, harnessOptions),
+  );
+  check(
+    "the environment's work item reaches a proxied turn's record and a deliberation's",
+    workItemProxy.final.details?.proxied?.workItem === "#99" && workItemDeliberation.final.details?.workItem === "#99",
+    JSON.stringify({ proxied: workItemProxy.final.details?.proxied?.workItem, deliberation: workItemDeliberation.final.details?.workItem }),
+  );
+} finally {
+  if (previousWorkItem === undefined) delete process.env.MATRIX_WORK_ITEM;
+  else process.env.MATRIX_WORK_ITEM = previousWorkItem;
+}
+const unattributed = await driveStream(fusionStream(makeProxyPeer([]))(fusionModel("review-check"), harnessContext, harnessOptions));
+check(
+  "with no work item in the environment, no record claims one",
+  workItemDetail().workItem === undefined && unattributed.final.details?.workItem === undefined,
+  `workItemDetail=${JSON.stringify(workItemDetail())} record=${JSON.stringify(unattributed.final.details?.workItem)}`,
 );
 
 /* ------------------------------------------------------------ the outcome label */

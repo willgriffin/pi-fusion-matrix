@@ -564,17 +564,6 @@ export function aggregate(sessions) {
     // at all and carries its cost only in the record. Counting both would double a streamed run, and counting
     // only the messages reported a `/matrix` session as costing nothing — measured 2026-09-19 on the first
     // live label run, which read `1 run(s) · $0.0000 reported` over a run that cost $0.000066.
-    const fusionSums = emptySums();
-    let fusionTurns = 0;
-    for (const t of session.turns) {
-      if (t.api !== FUSION_API) continue;
-      fusionTurns += 1;
-      addUsage(fusionSums, t.usage);
-    }
-    for (const entry of session.records) {
-      if (entry.carrier === "assistant") continue;
-      addUsage(fusionSums, entry.details?.usage);
-    }
     // A session can name more than one work item (a session that continues past one task is the normal case
     // the append-only design anticipates). Its runs and its cost are attributed **once**, to the work item it
     // ended on; the other items keep their own labels and say where their runs were counted, so a session is
@@ -602,8 +591,15 @@ export function aggregate(sessions) {
     // into, and its cost has to land on #21 anyway. A work item with runs and no outcome prints `?` rather than
     // disappearing or being counted as a success.
     const selfAttributed = session.records.filter((record) => typeof record.details?.workItem === "string" && record.details.workItem);
+    // A work item known only from run records still came from *somewhere*: counting its runs and its cost while
+    // reporting `0 sessions` is a row that contradicts itself, and "N sessions · M runs" is read by a human.
+    const selfAttributedItems = new Set();
     for (const record of selfAttributed) {
       const row = ensureRow(record.details.workItem);
+      if (!selfAttributedItems.has(record.details.workItem)) {
+        selfAttributedItems.add(record.details.workItem);
+        row.sessions += 1;
+      }
       row.runs += 1;
       row.fusionTurns += record.carrier === "assistant" ? 1 : 0;
       addUsage(row.sums, record.details.usage);
@@ -2004,11 +2000,17 @@ async function check() {
   ok(
     "a run that names its own work item is attributed to it, with its cost, and no label",
     selfRow?.runs === 2 &&
+      selfRow?.sessions === 1 &&
       selfRow?.outcomes.length === 0 &&
       Math.abs(selfRow.sums.costReported - 0.005) < 1e-9 &&
       selfRow.fusions.get("smrt-review") === 1 &&
       selfRow.fusions.get("review-check") === 1,
-    JSON.stringify({ runs: selfRow?.runs, cost: selfRow?.sums.costReported, fusions: selfRow && Object.fromEntries(selfRow.fusions) }),
+    JSON.stringify({
+      runs: selfRow?.runs,
+      sessions: selfRow?.sessions,
+      cost: selfRow?.sums.costReported,
+      fusions: selfRow && Object.fromEntries(selfRow.fusions),
+    }),
   );
   ok(
     "a work item with runs and no outcome is shown as `?`, not dropped and not a success",

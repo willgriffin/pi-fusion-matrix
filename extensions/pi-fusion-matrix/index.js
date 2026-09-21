@@ -14,7 +14,7 @@ import { LABEL_OUTCOMES, isOutcome } from "./labels.js";
 import path from "node:path";
 import process from "node:process";
 import { loadMatrixConfig, validateConfig, harnessName, executorOf, executorThinking, HARNESS_THINKING } from "./config.js";
-import { loadPi, loadTypebox, makeCallModel, createFusionStream } from "./run.js";
+import { loadPi, loadTypebox, makeCallModel, createFusionStream, workItemDetail } from "./run.js";
 import { createDecide } from "./decide.js";
 import { runDoctor, formatFindings, repairSnippet, EXIT } from "./doctor.js";
 
@@ -270,8 +270,7 @@ export default async function (pi) {
   pi.registerTool({
     name: "matrix-label",
     label: "Matrix label",
-    description:
-      "Record what this session's fusion runs were for, and how that work ended. The outcome is the half a run cannot know about itself, so it is the agent's to record as soon as it is known: `landed` when the change shipped, `review` when it is waiting for one, `findings` when a review returned something to fix, `ci-red`, `blocked`, `abandoned`.",
+    description: `Record what this session's fusion runs were for, and how that work ended. The outcome is the half a run cannot know about itself, so it is the agent's to record as soon as it is known: ${LABEL_OUTCOMES.join(", ")}.`,
     promptSnippet: "Record a work item's outcome for the session's fusion runs",
     parameters: {
       type: "object",
@@ -485,6 +484,9 @@ async function runOnce({ config, sources, fusion, prompt, getRegistry, decide, c
       notes,
       usage: run.usage,
       decisionUsage: run.decisionUsage,
+      // The tool and command paths are runs too: the work item has to reach their record exactly as it reaches
+      // the streamed path's, or a review started through the tool would be attributed by nobody.
+      ...workItemDetail(),
     },
   };
 }
