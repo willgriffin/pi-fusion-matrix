@@ -819,18 +819,22 @@ test("one aliased route is named the same on both halves, and a hostile name is 
   const dbPath = path.join(tempDir("join"), "matrix.db");
   const db = openStore(dbPath);
   db.exec("BEGIN");
-  const { lastInsertRowid: fileId } = db
-    .prepare(`INSERT INTO store_file (path, harness, size, mtime_ms, status, ingested_at) VALUES ('f.jsonl', 'omp', 1, 1, 'ok', 1)`)
-    .run();
-  const { lastInsertRowid: sessionId } = db.prepare(`INSERT INTO session (path, harness, entries) VALUES ('f.jsonl', 'omp', 1)`).run();
-  const { lastInsertRowid: runId } = db
+  db.prepare(`INSERT INTO store_file (path, harness, size, mtime_ms, status, ingested_at) VALUES ('f.jsonl', 'omp', 1, 1, 'ok', 1)`).run();
+  const sessionId = db.prepare(`INSERT INTO session (path, harness, entries) VALUES ('f.jsonl', 'omp', 1)`).run().lastInsertRowid;
+  const runId = db
     .prepare(`INSERT INTO run (session_id, seq, kind, carrier, fusion) VALUES (?, 0, 'deliberation', 'toolResult', 'review')`)
-    .run(sessionId);
+    .run(sessionId).lastInsertRowid;
   const seat = db.prepare(`INSERT INTO seat (run_id, seq, persona, alias, provider, model) VALUES (?, ?, ?, ?, ?, ?)`);
   const attempt = db.prepare(`INSERT INTO attempt (run_id, seat_seq, idx, alias, provider, model, reason) VALUES (?, ?, ?, ?, ?, ?, ?)`);
-  // An aliased route: answered as `glm`, refused as the same alias on another provider.
+
+  // One aliased route, refused twice on two providers: one key, both reasons.
   seat.run(runId, 0, "skeptic", "glm", "opencode-go", "glm-5.3");
   attempt.run(runId, 0, 0, "glm", "zai", "glm-5.3", "quota");
+  attempt.run(runId, 0, 1, "glm", "opencode-go", "glm-5.3", "transient");
+  // A *different* aliased route refusing the same seat: two routes, two keys.
+  attempt.run(runId, 0, 2, "kimi", "kimi-coding", "k3", "quota");
+  // A refusal that carries no alias at all: the key falls back to provider/model.
+  attempt.run(runId, 0, 3, null, "zai", "glm-4.6", "quota");
   // A seat with no persona at all, carrying an attempt: it must not become a refusals-only row.
   seat.run(runId, 1, null, "ghost", "zai", "glm-5.3");
   attempt.run(runId, 1, 0, "ghost", "zai", "glm-5.3", "transient");
@@ -843,9 +847,16 @@ test("one aliased route is named the same on both halves, and a hostile name is 
   assert.equal(rows.length, 2, "the null-persona seat produces no row of its own");
 
   const skeptic = rows.find((row) => row.persona === "skeptic");
+  const reasons = (route) => ({ ...skeptic.refusals[route] });
   assert.deepEqual({ ...skeptic.answered }, { glm: 1 }, "answered by alias");
-  assert.deepEqual(Object.keys(skeptic.refusals), ["glm"], "and refused under the same alias, not provider/model");
-  assert.deepEqual({ ...skeptic.refusals.glm }, { quota: 1 });
+  assert.deepEqual(
+    Object.keys(skeptic.refusals).sort(),
+    ["glm", "kimi", "zai/glm-4.6"],
+    "one key per route: the alias, another alias, and the un-aliased fallback",
+  );
+  assert.deepEqual(reasons("glm"), { quota: 1, transient: 1 }, "the same route refused on two providers is one key with both reasons");
+  assert.deepEqual(reasons("kimi"), { quota: 1 }, "a different aliased route keeps its own key");
+  assert.deepEqual(reasons("zai/glm-4.6"), { quota: 1 }, "an attempt with no alias falls back to provider/model");
 
   const systems = rows.find((row) => row.persona === "systems");
   assert.deepEqual(Object.keys(systems.answered), ["__proto__"], "a hostile name is a name");
@@ -855,7 +866,6 @@ test("one aliased route is named the same on both halves, and a hostile name is 
 
   db.close();
   fs.rmSync(dbPath, { force: true });
-  assert.equal(fileId !== undefined && sessionId !== undefined, true);
 });
 
 test("a record's clock is a string or absent, whatever the harness wrote", () => {
