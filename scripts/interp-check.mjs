@@ -1137,8 +1137,7 @@ check(
 );
 
 // The same label through the *tool*, because a label nobody has to remember to type is the point: an agent
-// records the outcome itself at the moment it knows one. One implementation, two front doors — asserted by
-// driving both and comparing what they wrote, since two implementations would drift the moment one changed.
+// records the outcome itself at the moment it knows one. One implementation, two front doors.
 const commandWritten = sentMessages.at(-1).message;
 const toolLabel = tools.get("matrix-label");
 const toolResult = await toolLabel.execute("call_1", { workItem: "#12", outcome: "review", evidence: `#12 review` }, undefined, undefined, {
@@ -1170,6 +1169,22 @@ check(
   "matrix-label: the tool refuses an outcome outside the vocabulary, and writes nothing",
   sentMessages.length === labelsBefore + 3 && /no label written: outcome must be one of/.test(refused?.content?.[0]?.text ?? ""),
   refused?.content?.[0]?.text ?? "no result",
+);
+// The equivalence, argued properly: **identical arguments through both doors, compared serialized**. An earlier
+// version compared object *references* with different inputs, which proves only that two objects differ — a
+// drift in `content`, `display`, evidence handling or the send options would have passed it.
+const sameArgs = { workItem: "#12", outcome: "findings", evidence: "https://example.test/pr/36" };
+const beforePair = sentMessages.length;
+await commands.get("matrix-label").handler(`${sameArgs.workItem} ${sameArgs.outcome} ${sameArgs.evidence}`, { ui: { notify } });
+await toolLabel.execute("call_3", sameArgs, undefined, undefined, { ui: { notify } });
+const [byCommand, byTool] = sentMessages.slice(beforePair);
+check(
+  "matrix-label: the tool and the command write the identical message for identical arguments",
+  sentMessages.length === beforePair + 2 &&
+    JSON.stringify(byCommand?.message) === JSON.stringify(byTool?.message) &&
+    JSON.stringify(byCommand?.options) === JSON.stringify(byTool?.options) &&
+    byCommand?.message?.details?.evidence === sameArgs.evidence,
+  JSON.stringify({ command: byCommand?.message, tool: byTool?.message }),
 );
 
 /* ------------------------------------------------------------ review findings */
