@@ -757,6 +757,15 @@ function validateDecision(spec, where, config, err, { allowActions = false, scor
         continue;
       }
       if (!question.instructions) err(`${where}: question "${id}" has no instructions`);
+      // The bar a *warning* is raised at. It is per question because one backend scores different traffic
+      // differently — a review's long synthetic answer reads 0.44 where a short factual one reads 0.9 — and a
+      // value outside 0..1 would silently turn the warning off (`< 0` never fires) or on for everything.
+      if (
+        question.warnBelow !== undefined &&
+        !(typeof question.warnBelow === "number" && question.warnBelow >= 0 && question.warnBelow <= 1)
+      ) {
+        err(`${where}: question "${id}" warnBelow must be a number between 0 and 1`);
+      }
       if (question.type === "score" && (!Array.isArray(question.criteria) || question.criteria.length < 2)) {
         err(`${where}: score question "${id}" needs at least two levels`);
       }

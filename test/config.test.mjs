@@ -21,6 +21,35 @@ test("the packaged config is valid as it ships", () => {
   assert.deepEqual(errorsFor({}), []);
 });
 
+test("a verify question's warning bar is a number between 0 and 1, or a named load error", () => {
+  const withBar = (warnBelow) =>
+    errorsFor({
+      fusions: {
+        "review-quick": {
+          verify: [{ state: "{{synthesis}}", questions: { addresses_question: { type: "noul", instructions: "x", warnBelow } } }],
+        },
+      },
+    }).join("\n");
+  assert.equal(withBar(0.35), "", "a calibrated bar is legal");
+  for (const bad of [2, -1, "0.5", null]) {
+    assert.match(withBar(bad), /warnBelow must be a number between 0 and 1/, `${JSON.stringify(bad)} must be refused`);
+  }
+});
+
+test("the review rungs are calibrated and answer findings as data", () => {
+  // Two config facts a reader depends on: the bar a warning is raised at (measured across eight review runs —
+  // clean 0.23, real reviews 0.44–0.76 — so 0.35 separates the suspicious case instead of flagging everything),
+  // and the panels answering findings as *data*, which is what puts a model and its findings on one record.
+  for (const rung of ["review-quick", "review-check", "smrt-review"]) {
+    assert.equal(packaged.fusions[rung].verify[0].questions.addresses_question.warnBelow, 0.35, `${rung} carries the calibrated bar`);
+  }
+  for (const persona of ["review-skeptic", "review-technical", "review-systems"]) {
+    assert.equal(packaged.personas[persona]?.output, "json", `${persona} answers findings as data`);
+  }
+  assert.deepEqual(packaged.modes["review-single"].stages[0].parallel, ["review-skeptic"]);
+  assert.deepEqual(packaged.modes["review-committee"].stages[0].parallel, ["review-technical", "review-skeptic", "review-systems"]);
+});
+
 test("every proxy rule is a named load error", () => {
   const rules = [
     ["an unknown alias", { fusions: { best: { proxy: { alias: "no-such-alias" } } } }, /proxy alias "no-such-alias" is not an alias/],

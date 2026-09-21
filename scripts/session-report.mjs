@@ -463,6 +463,7 @@ export function aggregate(sessions) {
     labels: new Map(),
     unlabelled: { sessions: 0, runs: 0, fusionTurns: 0, sums: emptySums() },
     providers: new Map(),
+    models: new Map(),
     quotaRefusals: [],
     proxy: new Map(),
     deliberation: new Map(),
@@ -505,6 +506,32 @@ export function aggregate(sessions) {
     if (typeof provider !== "string") return;
     if (!report.providers.has(harness)) report.providers.set(harness, new Set());
     report.providers.get(harness).add(provider);
+  };
+
+  /**
+   * One row per model, across every session in the store — the point is that it accumulates: a seat's cost,
+   * its failures and the findings *it* raised are evidence about a model only in aggregate, over days of runs,
+   * and the reader walks the whole store every time it runs.
+   */
+  const modelRow = (model) => {
+    if (!report.models.has(model)) {
+      report.models.set(model, {
+        model,
+        seats: 0,
+        tokens: 0,
+        cost: 0,
+        ms: 0,
+        degraded: 0,
+        personas: new Map(),
+        attempts: new Map(),
+        findings: 0,
+        survived: 0,
+        located: 0,
+        unlocated: 0,
+        uncheckable: 0,
+      });
+    }
+    return report.models.get(model);
   };
 
   for (const session of sessions) {
@@ -764,22 +791,11 @@ export function aggregate(sessions) {
         for (const finding of Array.isArray(details.findings) ? details.findings : []) {
           const severity = typeof finding?.severity === "string" ? finding.severity : "unknown";
           review.severities.set(severity, (review.severities.get(severity) ?? 0) + 1);
-          const where = typeof finding?.path === "string" && finding.path ? finding.path : undefined;
-          let found;
+          const { where, found, outside } = pathClaim(finding, session.cwd);
           if (where !== undefined) {
             review.paths += 1;
-            // The claim has to *resolve inside* the session's tree to be checkable at all. An absolute path never
-            // is, and a relative one can leave the tree while looking innocent — `../../etc/passwd` joins to a
-            // real file outside the session, and reporting that as found is the same laundering the absolute case
-            // is refused for. Both are counted as unchecked; neither is resolved against the real filesystem.
-            const root = path.resolve(session.cwd ?? ".");
-            const within = path.resolve(root, where);
-            if (within !== root && !within.startsWith(root + path.sep)) {
-              review.pathsOutside += 1;
-            } else {
-              found = fs.existsSync(within);
-              if (!found) review.pathsMissing += 1;
-            }
+            if (outside) review.pathsOutside += 1;
+            else if (!found) review.pathsMissing += 1;
           }
           // Bounded: the report is a summary, and a run with hundreds of findings must not become the file.
           if (review.findings.length < 40)
@@ -818,6 +834,35 @@ export function aggregate(sessions) {
         // Deliberately **not** added to `record.sums`: `details.usage` is already the sum of the seats
         // (verified against the store — a one-seat run's `details.usage.input` equals that seat's), so adding
         // each seat again doubled every deliberation's tokens and cost.
+        //
+        // A seat's *own* findings are a different fact, and they belong to the model: this is the join that makes
+        // "how is this model doing" answerable over days of runs rather than from a single review. `located`
+        // separates a finding that names a real file from one whose path this session cannot resolve — the
+        // difference between a finding you can act on and one you must re-find yourself.
+        const model = seat?.provider && seat?.model ? `${seat.provider}/${seat.model}` : undefined;
+        if (model) {
+          const row = modelRow(model);
+          row.seats += 1;
+          row.personas.set(seat.persona ?? "?", (row.personas.get(seat.persona ?? "?") ?? 0) + 1);
+          row.tokens += (seat.usage?.input ?? 0) + (seat.usage?.output ?? 0);
+          row.cost += seat.usage?.cost?.total ?? 0;
+          row.ms += seat.durationMs ?? 0;
+          if (seat.degraded) row.degraded += 1;
+          for (const attempt of seat.attempts ?? [])
+            row.attempts.set(attempt.reason ?? "?", (row.attempts.get(attempt.reason ?? "?") ?? 0) + 1);
+          // Which of this seat's findings the run's own disposition kept — the difference between finding things
+          // and finding things that mattered, which is the number a roster decision is argued from.
+          const kept = new Set((Array.isArray(details.findings) ? details.findings : []).filter(isFinding).map(sameFinding));
+          for (const finding of Array.isArray(seat.findings) ? seat.findings : []) {
+            if (!isFinding(finding)) continue;
+            row.findings += 1;
+            if (kept.has(sameFinding(finding))) row.survived += 1;
+            const { found, outside } = pathClaim(finding, session.cwd);
+            if (found === true) row.located += 1;
+            else if (found === false) row.unlocated += 1;
+            else if (outside) row.uncheckable += 1;
+          }
+        }
       }
       record.seatErrors += seatErrors.length;
       const survived = seats.filter((seat) => !seat?.degraded).length;
@@ -856,6 +901,43 @@ export function aggregate(sessions) {
 
   return report;
 }
+
+/**
+ * Where a finding claims to be, and whether that claim is checkable: `found` is the filesystem's answer, `false`
+ * the claim is wrong, `undefined` it cannot be checked at all (no path, or a path that does not resolve inside
+ * the session's tree). One implementation, because two readers now ask the question — the run's disposition and
+ * each seat's own findings — and two answers to "is this path real?" would be one too many.
+ */
+const pathClaim = (finding, cwd) => {
+  const where = typeof finding?.path === "string" && finding.path ? finding.path : undefined;
+  if (where === undefined) return { where, found: undefined, outside: false };
+  // The claim has to *resolve inside* the session's tree to be checkable at all. An absolute path never is, and
+  // a relative one can leave the tree while looking innocent — `../../etc/passwd` joins to a real file outside
+  // the session, and reporting that as found is the same laundering the absolute case is refused for.
+  const root = path.resolve(cwd ?? ".");
+  const within = path.resolve(root, where);
+  if (within !== root && !within.startsWith(root + path.sep)) return { where, found: undefined, outside: true };
+  return { where, found: fs.existsSync(within), outside: false };
+};
+
+/** Whether a finding asserts a claim at all — a path, a criterion and a claim, which is the schema's contract. */
+const isFinding = (value) =>
+  Boolean(
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    typeof value.path === "string" &&
+    typeof value.criterion === "string" &&
+    typeof value.claim === "string",
+  );
+
+/**
+ * Whether a seat's finding is the same finding the run's disposition recorded, i.e. whether it survived the
+ * synthesis. Matched on location rather than wording: a synthesis keeps a finding's trigger and consequence and
+ * may reword its claim, so comparing claims would report every finding dropped. A finding the disposition does
+ * not carry at its location is one the synthesis declined — the number a roster decision is argued from.
+ */
+const sameFinding = (finding) => `${finding.path}:${finding.line ?? ""}`;
 
 const median = (sorted) => (sorted.length === 0 ? undefined : sorted[Math.floor(sorted.length / 2)]);
 const num = (n) => new Intl.NumberFormat("en-US").format(Math.round(n));
@@ -1152,6 +1234,21 @@ export function render(report, { limit = 12 } = {}) {
       `  ${"".padEnd(18)} no \`/matrix-label\` was recorded: these runs have a cost and no outcome, and are not counted as successes.`,
     );
   }
+  const modelRows = [...report.models.values()].sort((a, b) => b.seats - a.seats);
+  lines.push(
+    `seats by model (details.seats[], across every session in the store): ${modelRows.length} model(s) · ${modelRows.reduce((t, r) => t + r.seats, 0)} seat(s)`,
+  );
+  for (const row of modelRows) {
+    const attempts = [...row.attempts].map(([k, v]) => `${k}×${v}`).join(", ") || "none";
+    lines.push(
+      `  ${row.model.padEnd(40)} ${String(row.seats).padStart(4)} seats · ${num(row.tokens).padStart(10)} tok · ${money(row.cost).padStart(10)} · ${ms(row.ms).padStart(7)} seat-time${row.degraded ? ` · ${row.degraded} degraded` : ""} · attempts ${attempts}`,
+    );
+    if (row.findings > 0) {
+      lines.push(
+        `  ${"".padEnd(40)} findings ${row.findings} · kept by the disposition ${row.survived}, dropped ${row.findings - row.survived} · located ${row.located}, path not found ${row.unlocated}, outside the session ${row.uncheckable} · as ${[...row.personas].map(([k, v]) => `${k}×${v}`).join(", ")}`,
+      );
+    }
+  }
   lines.push("");
   lines.push("tools");
   const tools = [...report.tools.values()].filter((row) => row.turns > 0).sort((a, b) => b.turns - a.turns);
@@ -1226,6 +1323,7 @@ export function renderJson(report) {
       turns: plain(report.turns),
       proxy: plain(report.proxy),
       deliberation: plain(report.deliberation),
+      models: plain(report.models),
       tools: plain(report.tools),
       labels: plain(report.labels),
       plans: report.plans,

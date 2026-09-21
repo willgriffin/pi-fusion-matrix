@@ -116,6 +116,22 @@
     "merge": {
       "prompt": "prompts/merge.md",
       "temperature": 0.4
+    },
+    "review-skeptic": {
+      "prompt": "prompts/review-skeptic.md",
+      "temperature": 0.8,
+      "output": "json"
+    },
+    "review-technical": {
+      "prompt": "prompts/review-technical.md",
+      "temperature": 0.5,
+      "thinking": "medium",
+      "output": "json"
+    },
+    "review-systems": {
+      "prompt": "prompts/review-systems.md",
+      "temperature": 0.6,
+      "output": "json"
     }
   },
   "modes": {
@@ -286,7 +302,7 @@
       "stages": [
         {
           "parallel": [
-            "skeptic"
+            "review-skeptic"
           ],
           "input": "prompt"
         },
@@ -300,9 +316,9 @@
       "stages": [
         {
           "parallel": [
-            "technical",
-            "skeptic",
-            "systems"
+            "review-technical",
+            "review-skeptic",
+            "review-systems"
           ],
           "input": "prompt"
         },
@@ -481,14 +497,14 @@
     "review-check": {
       "mode": "review-committee",
       "candidates": {
-        "technical": [
+        "review-technical": [
           "kimi",
           "qwen-max"
         ],
-        "skeptic": [
+        "review-skeptic": [
           "deepseek-pro"
         ],
-        "systems": [
+        "review-systems": [
           "glm"
         ],
         "judge": [
@@ -510,7 +526,8 @@
               "criteria": {
                 "true": "Answers the actual question",
                 "false": "Answers a different or narrower question"
-              }
+              },
+              "warnBelow": 0.35
             },
             "grounded_in_panel": {
               "type": "noul",
@@ -539,11 +556,11 @@
       "mode": "review-single",
       "execute": false,
       "thinking": {
-        "skeptic": "low",
+        "review-skeptic": "low",
         "review-synth": "low"
       },
       "candidates": {
-        "skeptic": [
+        "review-skeptic": [
           "deepseek-pro"
         ],
         "review-synth": [
@@ -561,7 +578,8 @@
               "criteria": {
                 "true": "Judges the change against its criteria",
                 "false": "Describes the diff or answers a different question"
-              }
+              },
+              "warnBelow": 0.35
             }
           }
         }
@@ -573,22 +591,22 @@
       "review": true,
       "execute": false,
       "thinking": {
-        "technical": "medium",
-        "skeptic": "medium",
-        "systems": "medium",
+        "review-technical": "medium",
+        "review-skeptic": "medium",
+        "review-systems": "medium",
         "judge": "high",
         "review-synth": "high"
       },
       "candidates": {
-        "technical": [
+        "review-technical": [
           "qwen-max",
           "kimi"
         ],
-        "skeptic": [
+        "review-skeptic": [
           "glm",
           "deepseek-pro"
         ],
-        "systems": [
+        "review-systems": [
           "deepseek-pro"
         ],
         "judge": [
@@ -609,7 +627,8 @@
               "criteria": {
                 "true": "Judges the change against its criteria",
                 "false": "Describes the diff or answers a different question"
-              }
+              },
+              "warnBelow": 0.35
             },
             "grounded_in_panel": {
               "type": "noul",
