@@ -65,6 +65,10 @@ that iterate until green, and plan-then-DAG execution. `verify` gates run once a
   supposed to have — local environment files, scratch scripts, an operator's notes — and `-A` commits all of it.
   It did: a sweep staged an untracked `.envrc` holding a live provider key, pushed it, and the key had to be
   rotated. Name the paths in the commit, and read `git status` before and after.
+- **Text that matters goes through a file, not a shell string.** A commit message, a pull request body, an issue
+  body: write it with the editor and pass the file (`git commit -F`, `gh --body-file`). Backticks and `$(…)`
+  inside a double-quoted argument are *executed*, and the gaps they leave are silent — a body that reads fine in
+  the terminal arrives with words missing. It happened three times in one session before this was written down.
 - **One behaviour per module, exported.** A function that can only be exercised through a whole
   pipeline run is a function whose contract nobody can test in isolation. Export the unit; the
   pipeline test then covers the wiring.
