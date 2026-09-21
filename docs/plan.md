@@ -1131,11 +1131,14 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
   They *were*, which doubled every deliberation's tokens and cost from the reader's first version;
 - **it prints seats by model, because that is the view that accumulates.** Per model, across every session in
   the store: seats, tokens, cost, seat-time, degradations, and the reasons its routes were substituted — plus,
-  where a seat answered findings as data, how many it raised and how many of those name a *located* path. A
-  single run cannot rate a model: a seat's answer is judged by a peer, not by ground truth, and the synthesis
-  merges the panel's opinions into findings that belong to the fusion. Days of runs can, which is why the view
-  is over the whole store rather than over a run, and why located-versus-not is the column to read: it is the
-  difference between a review's numbers meaning something and a rung winning a count by inventing its paths;
+  where a seat answered findings as data, how many it raised, how many the run's own disposition **kept**, and
+  how many of those name a *located* path. A single run cannot rate a model: a seat's answer is judged by a
+  peer, not by ground truth, and the synthesis merges the panel's opinions into findings that belong to the
+  fusion. Days of runs can, which is why the view is over the whole store rather than over a run. Survival and
+  location are matched the same way: a kept finding is one the disposition carries at the same `path` and `line`
+  (a synthesis keeps a finding's trigger and may reword its claim, so comparing claims would report every
+  finding dropped), and a located one is a path that resolves inside the session's tree. That is the difference
+  between a review's numbers meaning something and a rung winning a count by inventing its locations;
 - **filters select rows, never the accounting.** `--cwd`/`--since` decide which sessions are totalled; the
   files read, the unparsed lines and any session a filter could not attribute (a truncated header has no
   `cwd` to compare, and a malformed timestamp cannot be placed) are reported either way, and the exit

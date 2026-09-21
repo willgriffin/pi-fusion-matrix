@@ -525,6 +525,7 @@ export function aggregate(sessions) {
         personas: new Map(),
         attempts: new Map(),
         findings: 0,
+        survived: 0,
         located: 0,
         unlocated: 0,
         uncheckable: 0,
@@ -849,9 +850,13 @@ export function aggregate(sessions) {
           if (seat.degraded) row.degraded += 1;
           for (const attempt of seat.attempts ?? [])
             row.attempts.set(attempt.reason ?? "?", (row.attempts.get(attempt.reason ?? "?") ?? 0) + 1);
+          // Which of this seat's findings the run's own disposition kept — the difference between finding things
+          // and finding things that mattered, which is the number a roster decision is argued from.
+          const kept = new Set((Array.isArray(details.findings) ? details.findings : []).filter(isFinding).map(sameFinding));
           for (const finding of Array.isArray(seat.findings) ? seat.findings : []) {
             if (!isFinding(finding)) continue;
             row.findings += 1;
+            if (kept.has(sameFinding(finding))) row.survived += 1;
             const { found, outside } = pathClaim(finding, session.cwd);
             if (found === true) row.located += 1;
             else if (found === false) row.unlocated += 1;
@@ -915,8 +920,24 @@ const pathClaim = (finding, cwd) => {
   return { where, found: fs.existsSync(within), outside: false };
 };
 
-/** Whether a finding asserts a claim at all — a path, a criterion and a claim, per the persona's schema. */
-const isFinding = (value) => Boolean(value && typeof value === "object" && !Array.isArray(value) && typeof value.path === "string");
+/** Whether a finding asserts a claim at all — a path, a criterion and a claim, which is the schema's contract. */
+const isFinding = (value) =>
+  Boolean(
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    typeof value.path === "string" &&
+    typeof value.criterion === "string" &&
+    typeof value.claim === "string",
+  );
+
+/**
+ * Whether a seat's finding is the same finding the run's disposition recorded, i.e. whether it survived the
+ * synthesis. Matched on location rather than wording: a synthesis keeps a finding's trigger and consequence and
+ * may reword its claim, so comparing claims would report every finding dropped. A finding the disposition does
+ * not carry at its location is one the synthesis declined — the number a roster decision is argued from.
+ */
+const sameFinding = (finding) => `${finding.path}:${finding.line ?? ""}`;
 
 const median = (sorted) => (sorted.length === 0 ? undefined : sorted[Math.floor(sorted.length / 2)]);
 const num = (n) => new Intl.NumberFormat("en-US").format(Math.round(n));
@@ -1224,7 +1245,7 @@ export function render(report, { limit = 12 } = {}) {
     );
     if (row.findings > 0) {
       lines.push(
-        `  ${"".padEnd(40)} findings ${row.findings} · located ${row.located}, path not found ${row.unlocated}, outside the session ${row.uncheckable} · as ${[...row.personas].map(([k, v]) => `${k}×${v}`).join(", ")}`,
+        `  ${"".padEnd(40)} findings ${row.findings} · kept by the disposition ${row.survived}, dropped ${row.findings - row.survived} · located ${row.located}, path not found ${row.unlocated}, outside the session ${row.uncheckable} · as ${[...row.personas].map(([k, v]) => `${k}×${v}`).join(", ")}`,
       );
     }
   }

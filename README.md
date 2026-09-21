@@ -637,11 +637,12 @@ runs that named nothing at all. Neither is counted as a success.
 
 It also prints **seats by model**: per model, across every session in the store, its seats, tokens, cost and
 seat-time, its degradations and the reasons its routes were substituted — plus, where a seat answered findings as
-data, how many it raised and how many of those name a path that **exists**. That last split is the one to read.
-A single run cannot rate a model — a seat's answer is judged by a peer rather than by ground truth, and the
-synthesis merges the panel's opinions into findings that belong to the fusion — but days of runs can, and
-cost-per-finding flatters exactly the rung that invents its locations: the cheapest review this project ran
-returned five findings, two of them blocking, every one of them naming a file that does not exist.
+data, how many it raised, how many the run's disposition **kept**, and how many of those name a path that
+**exists**. Those two splits are the ones to read. A single run cannot rate a model — a seat's answer is judged by
+a peer rather than by ground truth, and the synthesis merges the panel's opinions into findings that belong to
+the fusion — but days of runs can, and cost-per-finding flatters exactly the rung that invents its locations: the
+cheapest review this project ran returned five findings, two of them blocking, every one of them naming a file
+that does not exist.
 
 Money always states its basis: a cost is `$X reported`, with the messages whose provider reported no price
 counted beside it, never folded into a single total that reads as free.

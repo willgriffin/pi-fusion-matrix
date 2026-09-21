@@ -2435,6 +2435,10 @@ describe("seats by model", () => {
           fusion: "review-check",
           seatErrors: [],
           usage: usage(600, 60, 0.05),
+          // The run's own disposition keeps one of the panel's three findings — the rest are the synthesis's
+          // judgement, and `survived` is what separates finding things from finding things that mattered.
+          verdict: "findings",
+          findings: [seatFinding({ line: 12 })],
           seats: [
             {
               persona: "review-skeptic",
@@ -2470,13 +2474,14 @@ describe("seats by model", () => {
 
   after(() => fs.rmSync(modelsDir, { recursive: true, force: true }));
 
-  test("a model's seats, tokens, cost, failures and substitutions are counted", () => {
+  test("a model's seats, tokens, cost, failures and route substitutions are counted", () => {
     assert.ok(
       skepticRow?.seats === 1 &&
         skepticRow.tokens === 440 &&
         Math.abs(skepticRow.cost - 0.03) < 1e-9 &&
         skepticRow.ms === 40000 &&
         skepticRow.degraded === 0 &&
+        // An attempt *is* a substitution, recorded with the reason its route was replaced.
         skepticRow.attempts.get("transient") === 1 &&
         skepticRow.personas.get("review-skeptic") === 1,
       JSON.stringify(skepticRow),
@@ -2493,6 +2498,12 @@ describe("seats by model", () => {
       }),
     );
   });
+  test("a finding the run's disposition kept is counted as survived, and the rest as dropped", () => {
+    assert.ok(
+      skepticRow?.survived === 1 && skepticRow.findings - skepticRow.survived === 2,
+      JSON.stringify({ findings: skepticRow?.findings, survived: skepticRow?.survived }),
+    );
+  });
   test("a seat that raised nothing contributes no findings, and a degraded seat is counted as one", () => {
     assert.ok(
       technicalRow?.seats === 1 && technicalRow.findings === 0 && technicalRow.degraded === 1,
@@ -2504,7 +2515,7 @@ describe("seats by model", () => {
     assert.ok(
       /seats by model/.test(text) &&
         /opencode-go\/deepseek-v4-pro\s+1 seats/.test(text) &&
-        /findings 3 · located 1, path not found 1, outside the session 1/.test(text),
+        /findings 3 · kept by the disposition 1, dropped 2 · located 1, path not found 1, outside the session 1/.test(text),
       text
         .split("\n")
         .filter((line) => line.includes("deepseek-v4-pro"))
