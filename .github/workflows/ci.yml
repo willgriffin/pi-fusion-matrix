@@ -83,9 +83,6 @@ jobs:
       - name: doctor
         run: node scripts/doctor.mjs
 
-      - name: the run-record reader's own checks
-        run: node scripts/session-report.mjs --check
-
       - name: backend probes
         run: |
           node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone

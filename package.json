@@ -12,7 +12,7 @@
     ]
   },
   "scripts": {
-    "test": "env -u TYPESAFE_API_KEY node --experimental-test-coverage --test-coverage-lines=65 --test-coverage-branches=59 --test-coverage-functions=79 --test",
+    "test": "env -u TYPESAFE_API_KEY node --experimental-test-coverage --test-coverage-lines=76 --test-coverage-branches=68 --test-coverage-functions=86 --test",
     "lint:commits": "node scripts/lint-commits.mjs",
     "format": "prettier --write extensions scripts test",
     "format:check": "prettier --check extensions scripts test",
