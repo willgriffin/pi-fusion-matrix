@@ -14,7 +14,7 @@ import { LABEL_OUTCOMES, isOutcome } from "./labels.js";
 import path from "node:path";
 import process from "node:process";
 import { loadMatrixConfig, validateConfig, harnessName, executorOf, executorThinking, HARNESS_THINKING } from "./config.js";
-import { loadPi, loadTypebox, makeCallModel, createFusionStream } from "./run.js";
+import { loadPi, loadTypebox, makeCallModel, createFusionStream, workItemDetail } from "./run.js";
 import { createDecide } from "./decide.js";
 import { runDoctor, formatFindings, repairSnippet, EXIT } from "./doctor.js";
 
@@ -142,6 +142,11 @@ export default async function (pi) {
           type: "string",
           description: `Fusion id (${fusionIds.join(", ")}). Defaults to ${config.defaultFusion ?? fusionIds[0]}.`,
         },
+        workItem: {
+          type: "string",
+          description:
+            "Optional: the work item these runs are for (#21), recorded on the run so the report can attribute its cost. `MATRIX_WORK_ITEM` supplies one for a whole process.",
+        },
       },
       required: ["prompt"],
     },
@@ -161,7 +166,12 @@ export default async function (pi) {
           callModel,
           getWriteParameters,
         });
-        return { content: [{ type: "text", text: result.text }], details: { fusion, ...result.details } };
+        return {
+          content: [{ type: "text", text: result.text }],
+          // The tool's own `workItem` wins over the environment's: an agent that knows the item it is working on
+          // records it here, and a process launched for one piece of work supplies it once for every run.
+          details: { fusion, ...result.details, ...(params.workItem ? { workItem: params.workItem } : {}) },
+        };
       } catch (error) {
         const message = error?.message ?? String(error);
         return { content: [{ type: "text", text: `fusion failed: ${message}` }], details: { fusion, error: message } };
@@ -230,24 +240,76 @@ export default async function (pi) {
     },
   });
 
+  /**
+   * The one implementation of a label, with two front doors: the command a human types, and the tool an agent
+   * calls. A label is the half of a session's telemetry a *run* cannot know about itself — what the work was
+   * for, and how it ended — so it is written by whoever knows, and nobody should have to remember to type it.
+   *
+   * Append-only and latest-wins: a session that was in review and then landed carries both, and the reader
+   * takes the last as the current outcome rather than rewriting history.
+   */
+  const labelProblem = (label) =>
+    !label.workItem
+      ? "a work item is required"
+      : !isOutcome(label.outcome)
+        ? `outcome must be one of ${LABEL_OUTCOMES.join("|")}`
+        : undefined;
+  const writeLabel = (label) => {
+    const details = { workItem: label.workItem, outcome: label.outcome, ...(label.evidence ? { evidence: label.evidence } : {}) };
+    return pi.sendMessage(
+      {
+        customType: "matrix-label",
+        content: `${label.workItem} — ${label.outcome}${label.evidence ? ` (${label.evidence})` : ""}`,
+        display: true,
+        details,
+      },
+      { triggerTurn: false },
+    );
+  };
+
+  pi.registerTool({
+    name: "matrix-label",
+    label: "Matrix label",
+    description: `Record what this session's fusion runs were for, and how that work ended. The outcome is the half a run cannot know about itself, so it is the agent's to record as soon as it is known: ${LABEL_OUTCOMES.join(", ")}.`,
+    promptSnippet: "Record a work item's outcome for the session's fusion runs",
+    parameters: {
+      type: "object",
+      properties: {
+        workItem: { type: "string", description: "The work item these runs were for, in the tracker's own spelling (#21)." },
+        outcome: { type: "string", enum: LABEL_OUTCOMES, description: "How the work ended, or where it stands." },
+        evidence: { type: "string", description: "Optional: a commit, a PR, a URL — what a reader can check the outcome against." },
+      },
+      required: ["workItem", "outcome"],
+    },
+    execute: async (_toolCallId, params) => {
+      const problem = labelProblem({ workItem: params.workItem, outcome: params.outcome });
+      if (problem) return { content: [{ type: "text", text: `no label written: ${problem}` }], details: { error: problem } };
+      try {
+        await writeLabel({ workItem: params.workItem, outcome: params.outcome, evidence: params.evidence });
+        return {
+          content: [{ type: "text", text: `recorded ${params.workItem} — ${params.outcome}` }],
+          details: { workItem: params.workItem, outcome: params.outcome },
+        };
+      } catch (error) {
+        const message = error?.message ?? String(error);
+        return { content: [{ type: "text", text: `the label could not be written: ${message}` }], details: { error: message } };
+      }
+    },
+  });
+
   pi.registerCommand("matrix-label", {
     description: `Record what a session's fusion runs were for and how they ended: /matrix-label <work-item> <${LABEL_OUTCOMES.join("|")}> [evidence]`,
     handler: async (args, ctx) => {
-      const text = String(args ?? "").trim();
-      const [workItem, outcome, ...rest] = text.split(/\s+/);
-      if (!workItem || !isOutcome(outcome)) {
-        ctx.ui.notify(`usage: /matrix-label <work-item> <${LABEL_OUTCOMES.join("|")}> [evidence]`, "error");
+      const [workItem, outcome, ...rest] = String(args ?? "")
+        .trim()
+        .split(/\s+/);
+      const problem = labelProblem({ workItem, outcome });
+      if (problem) {
+        ctx.ui.notify(`usage: /matrix-label <work-item> <${LABEL_OUTCOMES.join("|")}> [evidence] — ${problem}`, "error");
         return;
       }
-      const evidence = rest.join(" ").trim();
-      // Append-only, latest wins: a session that was in review and then landed carries both, and the reader
-      // takes the last one as the current outcome rather than rewriting history.
-      const details = { workItem, outcome, ...(evidence ? { evidence } : {}) };
       try {
-        await pi.sendMessage(
-          { customType: "matrix-label", content: `${workItem} — ${outcome}${evidence ? ` (${evidence})` : ""}`, display: true, details },
-          { triggerTurn: false },
-        );
+        await writeLabel({ workItem, outcome, evidence: rest.join(" ").trim() });
       } catch (error) {
         ctx.ui.notify(`the label could not be written: ${error?.message ?? String(error)}`, "error");
       }
@@ -422,6 +484,9 @@ async function runOnce({ config, sources, fusion, prompt, getRegistry, decide, c
       notes,
       usage: run.usage,
       decisionUsage: run.decisionUsage,
+      // The tool and command paths are runs too: the work item has to reach their record exactly as it reaches
+      // the streamed path's, or a review started through the tool would be attributed by nobody.
+      ...workItemDetail(),
     },
   };
 }

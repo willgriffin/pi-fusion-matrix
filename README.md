@@ -612,10 +612,17 @@ refusal is only called explained by a reading taken *before* it whose reset has 
 after the fact can never be turned into a cause. `--plans <path>` points it at another ledger, `--no-plans`
 skips it, and a missing ledger, a missing `node:sqlite` or an unknown schema is stated rather than shown empty.
 
-The one thing a run cannot know about itself is whether the work landed, so that is a label rather than an
-inference: `/matrix-label` writes a `matrix-label` message, and the report prints an `outcomes` section —
-work item, latest outcome, evidence, the runs and fusion turns behind it, and the reported cost — beside an
-`(unlabelled)` line for the sessions that produced runs without one.
+The two halves of attribution, and only one of them needs a person. **The work item travels on the run**: the
+`matrix` tool takes an optional `workItem`, and `MATRIX_WORK_ITEM` supplies one for a whole process, so a review
+runner launched for issue #21 records that without anyone remembering anything — the report attributes a run from
+the record first, and falls back to the session's label. **The outcome is a label**, because whether the work
+landed is the one fact a run cannot know about itself: `/matrix-label` writes a `matrix-label` message for a
+person, and a `matrix-label` **tool** does the same for an agent over one shared implementation, so the outcome is
+recorded at the moment it is known rather than asked for afterwards.
+
+The report's `outcomes` section then prints work item, latest outcome, evidence, the runs and fusion turns behind
+it, and the reported cost — with `?` for a work item that has runs and no outcome, and an `(unlabelled)` line for
+runs that named nothing at all. Neither is counted as a success.
 
 Money always states its basis: a cost is `$X reported`, with the messages whose provider reported no price
 counted beside it, never folded into a single total that reads as free.
@@ -714,6 +721,8 @@ and the bare `/matrix`.
 - `/matrix-label <work-item> <landed|review|findings|ci-red|blocked|abandoned> [evidence]` — record what this
   session's runs were for and how they ended. Append-only, latest wins; the report joins the label to the
   runs' cost, and a session with runs and no label is reported as unlabelled rather than assumed fine.
+- The same thing as a **tool** (`matrix-label`), for an agent recording an outcome without a human: one
+  implementation, two front doors.
 - `/matrix-doctor` (`--online`, `--repair`) — validate the config, check provider connectivity, and
   report catalogue drift. `node scripts/doctor.mjs` runs the same checks outside a session:
 
@@ -736,7 +745,7 @@ quota blocks a live one:
 
 ```bash
 node scripts/typesafe-stub.mjs & node scripts/semif-stub.mjs &      # local backends
-node scripts/interp-check.mjs                                       # 44 interpreter contracts
+node scripts/interp-check.mjs                                       # the interpreter contracts
 node scripts/doctor.mjs                                             # config + connectivity
 node scripts/session-report.mjs --check                             # the run-record reader's accounting
 node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone

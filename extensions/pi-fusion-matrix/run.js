@@ -451,6 +451,7 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
       template: seat.template,
       thinking: targetOptions.reasoning ?? null,
       attempts,
+      ...workItemDetail(),
     };
     const dressed = (part) => (part ? { ...identified(part), details: { ...(part.details ?? {}), proxied } } : part);
 
@@ -599,6 +600,20 @@ export async function proxyTurn({ config, fusion, executor, context, options, re
     `alias "${executor.alias}" has no providers`;
   fail(`no route for "${executor.alias}" could be reached — ${detail}`);
 }
+
+/**
+ * The work item these runs were for, when the process was started for a known piece of work.
+ *
+ * A label is the half of the telemetry a run cannot know about itself (what the work was for, how it ended),
+ * and it is written by whomever knows. The *work item* half is different: a review runner launched for issue
+ * #21 knows what it is for at launch, and its session is one nobody can type a command into afterwards. So the
+ * item travels in the environment, lands on the run record, and the report attributes the run from the record
+ * rather than from a label that will never exist.
+ */
+export const workItemDetail = () => {
+  const workItem = process.env.MATRIX_WORK_ITEM?.trim();
+  return workItem ? { workItem } : {};
+};
 
 /* ------------------------------------------------------------------ stream */
 
@@ -787,7 +802,7 @@ export function createFusionStream({ config, sources, getRegistry, decide, callM
           push({ type: "toolcall_end", contentIndex: 1 + i, toolCall: block, partial });
         }
 
-        const details = { ...run.details, routing, verification, usage, decisionUsage: run.decisionUsage };
+        const details = { ...run.details, routing, verification, usage, decisionUsage: run.decisionUsage, ...workItemDetail() };
         const final = { ...base, content, usage, stopReason: toolCalls.length ? "toolUse" : "stop", details };
         push({ type: "text_end", contentIndex: 0, content: streamed, partial: message(streamed, { usage }) });
         push({ type: "done", reason: final.stopReason, message: final });

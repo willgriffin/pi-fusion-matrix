@@ -20,7 +20,7 @@ import path from "node:path";
 import { loadMatrixConfig, validateConfig } from "../extensions/pi-fusion-matrix/config.js";
 import { runPipeline } from "../extensions/pi-fusion-matrix/pipeline.js";
 import { createDecide } from "../extensions/pi-fusion-matrix/decide.js";
-import { routeFusion, verifyRun, createFusionStream } from "../extensions/pi-fusion-matrix/run.js";
+import { routeFusion, verifyRun, createFusionStream, workItemDetail } from "../extensions/pi-fusion-matrix/run.js";
 
 // The packaged layer only: a developer's machine-wide layer and a project layer would otherwise decide
 // what "N/N" means, and this check has to be the same number on every machine.
@@ -939,11 +939,12 @@ check(
 // are the two surfaces a user sees before any run, and both follow from the executor rule.
 const registered = new Map();
 const commands = new Map();
+const tools = new Map();
 const sentMessages = [];
 const stubApi = {
   on: () => {},
   registerProvider: (id, definition) => registered.set(id, definition),
-  registerTool: () => {},
+  registerTool: (definition) => tools.set(definition.name, definition),
   registerCommand: (name, definition) => commands.set(name, definition),
   sendMessage: async (message, options) => {
     sentMessages.push({ message, options });
@@ -1060,6 +1061,35 @@ check(
   `attempts=${JSON.stringify(failedSeat?.attempts)}`,
 );
 
+// The *emission* shape, driven rather than hand-crafted: the environment's work item has to reach the record a
+// reader actually sees. (A review found this missing — the tests asserted how the report reads a work item while
+// nothing asserted that a run started with `MATRIX_WORK_ITEM` writes one, which is the half a review runner
+// depends on.)
+const previousWorkItem = process.env.MATRIX_WORK_ITEM;
+process.env.MATRIX_WORK_ITEM = "#99";
+try {
+  // Both halves through the path that *writes a record* — the stream — because a bare `runPipeline` is the
+  // interpreter, not the recorder, and asserting its details would prove nothing about what a reader sees.
+  const workItemProxy = await driveStream(fusionStream(makeProxyPeer([]))(fusionModel("proxy-flaky"), harnessContext, harnessOptions));
+  const workItemDeliberation = await driveStream(
+    fusionStream(makeProxyPeer([]))(fusionModel("review-check"), harnessContext, harnessOptions),
+  );
+  check(
+    "the environment's work item reaches a proxied turn's record and a deliberation's",
+    workItemProxy.final.details?.proxied?.workItem === "#99" && workItemDeliberation.final.details?.workItem === "#99",
+    JSON.stringify({ proxied: workItemProxy.final.details?.proxied?.workItem, deliberation: workItemDeliberation.final.details?.workItem }),
+  );
+} finally {
+  if (previousWorkItem === undefined) delete process.env.MATRIX_WORK_ITEM;
+  else process.env.MATRIX_WORK_ITEM = previousWorkItem;
+}
+const unattributed = await driveStream(fusionStream(makeProxyPeer([]))(fusionModel("review-check"), harnessContext, harnessOptions));
+check(
+  "with no work item in the environment, no record claims one",
+  workItemDetail().workItem === undefined && unattributed.final.details?.workItem === undefined,
+  `workItemDetail=${JSON.stringify(workItemDetail())} record=${JSON.stringify(unattributed.final.details?.workItem)}`,
+);
+
 /* ------------------------------------------------------------ the outcome label */
 
 // `/matrix-label` is the half a run cannot know about itself: what the work was, and how it ended.
@@ -1104,6 +1134,57 @@ check(
     sentMessages.at(-1).message.details?.outcome === "review" &&
     sentMessages.at(-1).message.details?.evidence === undefined,
   JSON.stringify(sentMessages.at(-1)?.message?.details),
+);
+
+// The same label through the *tool*, because a label nobody has to remember to type is the point: an agent
+// records the outcome itself at the moment it knows one. One implementation, two front doors.
+const commandWritten = sentMessages.at(-1).message;
+const toolLabel = tools.get("matrix-label");
+const toolResult = await toolLabel.execute("call_1", { workItem: "#12", outcome: "review", evidence: `#12 review` }, undefined, undefined, {
+  ui: { notify },
+});
+const toolWritten = sentMessages.at(-1).message;
+check(
+  "matrix-label: the tool writes exactly what the command writes",
+  sentMessages.at(-1).message !== commandWritten &&
+    toolWritten?.customType === "matrix-label" &&
+    toolWritten.details?.workItem === "#12" &&
+    toolWritten.details?.outcome === "review" &&
+    toolWritten.details?.evidence === "#12 review" &&
+    sentMessages.at(-1)?.options?.triggerTurn === false &&
+    /#12 — review/.test(String(toolWritten.content)) &&
+    toolLabel.parameters?.required?.includes("workItem") &&
+    toolLabel.parameters?.properties?.outcome?.enum?.includes("landed"),
+  JSON.stringify({ tool: toolWritten?.details, required: toolLabel?.parameters?.required }),
+);
+check(
+  "matrix-label: the tool reports what it recorded, and refuses what the vocabulary does not have",
+  /recorded #12 — review/.test(toolResult?.content?.[0]?.text ?? "") &&
+    toolResult?.details?.outcome === "review" &&
+    sentMessages.length === labelsBefore + 3,
+  JSON.stringify(toolResult?.details),
+);
+const refused = await toolLabel.execute("call_2", { workItem: "#12", outcome: "shipped" }, undefined, undefined, { ui: { notify } });
+check(
+  "matrix-label: the tool refuses an outcome outside the vocabulary, and writes nothing",
+  sentMessages.length === labelsBefore + 3 && /no label written: outcome must be one of/.test(refused?.content?.[0]?.text ?? ""),
+  refused?.content?.[0]?.text ?? "no result",
+);
+// The equivalence, argued properly: **identical arguments through both doors, compared serialized**. An earlier
+// version compared object *references* with different inputs, which proves only that two objects differ — a
+// drift in `content`, `display`, evidence handling or the send options would have passed it.
+const sameArgs = { workItem: "#12", outcome: "findings", evidence: "https://example.test/pr/36" };
+const beforePair = sentMessages.length;
+await commands.get("matrix-label").handler(`${sameArgs.workItem} ${sameArgs.outcome} ${sameArgs.evidence}`, { ui: { notify } });
+await toolLabel.execute("call_3", sameArgs, undefined, undefined, { ui: { notify } });
+const [byCommand, byTool] = sentMessages.slice(beforePair);
+check(
+  "matrix-label: the tool and the command write the identical message for identical arguments",
+  sentMessages.length === beforePair + 2 &&
+    JSON.stringify(byCommand?.message) === JSON.stringify(byTool?.message) &&
+    JSON.stringify(byCommand?.options) === JSON.stringify(byTool?.options) &&
+    byCommand?.message?.details?.evidence === sameArgs.evidence,
+  JSON.stringify({ command: byCommand?.message, tool: byTool?.message }),
 );
 
 /* ------------------------------------------------------------ review findings */
