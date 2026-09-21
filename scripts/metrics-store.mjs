@@ -19,6 +19,11 @@
  *   rate card is itself in the store (`price`, with first/last seen dates, so a later card cannot
  *   silently reprice history without leaving a trace). Storing per-owner cost rows would duplicate a
  *   join; the readers return every cost with its basis and never a total that mixes them.
+ * - **No `tz_offset_min` column.** #14's sketch asked for the session's offset "as it was", but these
+ *   records carry UTC and nothing else, so the only value a reader could store is the *ingesting*
+ *   machine's offset for that instant — a fact about where the ingest ran, under a name that claims to
+ *   be a fact about the session. A rebuild on another machine would change it. Nothing consumes it, so
+ *   it is absent rather than plausible.
  *
  * Cost bases, per #14: `reported` — the provider priced the usage (`usage.cost.total > 0`, stored on
  * the row itself, NULL when it priced nothing); `estimated` — the model's own non-zero rate from the
@@ -86,7 +91,6 @@ const TABLES = {
     cwd TEXT,
     project TEXT,
     started_at_ms INTEGER,
-    tz_offset_min INTEGER,
     version TEXT,
     entries INTEGER NOT NULL,
     problems_json TEXT
@@ -719,7 +723,6 @@ export function rowsForSession(session) {
       cwd: str(session.cwd),
       project: str(session.cwd) ? path.basename(session.cwd) : null,
       started_at_ms: int(Date.parse(session.startedAt)),
-      tz_offset_min: Date.parse(session.startedAt ?? "") ? -new Date(session.startedAt).getTimezoneOffset() : null,
       version: session.version === undefined || session.version === null ? null : String(session.version),
       entries: session.entries ?? 0,
       problems_json: session.problems?.length ? JSON.stringify(session.problems) : null,
@@ -779,7 +782,10 @@ export function openStore(dbPath, { sqlite = cachedSqlite, rebuild = false } = {
   } catch {
     /* no store yet, or no version row: both mean "create it" */
   }
-  if (Number.isFinite(existing) && existing > SCHEMA_VERSION) {
+  if (!rebuild && Number.isFinite(existing) && existing > SCHEMA_VERSION) {
+    // Only a *read* is refused: `rebuild` drops every object and writes this build's schema, so it is
+    // the recovery path for a store a newer reader left behind — the guard must not close the door the
+    // docstring promises.
     db.close();
     throw new Error(`metrics store at ${dbPath} was written by schema ${existing}; this reader writes ${SCHEMA_VERSION}`);
   }
@@ -1004,7 +1010,16 @@ export async function ingest({
       continue;
     }
     for (const unreadable of found.unreadable) {
+      // A directory (or path) the walk could not read is a file-level absence, so it lands as a row of
+      // its own and not only as prose: otherwise the store is short of it, `totals` does not count it,
+      // and a caller reading the exit status is told the accounting was complete when it was not.
       accounting.unreadablePaths.push({ harness, path: unreadable.path, reason: unreadable.reason });
+      db.exec("BEGIN");
+      dropParse.run(unreadable.path);
+      dropSession.run(unreadable.path);
+      upsertFile.run(unreadable.path, harness, 0, 0, "unreadable", unreadable.reason, 0, 0, now);
+      db.exec("COMMIT");
+      accounting.filesUnreadable += 1;
     }
     for (const file of found.files) {
       seen.add(file);
@@ -1012,7 +1027,15 @@ export async function ingest({
       try {
         st = stat(file);
       } catch (error) {
+        // The file's *old* rows go with the new status, in one transaction: a file recorded as
+        // unreadable while its previous session, turns, runs and findings stayed in the tables is a
+        // store whose incremental totals overstate the JSONL and disagree with a `--rebuild` over the
+        // same tree — the exact divergence the derived-store rule exists to prevent.
+        db.exec("BEGIN");
+        dropParse.run(file);
+        dropSession.run(file);
         upsertFile.run(file, harness, 0, 0, "unreadable", error?.message ?? String(error), 0, 0, now);
+        db.exec("COMMIT");
         accounting.filesUnreadable += 1;
         continue;
       }
@@ -1034,7 +1057,13 @@ export async function ingest({
         accounting.filesRead += 1;
         accounting.unparsed += parsed.unparsed;
       } catch (error) {
+        // Same rule for a file that read but would not write: the rolled-back transaction left the
+        // *previous* rows standing, so the status alone would be a lie about what the store holds.
+        db.exec("BEGIN");
+        dropParse.run(file);
+        dropSession.run(file);
         upsertFile.run(file, harness, st.size, Math.round(st.mtimeMs), "failed", error?.message ?? String(error), 0, 0, now);
+        db.exec("COMMIT");
         accounting.filesFailed += 1;
       }
     }
@@ -1075,8 +1104,11 @@ const cardCost = (usage, rates) =>
  * What one usage's tokens cost, always with the basis it was priced on:
  * - `reported` — the provider stated a price; the number is the provider's own, and no card is applied;
  * - `estimated` — the provider priced nothing, and *its* card rates the model: a metered route's tokens;
- * - `list` — the provider priced nothing and has no usable rate, so the first non-zero rate any
- *   provider carries for the same model id stands in: what a plan's tokens would have cost at list;
+ * - `list` — the provider priced nothing and has no usable rate, so the *highest* non-zero rate any
+ *   provider carries for the same model id stands in: a vendor's list price is one number, catalogue
+ *   rows for it differ by reseller, and the highest is the one that cannot understate what a plan's
+ *   tokens would have cost. Ties break on the provider name, so the choice is deterministic and does
+ *   not drift with the order a catalogue happens to grow in;
  * - `no rate` — nothing to price with, stated rather than counted as zero.
  */
 export function pricedUsage(db, provider, model, usage) {
@@ -1087,7 +1119,8 @@ export function pricedUsage(db, provider, model, usage) {
   if (rates) return { basis: "estimated", amount: cardCost(usage, rates), via: `${rates.provider}/${rates.model}` };
   const reference = db
     .prepare(
-      `SELECT * FROM price WHERE model = ? AND (input > 0 OR output > 0 OR cache_read > 0 OR cache_write > 0) ORDER BY provider LIMIT 1`,
+      `SELECT * FROM price WHERE model = ? AND (input > 0 OR output > 0 OR cache_read > 0 OR cache_write > 0)
+       ORDER BY (input + output) DESC, provider LIMIT 1`,
     )
     .get(model);
   const fallback = usable(reference);
@@ -1396,7 +1429,8 @@ export function totals(db) {
   const count = (sql) => db.prepare(sql).get().n;
   return {
     files: count(`SELECT COUNT(*) n FROM store_file`),
-    filesUnreadable: count(`SELECT COUNT(*) n FROM store_file WHERE status <> 'ok'`),
+    filesUnreadable: count(`SELECT COUNT(*) n FROM store_file WHERE status = 'unreadable'`),
+    filesFailed: count(`SELECT COUNT(*) n FROM store_file WHERE status = 'failed'`),
     sessions: count(`SELECT COUNT(*) n FROM session`),
     sessionsWithoutHeader: count(`SELECT COUNT(*) n FROM session WHERE sid IS NULL`),
     turns: count(`SELECT COUNT(*) n FROM turn`),

@@ -23,21 +23,23 @@ import { DEFAULT_CATALOGUE, DEFAULT_DB, DEFAULT_ROOTS, ingest } from "./metrics-
 
 const args = process.argv.slice(2);
 const has = (flag) => args.includes(`--${flag}`);
-const values = (name) =>
-  args.flatMap((arg, i) => (arg === `--${name}` ? [args[i + 1]].filter((v) => v !== undefined) : []));
+const values = (name) => args.flatMap((arg, i) => (arg === `--${name}` ? [args[i + 1]].filter((v) => v !== undefined) : []));
 const value = (name, fallback) => values(name).at(-1) ?? fallback;
 
 const KNOWN_FLAGS = ["db", "root", "catalogue", "rebuild", "json", "quiet"];
 const unknown = args.filter((arg) => arg.startsWith("--") && !KNOWN_FLAGS.includes(arg.slice(2)));
 if (unknown.length) {
-  console.error(
-    `ingest-metrics: unknown flag ${unknown.join(", ")} — this command takes ${KNOWN_FLAGS.map((f) => `--${f}`).join(", ")}`,
-  );
+  console.error(`ingest-metrics: unknown flag ${unknown.join(", ")} — this command takes ${KNOWN_FLAGS.map((f) => `--${f}`).join(", ")}`);
   process.exit(1);
 }
 
-const harnessOf = (root) =>
-  root.includes(`${path.sep}.omp`) ? "omp" : root.includes(`${path.sep}.pi`) ? "pi" : "custom";
+/** The harness whose store a root is, from the path segment itself — `~/.ompbackups` is not `~/.omp`. */
+const harnessOf = (root) => {
+  const segments = path.resolve(root).split(path.sep);
+  if (segments.includes(".omp")) return "omp";
+  if (segments.includes(".pi")) return "pi";
+  return "custom";
+};
 
 const dirs = values("root");
 const roots = dirs.length
@@ -67,7 +69,9 @@ if (has("json")) {
   console.log(
     `files: ${t.files} (${result.filesRead} read, ${result.filesSkipped} skipped, ${result.filesUnreadable} unreadable, ${result.filesFailed} failed, ${result.filesPruned} pruned)`,
   );
-  console.log(`sessions: ${t.sessions}${t.sessionsWithoutHeader ? ` (${t.sessionsWithoutHeader} with no header)` : ""} · turns: ${t.turns}`);
+  console.log(
+    `sessions: ${t.sessions}${t.sessionsWithoutHeader ? ` (${t.sessionsWithoutHeader} with no header)` : ""} · turns: ${t.turns}`,
+  );
   console.log(
     `runs: ${t.deliberationRuns} deliberation + ${t.proxyRuns} proxy · seats: ${t.seats} · findings: ${t.seatFindings} seat / ${t.runFindings} kept in a disposition`,
   );
@@ -79,9 +83,7 @@ if (has("json")) {
       ? `rate card: ${result.priceCard.rows} rate(s) from ${result.priceCard.source}${result.priceCard.skipped ? `, ${result.priceCard.skipped} unpriced` : ""}`
       : `rate card: ${result.priceCard.reason}`,
   );
-  console.log(
-    `unparsed lines: ${result.unparsed} (landed with file and reason), in ${t.parseFailures} named row(s)`,
-  );
+  console.log(`unparsed lines: ${result.unparsed} (landed with file and reason), in ${t.parseFailures} named row(s)`);
   for (const entry of result.unreadablePaths) {
     console.log(`cannot read: ${entry.harness} ${entry.path} — ${entry.reason}`);
   }

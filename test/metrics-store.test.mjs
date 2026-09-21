@@ -688,7 +688,7 @@ test("rowsForSession is pure and complete for one session", { skip: noSqlite }, 
   assert.equal(rows.turns[0].priced, 0);
   assert.equal(rows.turns[0].tool_errors, 1, "the failed result is charged to the turn that called it");
   assert.equal(rows.toolResults[0].device, 1, "an xd:// write through omp is a device call");
-  assert.equal(rows.session.tz_offset_min !== null, true, "the offset at the session's own moment is captured");
+  assert.equal("tz_offset_min" in rows.session, false, "no machine-dependent offset is stored under a session's name");
   assert.equal(rows.parseFailures.length, 0);
 
   // Usage normalisation is its own contract: absent is zero, money is never invented.
@@ -717,31 +717,88 @@ test("a store written by a newer reader is refused by version", { skip: noSqlite
   assert.throws(() => openStore(dbPath), /was written by schema/);
 });
 
+/**
+ * A bounded spawn. The repository forbids an unbounded wait in test code: `spawnSync` blocks the event
+ * loop with no deadline of its own, so a regression that hangs the CLI would hang the whole suite with
+ * no failed check — a timeout turns that into a *named* failure instead.
+ */
+const runCli = (args) => {
+  const result = spawnSync(process.execPath, args, { cwd: root, encoding: "utf8", timeout: 60_000 });
+  assert.equal(result.signal, null, `the CLI was killed after 60s (signal ${result.signal}): ${args.join(" ")}`);
+  assert.equal(result.error, undefined, `the CLI could not be run: ${result.error?.message ?? ""}`);
+  return result;
+};
+
+test("a file that stops being readable takes its old rows with it", { skip: noSqlite }, async () => {
+  const fixture = writeFixtureStore();
+  const dbPath = path.join(tempDir("ghost"), "matrix.db");
+  const catalogue = writeCatalogue();
+  const opts = { dbPath, roots: fixture.roots, catalogue };
+  const deny = (file, encoding) => {
+    if (String(file).endsWith("omp-1.jsonl")) throw new Error("EACCES: permission denied");
+    return fs.readFileSync(file, encoding);
+  };
+
+  await ingest(opts);
+  const before = openStore(dbPath);
+  assert.equal(totals(before).sessions, 2, "both files ingested");
+  before.close();
+
+  // The omp file stops being readable *and* has moved on (a changed fingerprint, or the ingest would
+  // rightly skip it without reading). Its session, turns, runs and findings must leave the store with
+  // it: a status of `failed` beside rows that are still counted is a store that overstates the JSONL
+  // and disagrees with a `--rebuild` over the same tree.
+  fs.appendFileSync(fixture.ompFile, "\n");
+  const future = new Date(Date.now() + 1000);
+  fs.utimesSync(fixture.ompFile, future, future);
+  const broken = await ingest({ ...opts, readFile: deny });
+  assert.equal(broken.filesFailed + broken.filesUnreadable, 1);
+
+  const after = openStore(dbPath);
+  assert.equal(totals(after).sessions, 1, "the failed file's session is gone, not stale");
+  assert.equal(totals(after).deliberationRuns, 0, "and the runs it carried");
+  assert.equal(totals(after).turns, 1, "and its turns — only the pi session's remains");
+  assert.equal(totals(after).filesFailed, 1, "the failure is counted under its own name");
+  assert.equal(totals(after).filesUnreadable, 0, "…and not as unreadable");
+  after.close();
+
+  // Which is what a rebuild over the same tree holds as well.
+  const rebuiltPath = path.join(tempDir("ghost-rebuild"), "matrix.db");
+  await ingest({ ...opts, dbPath: rebuiltPath, rebuild: true, readFile: deny });
+  const rebuilt = openStore(rebuiltPath);
+  const incremental = openStore(dbPath);
+  assert.deepEqual(totals(rebuilt), totals(incremental), "the incrementally updated store equals a rebuild");
+  rebuilt.close();
+  incremental.close();
+});
+
 test("the CLI accounts for the store it built, and refuses a flag it does not take", { skip: noSqlite }, async () => {
   const fixture = writeFixtureStore();
   const dbPath = path.join(tempDir("cli"), "matrix.db");
   const catalogue = writeCatalogue();
 
-  const run = spawnSync(
-    process.execPath,
-    ["scripts/ingest-metrics.mjs", "--db", dbPath, "--root", path.join(fixture.dir, "omp"), "--catalogue", catalogue],
-    { cwd: root, encoding: "utf8" },
-  );
+  const run = runCli(["scripts/ingest-metrics.mjs", "--db", dbPath, "--root", path.join(fixture.dir, "omp"), "--catalogue", catalogue]);
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /files: 1 \(1 read/);
   assert.match(run.stdout, /unparsed lines: 1/);
 
-  const json = spawnSync(
-    process.execPath,
-    ["scripts/ingest-metrics.mjs", "--db", dbPath, "--root", path.join(fixture.dir, "omp"), "--catalogue", catalogue, "--json", "--quiet"],
-    { cwd: root, encoding: "utf8" },
-  );
+  const json = runCli([
+    "scripts/ingest-metrics.mjs",
+    "--db",
+    dbPath,
+    "--root",
+    path.join(fixture.dir, "omp"),
+    "--catalogue",
+    catalogue,
+    "--json",
+    "--quiet",
+  ]);
   assert.equal(json.status, 0, json.stderr);
   const parsed = JSON.parse(json.stdout);
   assert.equal(parsed.ok, true);
   assert.equal(parsed.totals.deliberationRuns, 1);
 
-  const bad = spawnSync(process.execPath, ["scripts/ingest-metrics.mjs", "--nope"], { cwd: root, encoding: "utf8" });
+  const bad = runCli(["scripts/ingest-metrics.mjs", "--nope"]);
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /unknown flag --nope/);
 });
