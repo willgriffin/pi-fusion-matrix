@@ -748,7 +748,6 @@ node scripts/typesafe-stub.mjs & node scripts/semif-stub.mjs &      # local back
 node scripts/interp-check.mjs                                       # the interpreter contracts
 node scripts/doctor.mjs                                             # config + connectivity
 npm test                                                            # unit tests, and the coverage floor
-node scripts/session-report.mjs --json > /dev/null                   # the reader, as a program
 node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone
 node scripts/semif-probe.mjs    --backend http://127.0.0.1:8792/score
 ```

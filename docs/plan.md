@@ -1142,8 +1142,10 @@ could not attribute). **The reader's own accounting is a unit test, not a `--che
 that run's own output — a module whose checks can only be exercised by running its script is a module whose
 units nobody can test, and the reader is thirty-eight hundred lines of units. Its checks are verified the same
 way they are written, as for the interpreter contracts: by mutating the reader and watching a named check fail.
-The CLI path that no unit test can reach — argument parsing and the report it prints — is a smoke test
-(`node scripts/session-report.mjs --json`), run by CI rather than asserted here.
+The CLI path is covered too, by the checks that spawn the script itself: argument handling
+(an unknown flag is a named usage error) and the report it prints (`--json` against a fixture store). Nothing
+about this reader needs a separate smoke test, and a run on a machine with no session stores exits 1 by design —
+"no sessions directory at …" is not a clean report.
 
 ### Step 9 — Proxy mode: a fusion that answers agent turns
 

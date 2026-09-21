@@ -83,11 +83,6 @@ jobs:
       - name: doctor
         run: node scripts/doctor.mjs
 
-      - name: the run-record reader, as a program
-        # The reader's *behaviour* is covered by `npm test` (its checks are unit tests now). What no unit test can
-        # cover is the CLI path itself — the argument parsing and the report it prints — so this runs it.
-        run: node scripts/session-report.mjs --json > /dev/null
-
       - name: backend probes
         run: |
           node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone
