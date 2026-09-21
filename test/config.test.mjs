@@ -85,11 +85,10 @@ test("every disposition rule is a named load error", () => {
     ],
     [
       "a persona whose answer is not JSON",
-      {
-        personas: { "review-technical": { output: "text" } },
-        fusions: { "review-quick": { disposition: { personas: ["review-skeptic", "review-synth", "review-technical"] } } },
-      },
-      /disposition names "review-technical", whose answer is not JSON/,
+      // `best`'s mode runs `synth`, and `synth` is the non-JSON seat the rule is about — patching the fusion under
+      // test rather than a *different* fusion's persona, which would make the row pass on the wrong error.
+      { fusions: { best: { disposition: { personas: ["synth"] } } } },
+      /disposition names "synth", whose answer is not JSON/,
     ],
     [
       "a declaration that leaves out the last stage seat",

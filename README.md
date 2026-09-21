@@ -528,10 +528,10 @@ and backends may only be declared by the packaged config or `~/.config/pi-fusion
 ```
 
 A non-empty list of seats *this* fusion's mode runs, every one `output: "json"`, and the mode's last
-stage seat among them — that answer is what the run records. The loader rejects a list that names a
-seat its mode does not run, a seat whose answer is not JSON, or one without the last stage seat, and a
-mode that ends in no single seat writes no disposition. `review: true` requires one, and every rung it
-routes to must declare one too. The schema is applied to these seats and to no others — see
+stage seat among them — that answer is what the run records. The loader rejects by name a list that
+names no seat, a seat its mode does not run, a seat whose answer is not JSON, one without the last
+stage seat, and any declaration on a mode that ends in no single seat; `review: true` requires one, and
+every rung it routes to must declare one too. The schema is applied to these seats and to no others — see
 "Which seats are judged is declared, not guessed" under *Reviewing with a fusion* for why that is the
 difference between a classifier's label and a review that found nothing.
 

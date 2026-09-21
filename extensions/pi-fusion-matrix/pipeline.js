@@ -202,13 +202,14 @@ function dispositionFlaw(value) {
 }
 
 /**
- * A JSON seat's answer as both *text for the next stage* and *the disposition it declared*. The record is the
- * point: a review whose findings exist only as prose cannot be counted, and a verdict the model never stated is
- * not invented here — `findings` is always present, `verdict` only when it said one, and an answer that does not
- * satisfy the contract it was asked for is recorded as malformed rather than wrapped into something that reads
- * like a clean review.
+ * A JSON seat's answer as both *text for the next stage* and *the disposition its fusion declared for this seat*.
+ * The record is the point: a review whose findings exist only as prose cannot be counted, and a verdict the model
+ * never stated is not invented here — `findings` is always present, `verdict` only when it said one, and a
+ * declared seat whose answer does not satisfy that contract is recorded as malformed rather than wrapped into
+ * something that reads like a clean review. Whether this seat's answer *is* a disposition is the caller's
+ * decision, taken from its fusion's declaration and never from the keys the answer happens to use.
  *
- * Exported because this *is* a unit: the schema is the whole contract of a review rung's last seat, and it is
+ * Exported because this *is* a unit: the schema is the whole contract of the seats a rung declares, and it is
  * testable without running a pipeline.
  */
 export function dispositionOf(persona, text, { declared = false } = {}) {

@@ -1804,9 +1804,14 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     stands), and an *undeclared* seat answering `{"verdict":"banana","findings":"oops"}` cannot make the run
     malformed — the declared seat's clean verdict stands and `malformedAnswers` is absent. Both are mutation-proven
     on the wiring, not just the unit: with the declaration dropped from the `runSeatInner` call site nine checks go
-    red (the whole declared machinery collapses), and with it hard-coded to `true` — the old, shape-inferred
-    behaviour — exactly the two new checks go red and each names what it caught. The three packaged review rungs
-    declare their seats — each exactly the seats its own mode runs, whose last stage seat is the synthesis — and
+    red (the whole declared machinery collapses), and with it hard-coded to `true` — the schema applied to every
+    JSON seat, which is what this change removes — two checks go red: the pre-existing one that pins a classifier's
+    `{"label":"mechanical"}` as unjudged, and the new one that pins an undeclared seat's `{"verdict":"banana"}` as
+    unable to make the run malformed. The declared seat answering `{"summary":"…"}` stays green under that
+    mutation, because a declared seat is judged either way; the two reds are the checks that state the *scope*.
+    The three packaged review rungs declare the seats that answer findings — the three panels and the synthesis,
+    their mode's last stage seat among them — and deliberately leave the mid-panel `judge` undeclared, since its
+    `{"label":"…"}` answer is not a disposition and is what the two checks above pin.
     `review-quick` declares the two its single-seat mode runs rather than the committee's four. Each load rule is
     mutation-proven on a copy of the tree: disabling one reddens the rules test alone and the failure names that
     rule's own fixture — the empty list, a name the mode does not run, a name whose answer is not JSON, a list

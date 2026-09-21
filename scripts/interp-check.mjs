@@ -602,7 +602,7 @@ check(
 
 // Three JSON seats, three answers, one record. `review-committee` ends in `judge` then `review-synth`, so a
 // per-persona model can put a different kind of answer in each seat and the run-level record has to stay
-// unambiguous: a valid disposition from an earlier seat, a *different* persona's JSON that claims nothing, and
+// unambiguous: a valid disposition from an earlier seat, a *different* persona's JSON that declares nothing, and
 // a malformed answer that arrives last.
 const perPersonaModel = (answers) => async (args) => {
   const payload = answers[args?.persona?.name] ?? { verdict: "clean", findings: [] };
@@ -632,14 +632,15 @@ const runReviewCheck = (answers) =>
     registry,
   });
 
-// The case that made the schema global: a classifier's answer, or any JSON persona answering a different
-// contract, is recovered as data and recorded against nothing.
+// The case that made the schema global: a JSON persona the rung did not declare, answering a different contract.
+// Its answer is recovered as data and recorded against nothing — and the check is named for the *declaration*,
+// not for what the answer looks like, because that is what decides it.
 const foreignJson = await runReviewCheck({
   judge: { label: "mechanical", confidence: 0.95 },
   "review-synth": { verdict: "clean", findings: [] },
 });
 check(
-  "a JSON answer that does not claim to be a disposition is not judged by its schema",
+  "a JSON answer outside the fusion's declaration is judged by nothing",
   foreignJson.details.malformedAnswers === undefined &&
     foreignJson.details.verdict === "clean" &&
     foreignJson.details.dispositionBy === "review-synth",
