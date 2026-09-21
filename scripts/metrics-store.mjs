@@ -1104,11 +1104,14 @@ const cardCost = (usage, rates) =>
  * What one usage's tokens cost, always with the basis it was priced on:
  * - `reported` — the provider stated a price; the number is the provider's own, and no card is applied;
  * - `estimated` — the provider priced nothing, and *its* card rates the model: a metered route's tokens;
- * - `list` — the provider priced nothing and has no usable rate, so the *highest* non-zero rate any
- *   provider carries for the same model id stands in: a vendor's list price is one number, catalogue
- *   rows for it differ by reseller, and the highest is the one that cannot understate what a plan's
- *   tokens would have cost. Ties break on the provider name, so the choice is deterministic and does
- *   not drift with the order a catalogue happens to grow in;
+ * - `list` — the provider priced nothing and has no usable rate, so one catalogue row stands in for the
+ *   model: the row with the highest **sum across its four rates** (`input + output + cache_read +
+ *   cache_write`), ties broken by provider name. A vendor's list price is one number and catalogue rows
+ *   for it differ by reseller, so the dearest card is the best single stand-in — and because the ordering
+ *   is a stated composite over all four columns, it is deterministic and does not drift with the order a
+ *   catalogue happens to grow in. It is a heuristic, not a bound: a candidate row can still be cheaper on
+ *   one dimension and dearer on another, so this is the closest available stand-in rather than a promise
+ *   that no other row would have priced a given usage higher;
  * - `no rate` — nothing to price with, stated rather than counted as zero.
  */
 export function pricedUsage(db, provider, model, usage) {
@@ -1120,7 +1123,7 @@ export function pricedUsage(db, provider, model, usage) {
   const reference = db
     .prepare(
       `SELECT * FROM price WHERE model = ? AND (input > 0 OR output > 0 OR cache_read > 0 OR cache_write > 0)
-       ORDER BY (input + output) DESC, provider LIMIT 1`,
+       ORDER BY (input + output + cache_read + cache_write) DESC, provider LIMIT 1`,
     )
     .get(model);
   const fallback = usable(reference);

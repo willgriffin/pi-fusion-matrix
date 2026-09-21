@@ -516,6 +516,24 @@ test("costs: every usage is priced at a stated basis, and never a silent zero", 
     via: null,
   });
 
+  // The list basis picks one catalogue row for the model by the highest *sum* across all four rates —
+  // a cache-heavy card with a smaller input+output sum must win on its cache rates, or the rule would
+  // silently ignore two of the four columns it claims to span.
+  db.exec("BEGIN");
+  for (const row of [
+    { provider: "cachey", model: "mixed-model", input: 0.1, output: 0.1, cache_read: 9, cache_write: 1 },
+    { provider: "promptly", model: "mixed-model", input: 2, output: 2, cache_read: 0.1, cache_write: 0 },
+  ]) {
+    db.prepare(
+      `INSERT INTO price (provider, model, input, output, cache_read, cache_write, source, first_seen_ms, last_seen_ms)
+       VALUES (?, ?, ?, ?, ?, ?, 'fixture', 1, 1)`,
+    ).run(row.provider, row.model, row.input, row.output, row.cache_read, row.cache_write);
+  }
+  db.exec("COMMIT");
+  const picked = pricedUsage(db, "plan-provider", "mixed-model", { input: 1, output: 1, cache_read: 1, cache_write: 1, reported: null });
+  assert.equal(picked.basis, "list");
+  assert.equal(picked.via, "cachey/mixed-model", "the highest sum across all four rates wins, cache included");
+
   const models = byModel(db);
   const glm = models.find((m) => m.model === "opencode-go/glm-5.3");
   assert.equal(glm.cost.estimated, (50 * 0.6 + 10 * 2.2) / 1e6, "the seat's own card prices its tokens");
