@@ -44,6 +44,12 @@
         "opencode-go"
       ]
     },
+    "muse": {
+      "model": "muse-spark-1.3-contributor",
+      "providers": [
+        "opencode-go"
+      ]
+    },
     "qwen-max": {
       "model": "qwen3.8-max",
       "providers": [
@@ -510,7 +516,7 @@
           "qwen-max"
         ],
         "review-skeptic": [
-          "deepseek-pro"
+          "muse"
         ],
         "review-systems": [
           "glm"
@@ -575,7 +581,7 @@
       },
       "candidates": {
         "review-skeptic": [
-          "deepseek-pro"
+          "muse"
         ],
         "review-synth": [
           "deepseek-pro"
@@ -625,7 +631,7 @@
           "kimi"
         ],
         "review-skeptic": [
-          "glm",
+          "muse",
           "deepseek-pro"
         ],
         "review-systems": [
