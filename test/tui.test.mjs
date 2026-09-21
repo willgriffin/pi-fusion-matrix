@@ -46,6 +46,7 @@ import {
   paint,
   proposeRouteOrder,
   proposeSeatAlias,
+  selected,
   validateAgainst,
 } from "../scripts/matrix-tui.mjs";
 import { loadMatrixConfig } from "../extensions/pi-fusion-matrix/config.js";
@@ -545,11 +546,85 @@ test("a reload keeps your place: the tab, the cursors and the toggles survive it
   };
   const after = adopt(before, { state: state() });
   assert.equal(after.tab, "routes", "the tab is the view's, not the world's");
-  assert.deepEqual(after.cursors, { aliases: 0, fusions: 1, routes: 4 });
+  const routes = after.rows.routes.length;
+  assert.deepEqual(
+    after.cursors,
+    { aliases: 0, fusions: 1, routes: Math.min(4, routes - 1) },
+    "a cursor past the reloaded rows is clamped onto the last one",
+  );
+  assert.equal(selected(after) !== undefined, true, "so the selection still points at a row");
   assert.equal(after.rain, false);
   assert.equal(after.color, false);
   assert.equal(after.picker, null, "but a picker open across a reload is closed");
   assert.equal(after.rows.routes.length, before.rows.routes.length, "the rows are the reloaded world's");
+});
+
+test("each money column is one basis, and the store row a config no longer names is still placed", () => {
+  // A model whose seats carry *both* an estimated card cost and a list-price stand-in: folding the two
+  // into one column would overstate list-basis money with no denominator for the folded part.
+  const mixed = [{ ...modelStats[0], cost: { reported: 0.5, estimated: 0.25, list: 0.1, noRate: 0, priced: 3 } }];
+  const alias = aliasRows({ config, modelStats: mixed }).find((row) => row.alias === "kimi");
+  assert.equal(alias.listUsd, 0.1, "the list column is list-basis money only");
+  assert.equal(alias.estimatedUsd, 0.25, "and the estimated basis keeps its own field");
+  const fusion = fusionRows({
+    config,
+    fusionStats: [{ ...fusionStats[0], cost: { reported: 0.5, estimated: 0.25, list: 0.1, noRate: 0, priced: 3 } }],
+    seatStats,
+  }).find((row) => row.fusion === "review");
+  assert.equal(fusion.listUsd, 0.1);
+  assert.equal(fusion.estimatedUsd, 0.25);
+  for (const tab of ["aliases", "fusions"]) {
+    const keys = columnsFor(tab).map((column) => column.key);
+    assert.equal(keys.includes("estimatedUsd") && keys.includes("listUsd"), true, `${tab} shows one column per basis`);
+  }
+
+  // A seat with store history that the config no longer names: it is placed, and says so.
+  const orphan = routeRows({ config, seatStats: [...seatStats, { ...seatStats[0], persona: "review-legacy", seats: 2 }] }).find(
+    (row) => row.seat === "review-legacy",
+  );
+  assert.equal(orphan !== undefined, true, "a seat that ran is shown even when the roster dropped it");
+  assert.equal(orphan.unconfigured, true);
+  assert.equal(orphan.candidates, "—");
+  assert.match(detailFor({ ...state(), tab: "routes" }, orphan), /not in the config any more/);
+  assert.equal(
+    routeRows({ config, seatStats }).every((row) => row.unconfigured === false),
+    true,
+    "and configured seats are not marked",
+  );
+});
+
+test("a save asks the loader again, and refuses what it cannot validate or read", () => {
+  // The loader is consulted at the moment of writing: a proposal whose recorded errors were empty is
+  // still refused if the config has moved since, and an unreadable layer is never written over.
+  const world = state();
+  const stale = {
+    ...world,
+    pending: { summary: "x", errors: [], patch: { fusions: { quick: { candidates: { technical: ["ghost"] } } } } },
+  };
+  assert.equal(validateAgainst(stale, stale.pending.patch).length > 0, true, "the patch is invalid by now");
+  const unreadable = {
+    ...world,
+    layerReadError: "…does not parse as JSON: Unexpected token",
+    pending: { summary: "x", errors: [], patch: {} },
+  };
+  assert.equal(unreadable.layerReadError !== null, true, "an unreadable layer is a named state");
+
+  // A proposal that changes nothing is not saveable, whatever its summary says.
+  const aliasRow = world.rows.aliases.find((row) => row.alias === "kimiAlias");
+  const noop = proposeRouteOrder({ state: world, row: aliasRow });
+  assert.equal(noop.saveable, false);
+  assert.equal(applyKey({ ...world, pending: noop }, "s").effect, "none", "so `s` writes nothing");
+  assert.match(applyKey({ ...world, pending: noop }, "s").state.message, /changes nothing/);
+});
+
+test("the picker scrolls to keep the option it will choose on screen", () => {
+  const palette = paletteFor({ color: true });
+  const options = Array.from({ length: 40 }, (_, i) => `alias-${i}`);
+  const world = { ...state(), picker: { title: "pick", options, cursor: 39, pending: () => ({}) } };
+  const frame = frameFor({ width: 60, height: 14, state: world, palette });
+  const text = Array.from({ length: 14 }, (_, row) => gridLine(frame, row)).join("\n");
+  assert.match(text, /▸ alias-39/, "the highlighted option is on screen, not scrolled past");
+  assert.doesNotMatch(text, /alias-0$|▸ alias-0\b/, "and the window moved with it");
 });
 
 test("a proposal writes only its own path into the layer it names", () => {

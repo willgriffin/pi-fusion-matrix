@@ -271,7 +271,10 @@ export function aliasRows({ config, modelStats }) {
       unlocated: stats.unlocated,
       reportedUsd: stats.pricedSeats > 0 ? stats.reportedUsd : null,
       pricedSeats: stats.pricedSeats,
-      listUsd: stats.listUsd + stats.estimatedUsd,
+      // One basis per field: a column that added `estimated` into `list` would overstate list-basis money
+      // with no denominator for the folded part, and no reader could tell the two apart afterwards.
+      listUsd: stats.listUsd,
+      estimatedUsd: stats.estimatedUsd,
       noRate: stats.noRate,
       refusals: Object.entries(stats.attempts)
         .map(([reason, n]) => `${reason}×${n}`)
@@ -304,7 +307,8 @@ export function fusionRows({ config, fusionStats, seatStats }) {
       located: stats?.marked.located ?? 0,
       unlocated: stats?.marked.unlocated ?? 0,
       reportedUsd: stats ? stats.cost.reported : null,
-      listUsd: stats ? stats.cost.list + stats.cost.estimated : 0,
+      listUsd: stats ? stats.cost.list : 0,
+      estimatedUsd: stats ? stats.cost.estimated : 0,
       last: stats?.lastRunAt ? String(stats.lastRunAt).slice(0, 16).replace("T", " ") : "—",
     });
   }
@@ -330,8 +334,14 @@ export function routeRows({ config, seatStats }) {
   const rows = [];
   for (const [fusion, spec] of Object.entries(config.fusions ?? {})) {
     const mode = config.modes?.[spec.mode];
-    const names = [...new Set([...modeSeats(mode), ...Object.keys(spec.candidates ?? {})])].sort();
+    const configured = [...new Set([...modeSeats(mode), ...Object.keys(spec.candidates ?? {})])];
+    // A seat that *ran* is shown whether or not the config still names it: a roster edited (or a seat
+    // renamed) leaves store rows behind, and a routes tab that silently dropped them would report a
+    // history it cannot place as no history at all.
+    const stored = seatStats.filter((row) => row.fusion === fusion).map((row) => row.persona);
+    const names = [...new Set([...configured, ...stored])].sort();
     for (const seat of names) {
+      const unconfigured = !configured.includes(seat);
       const candidates = (spec.candidates?.[seat] ?? []).map((candidate) =>
         typeof candidate === "string" ? candidate : candidate?.decide ? "decision" : "?",
       );
@@ -350,6 +360,7 @@ export function routeRows({ config, seatStats }) {
         fusion,
         seat,
         candidates: candidates.join(" → ") || "—",
+        unconfigured,
         answered: stat
           ? Object.entries(stat.answered)
               .map(([alias, n]) => `${alias}×${n}`)
@@ -359,7 +370,6 @@ export function routeRows({ config, seatStats }) {
         seats: stat?.seats ?? 0,
         degraded: stat?.degraded ?? 0,
         tokens: stat?.tokens ?? 0,
-        reportedUsd: stat && stat.unpricedSeats < stat.seats ? stat.reportedUsd : stat ? null : null,
       });
     }
   }
@@ -378,6 +388,7 @@ export function columnsFor(tab) {
       { key: "located", label: "located", align: "right", min: 7 },
       { key: "reportedUsd", label: "$report", align: "right", min: 8, format: (row) => money(row.reportedUsd) },
       { key: "pricedSeats", label: "n", align: "right", min: 3 },
+      { key: "estimatedUsd", label: "$est", align: "right", min: 7, format: (row) => (row.estimatedUsd ? money(row.estimatedUsd) : "—") },
       { key: "listUsd", label: "$list", align: "right", min: 8, format: (row) => (row.listUsd ? money(row.listUsd) : "—") },
       { key: "refusals", label: "refused", min: 8, max: 22 },
       { key: "last", label: "last seat", min: 10, max: 16 },
@@ -397,6 +408,7 @@ export function columnsFor(tab) {
       { key: "located", label: "loc", align: "right", min: 3 },
       { key: "unlocated", label: "unloc", align: "right", min: 5 },
       { key: "reportedUsd", label: "$report", align: "right", min: 8, format: (row) => money(row.reportedUsd) },
+      { key: "estimatedUsd", label: "$est", align: "right", min: 7, format: (row) => (row.estimatedUsd ? money(row.estimatedUsd) : "—") },
       { key: "listUsd", label: "$list", align: "right", min: 8, format: (row) => (row.listUsd ? money(row.listUsd) : "—") },
       { key: "last", label: "last run", min: 10, max: 16 },
     ];

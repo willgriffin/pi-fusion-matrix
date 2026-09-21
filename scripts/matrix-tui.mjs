@@ -72,6 +72,7 @@ export function buildState({
   baseConfig = {},
   layerConfig = {},
   layerFile = "",
+  layerReadError = null,
 } = {}) {
   return {
     tab: "aliases",
@@ -93,6 +94,7 @@ export function buildState({
     rain: true,
     color: true,
     message: source,
+    layerReadError,
   };
 }
 
@@ -144,6 +146,7 @@ export function applyKey(state, key) {
   else if (key === "e") return { state: next, effect: "propose" };
   else if (key === "s") {
     if (!state.pending) next.message = "nothing to save — e proposes a change";
+    else if (state.pending.saveable === false) next.message = "nothing to write — that proposal changes nothing";
     else if (state.pending.errors.length > 0) next.message = `refused: ${state.pending.errors[0]}`;
     else return { state: next, effect: "save" };
   }
@@ -196,7 +199,9 @@ export function proposeRouteOrder({ state, row }) {
   const patch = deepClone(state.layerConfig);
   const providers = state.config.aliases?.[row.alias]?.providers ?? [];
   if (providers.length < 2) {
-    return { layerFile: state.layerFile, patch, summary: `${row.alias} has one route; nothing to reorder`, errors: [] };
+    // Not an error, but not a change either: `s` must not create or rewrite a layer file to write the
+    // state it already has, so the proposal says it is unsaveable rather than relying on the summary.
+    return { layerFile: state.layerFile, patch, summary: `${row.alias} has one route; nothing to reorder`, errors: [], saveable: false };
   }
   const rotated = [...providers.slice(1), providers[0]];
   patch.aliases = patch.aliases ?? {};
@@ -308,7 +313,8 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
       "routes  — per fusion and seat: the ordered candidates from config, which alias answered, what refused",
       "e proposes a change for the selected row (routes: a new candidate alias; aliases: rotate the routes)",
       "s writes it to the layer named under it after the loader validates it; esc discards it",
-      "$report is what providers priced, $list is the same tokens at list price — the bases are never mixed",
+      "$report is what providers priced (with the seats it covers), $est is their own rate card applied to",
+      "unpriced seats, $list is the same tokens at list price — one basis per column, never folded together",
     ];
     const boxWidth = Math.min(width - 4, Math.max(...helpRows.map((line) => line.length)) + 4);
     const boxHeight = helpRows.length + 2;
@@ -331,11 +337,20 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
       { row: top, col: Math.floor((width - boxWidth) / 2), width: boxWidth, height: boxHeight, title: state.picker.title },
       palette,
     );
-    options
-      .slice(0, inner.height)
-      .forEach((line, i) =>
-        put(grid, inner.row + i, inner.col, truncate(line, inner.width), i === state.picker.cursor ? palette.selected : palette.ink),
+    // The option the cursor is on must be the one on screen — a picker whose highlight scrolls out of
+    // its own box makes the operator commit blind.
+    const visible = inner.height;
+    const first = clamp(state.picker.cursor - visible + 1, 0, Math.max(0, options.length - visible));
+    for (let i = 0; i < visible && first + i < options.length; i += 1) {
+      const index = first + i;
+      put(
+        grid,
+        inner.row + i,
+        inner.col,
+        truncate(options[index], inner.width),
+        index === state.picker.cursor ? palette.selected : palette.ink,
       );
+    }
   }
 
   return grid;
@@ -370,7 +385,8 @@ export function detailFor(state, row) {
           )
           .join(" · ")
       : "nothing refused";
-  return `${row.fusion}.${row.seat} · candidates ${row.candidates} · seats ${row.seats} · refused: ${refused}`;
+  const unconfigured = row.unconfigured ? " · not in the config any more (history only)" : "";
+  return `${row.fusion}.${row.seat} · candidates ${row.candidates}${unconfigured} · seats ${row.seats} · refused: ${refused}`;
 }
 
 /** The rain under the interface: interface cells win, blanks let the rain through. */
@@ -446,11 +462,22 @@ export function paint(runs, palette) {
 
 /* ------------------------------------------------------------------ world */
 
-const readJson = (file) => {
+/**
+ * A layer file as data, with its two absences told apart: a file that is **not there** is a legitimate
+ * empty layer (the first edit to a fresh machine creates it), while a file that is there and will not
+ * parse is an operator's config this program must not touch — reading it as `{}` and then writing a
+ * patch built from nothing would overwrite their real file, silently.
+ */
+const readLayer = (file) => {
+  if (!fs.existsSync(file)) return { ok: true, config: {} };
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return null;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { ok: false, reason: `${file} is not a JSON object` };
+    }
+    return { ok: true, config: parsed };
+  } catch (error) {
+    return { ok: false, reason: `${file} does not parse as JSON: ${error?.message ?? String(error)}` };
   }
 };
 
@@ -460,7 +487,8 @@ export async function loadWorld({ dbPath = DEFAULT_DB, cwd = process.cwd(), laye
   const paths = configPaths({ cwd });
   const target = layerFile ?? paths.machine;
   const baseConfig = loadMatrixConfig({ cwd, layers: ["packaged", "cwd"] }).config;
-  const layerConfig = readJson(target) ?? {};
+  const layer = readLayer(target);
+  const layerConfig = layer.ok ? layer.config : {};
   const sqlite = await loadSqlite();
   let stats = { modelStats: [], fusionStats: [], seatStats: [], storeTotals: null, note: "" };
   if (!sqlite) stats.note = "no node:sqlite: the numbers are missing here, not zero";
@@ -479,7 +507,10 @@ export async function loadWorld({ dbPath = DEFAULT_DB, cwd = process.cwd(), laye
     baseConfig,
     layerConfig,
     layerFile: target,
-    source: stats.note,
+    // An unreadable layer is a named state, not an empty one: the interface must say so and refuse to
+    // propose anything against it, because a patch built over `{}` would overwrite the operator's file.
+    layerReadError: layer.ok ? null : layer.reason,
+    source: layer.ok ? stats.note : layer.reason,
     modelStats: stats.modelStats,
     fusionStats: stats.fusionStats,
     seatStats: stats.seatStats,
@@ -504,19 +535,25 @@ async function reingest({ dbPath, catalogue }) {
 
 /**
  * A freshly loaded world, adopted without losing your place: the tab, the per-tab cursors and the
- * display toggles belong to the *view*, and a reload that reset them sent the reader back to the
- * first tab every time a change was saved.
+ * display toggles belong to the *view*, and a reload that reset them sent the reader back to the first
+ * tab every time a change was saved. Cursors are clamped to what the reloaded tabs actually hold — a
+ * reload can shrink a table (a store that emptied, a fusion that went away), and a stale cursor reads
+ * as "nothing selected" with a blank detail line rather than as the move it was.
  */
-export const adopt = (current, reloaded) => ({
-  ...current,
-  ...reloaded.state,
-  tab: current.tab,
-  cursors: current.cursors,
-  help: current.help,
-  picker: null,
-  rain: current.rain,
-  color: current.color,
-});
+export const adopt = (current, reloaded) => {
+  const cursors = { ...current.cursors };
+  for (const tab of TABS) cursors[tab] = clamp(cursors[tab] ?? 0, 0, Math.max(0, (reloaded.state.rows[tab]?.length ?? 0) - 1));
+  return {
+    ...current,
+    ...reloaded.state,
+    tab: TABS.includes(current.tab) && reloaded.state.rows[current.tab] ? current.tab : "aliases",
+    cursors,
+    help: current.help,
+    picker: null,
+    rain: current.rain,
+    color: current.color,
+  };
+};
 
 export async function main() {
   const dbPath = value("db", DEFAULT_DB);
@@ -572,6 +609,19 @@ export async function main() {
   const save = async () => {
     const pending = state.pending;
     if (!pending || pending.errors.length > 0) return;
+    // The loader is asked again, here, against the state as it is *now*: `pending.errors` was the answer
+    // when the change was proposed, and the layer or the base config can have moved since — by an
+    // operator's edit in another window, or by the target being switched. A validated-write contract
+    // has to hold at the moment of writing, not at the moment of proposing.
+    const now = validateAgainst(state, pending.patch);
+    if (now.length > 0) {
+      state = { ...state, message: `refused: ${now[0]}` };
+      return;
+    }
+    if (state.layerReadError) {
+      state = { ...state, message: `refused: ${state.layerReadError}` };
+      return;
+    }
     try {
       fs.mkdirSync(path.dirname(pending.layerFile), { recursive: true });
       fs.writeFileSync(pending.layerFile, `${JSON.stringify(pending.patch, null, 2)}\n`);
