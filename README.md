@@ -324,8 +324,8 @@ fusions sit on `single` (`cheap`, `quick`, and `default-smrt`, which adds one ro
 This is the object you actually invoke: it becomes `fusion-matrix/best`. Every persona the mode uses
 must appear in the roster and nothing may appear that the mode does not use — the loader rejects the
 mismatch rather than orphaning a model silently. Optional keys: `thinking` and `prompts` (per-persona
-overrides), `fileAgent`, `maxAdvance` (how many candidates one seat may walk, default 3), `verify`, and
-`route`.
+overrides), `fileAgent`, `maxAdvance` (how many candidates one seat may walk, default 3), `verify`, `route`, and
+`disposition` (which seats answer findings — required by `review: true`).
 
 That roster is one face of the definition; the other is what answers an *agent* turn. The writing seat
 — the persona of the mode's final `single` stage — is the fusion's executor, unless `proxy.alias` names
@@ -512,6 +512,29 @@ the session cwd, with bounded output and an escalating kill — no loop, no feed
 and backends may only be declared by the packaged config or `~/.config/pi-fusion-matrix/matrix.json`
 (see the trust boundary below).
 
+### `disposition` — which seats answer findings, declared by the rung
+
+```json
+{
+  "fusions": {
+    "review-check": {
+      "mode": "review-committee",
+      "execute": false,
+      "disposition": { "personas": ["review-technical", "review-skeptic", "review-systems", "review-synth"] },
+      "candidates": { "technical": ["glm"], "skeptic": ["kimi"], "systems": ["qwen"], "synth": ["glm"] }
+    }
+  }
+}
+```
+
+A non-empty list of seats *this* fusion's mode runs, every one `output: "json"`, and the mode's last
+stage seat among them — that answer is what the run records. The loader rejects by name a list that
+names no seat, a seat its mode does not run, a seat whose answer is not JSON, one without the last
+stage seat, and any declaration on a mode that ends in no single seat; `review: true` requires one, and
+every rung it routes to must declare one too. The schema is applied to these seats and to no others — see
+"Which seats are judged is declared, not guessed" under *Reviewing with a fusion* for why that is the
+difference between a classifier's label and a review that found nothing.
+
 ### `fileAgent` — files out of a synthesis
 
 ```json
@@ -558,10 +581,17 @@ answer stands), `details.verdict`, `details.findings` (`severity` from `blocking
 `path`, `line`, `criterion`, `claim`) and `details.severityCounts`. Severity is what decides whether another
 review is worth buying — an `editorial` finding never is — which is the point of recording it at all.
 
+Which seats are judged is **declared, not guessed**: a rung lists them in `disposition.personas`, every one a seat
+its mode runs with `output: "json"`, and its last stage seat among them because that answer is what the run
+records. The schema belongs to the rung, and both ways round that is what you want — a classifier's
+`{"verdict":"clean"}` is a valid label for *its* contract and is not failed by this one, while the seat that
+promised findings and answered `{"summary":"…"}` fails a contract its answer never mentions. Every review rung in
+this repository declares its seats; a `review: true` router declares one, and so must every rung it routes to.
+
 A schema violation is recorded as `details.malformedAnswers` with the reason, and records no verdict and no
-findings: `{"verdict":"clean"}` is an answer that claims the contract and fails it, and a run that returns one
-is not a clean review. The schema judges an answer that *claims* to be a disposition (it carries `verdict` or
-`findings`) — another JSON persona's answer is a valid answer to a different contract — and the record is a
+findings: a declared seat answering `{"verdict":"clean"}` is missing the findings it promised, and a run that
+returns one is not a clean review. An undeclared JSON seat's answer is data for the next stage whatever keys it
+uses — and the record is a
 chain, not a slot: every answer that failed its contract stays, each naming the seat that superseded it, so a
 second bad answer cannot erase the first and a malformed answer that arrives after a valid one takes the standing
 position outright. A finding's `line` keeps an explicit `null`.

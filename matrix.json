@@ -496,6 +496,14 @@
     },
     "review-check": {
       "mode": "review-committee",
+      "disposition": {
+        "personas": [
+          "review-technical",
+          "review-skeptic",
+          "review-systems",
+          "review-synth"
+        ]
+      },
       "candidates": {
         "review-technical": [
           "kimi",
@@ -552,8 +560,14 @@
       "execute": false
     },
     "review-quick": {
-      "name": "Review · quick (one skeptic)",
       "mode": "review-single",
+      "disposition": {
+        "personas": [
+          "review-skeptic",
+          "review-synth"
+        ]
+      },
+      "name": "Review · quick (one skeptic)",
       "execute": false,
       "thinking": {
         "review-skeptic": "low",
@@ -586,8 +600,16 @@
       ]
     },
     "smrt-review": {
-      "name": "Review · routed by blast radius",
       "mode": "review-committee",
+      "disposition": {
+        "personas": [
+          "review-technical",
+          "review-skeptic",
+          "review-systems",
+          "review-synth"
+        ]
+      },
+      "name": "Review · routed by blast radius",
       "review": true,
       "execute": false,
       "thinking": {

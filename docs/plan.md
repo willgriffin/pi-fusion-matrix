@@ -1314,26 +1314,33 @@ carries. Load errors, because each one is a silent degradation waiting to happen
   an agent turn, and the failure this prevents is silent: a proxy to a JSON seat answers perfectly well — with a
   review where work was asked for. Every packaged rung declares `execute: false` by hand; the rule is what keeps
   the next one from having to remember.
+- a `disposition` that names no seat, a seat its mode does not run, a seat whose answer is not JSON, or a list
+  that leaves out the mode's last stage seat — that last answer is the one the run records, so a declaration
+  without it would judge seats whose answers nobody reads. A mode ending in no single seat declares none.
+- `review: true` without a `disposition`, and a `review: true` route to a rung that declares none: the class
+  selects the rung, and a verdict nobody declared is a review recorded as having found nothing.
 
 **The disposition is data.** A review rung's last seat is the `review-synth` persona (`output: "json"`), and its
 answer is recorded on the run as `details.dispositionBy` (the persona whose answer stands), `details.verdict`,
 `details.findings` (`{severity, path, line, criterion, claim}` each) and `details.severityCounts`.
 
-**A parseable answer is not a disposition.** The schema judges an answer that *claims* to be one — it carries
-`verdict` or `findings` — because another JSON persona's answer (a classifier's label, a summariser's object) is
-a valid answer to a different contract, and failing it here would be one seat's schema applied to somebody
-else's promise. The claim is read from the answer rather than from a list of personas, so a new JSON seat is
-judged by the schema it actually answers to. Whatever the claim, the answer is still recovered as data for the
-next stage.
+**The rung declares which of its seats answer a disposition**, and only those are judged. `disposition.personas`
+is a non-empty list of the fusion's own seats — every one of them run by its mode, every one `output: "json"`, and
+the mode's last stage seat among them because that answer is the one the run records. The schema belongs to the
+rung rather than to the shape of an answer, and both failures that follow from that are the reason for the rule: a
+classifier's `{"verdict":"clean"}` is a valid label for *its* contract and must not be failed by this one, while
+the seat that promised findings and answered `{"summary":"…"}` fails a contract nothing in its answer mentions.
+Whatever the verdict, the answer is still recovered as data for the next stage. A `review: true` router declares
+one, and so does every rung it routes to: a review whose verdict is nobody's contract is not recorded.
 
-Every field of a claimed disposition is checked, and a flaw — a verdict outside `clean | findings`, a `findings`
+Every field of a declared seat's answer is checked, and a flaw — a verdict outside `clean | findings`, a `findings`
 that is not a list, a finding without a `severity` from `blocking | major | minor | editorial`, without a `path`,
 with a `line` that is neither an integer nor `null`, without a `criterion` or without a `claim`, a `clean`
-verdict with findings, or a `findings` verdict with none — is recorded as `details.malformedAnswer` with the
+verdict with findings, or a `findings` verdict with none — is recorded as `details.malformedAnswers` with the
 reason, and records *no* verdict and *no* findings. So is an answer that is not a JSON object at all: a JSON seat
 was asked for an object, and prose (or a top-level array) is a broken contract however readable it is.
-`{"verdict":"clean"}` is not a clean review; it is an answer that claims the contract and fails it, and it reads
-as exactly that.
+`{"verdict":"clean"}` is not a clean review; it is a declared seat answering without the findings it promised, and
+it reads as exactly that.
 
 **One writer, in order, and nothing is overwritten.** `details.malformedAnswers` is a chain: one entry per answer
 that failed its contract, in the order they arrived, each naming the seat that superseded it. A valid disposition
@@ -1361,11 +1368,14 @@ backend's state budget (its head and tail — the panel gets it whole), and a re
 that does not contain the diff is not a review.
 
 **The panels answer findings as data.** The three review personas (`review-skeptic`, `review-technical`,
-`review-systems`) are `output: "json"` and answer the same schema the disposition validates, so each seat's
-findings ride *its own* seat record (`details.seats[].findings`) beside the model that raised them. That is what
+`review-systems`) are `output: "json"` and answer the same schema the disposition validates, and their rung
+declares them alongside the synthesis it ends on — which is what makes each seat's findings ride *its own* seat
+record (`details.seats[].findings`) beside the model that raised them. That is what
 makes a model and what it found a single lookup, accumulated over every session the store holds — see the
 report's seats-by-model section — instead of something only a reader of the transcript can know. What the run
-*itself* concludes is still the synthesis's: a panel seat's findings are evidence, not the disposition.
+*itself* concludes is still the synthesis's: a panel seat's findings are evidence, not the disposition, and the
+declaration is deliberately the *set* of seats the rung judges rather than a single name — a one-name declaration
+would drop the panels' findings from the store and with them the seat's own record of what it found.
 
 **The verify bar is per question, and the review rungs are calibrated.** `question.warnBelow` (default 0.5) is
 the value below which a `noul` answer raises a warning, and it has to be per question because one backend scores
@@ -1760,7 +1770,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
 
 30. **The review route** — `npm test` passes 7/7 unit tests (`test/seat-deadline.test.mjs`,
     `test/disposition.test.mjs`: the seat deadline with its advance and its abort cases, and the disposition
-    schema judged only where it applies). `node scripts/interp-check.mjs` passes 60/60, the new ones covering:
+    schema judged only where it applies). `node scripts/interp-check.mjs` passes 60/60 at that revision, the new ones covering:
     a mechanical class routing to `review-quick`, a standard one to `review-check`, the boundary class
     escalating to `smrt-review`'s own mode with `routing.escalated` (not `declined`), an unsure answer
     escalating rather than routing cheap; an `execute: false` rung deliberating on a *tool-bearing* turn with
@@ -1768,8 +1778,8 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     review run recording `dispositionBy`, `verdict`, `findings`, their `severityCounts` and a `null` line kept;
     seven schema-violating answers each recorded as malformed rather than as a clean review; a malformed final
     answer leaving no earlier verdict standing; a valid answer after a malformed one naming what it superseded;
-    a second bad answer not erasing the first; and a JSON answer that claims no disposition being left unjudged.
-    Six are mutation-proven — the seat deadline disabled, the claim discriminator removed, `supersededBy`
+    a second bad answer not erasing the first; and a JSON answer outside the fusion's declaration being left
+    unjudged. Six are mutation-proven — the seat deadline disabled, the declaration ignored, `supersededBy`
     dropped, the chain collapsed to a slot, the path guard bypassed, and the schema check removed — and each red
     names the check it fails. A seventh covers the path guard's escape case: with containment dropped,
     `../outside/secret.ts` is reported as `[path not found]` instead of `[path outside the session]`, which is how
@@ -1782,6 +1792,36 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     of two bad answers counted entry by entry. Then live: a packet reviewed through
     `omp -p --model fusion-matrix/smrt-review`, which chose the `high` class, ran its own committee mode,
     reported three substitutions as they happened, and returned a disposition with severities.
+
+31. **The disposition contract is declared** (`disposition.personas` on the rung) — the schema belongs to a rung,
+    not to the shape of an answer. `npm test` passes 157/157, with seven new `config` rules (a declaration that
+    names no seat, a seat its mode does not run, a seat whose answer is not JSON, a list that leaves out the last
+    stage seat, a mode ending in no single seat, `review: true` without a declaration, and a review route to a
+    rung that declares none) and two reshaped unit tests of the exported `dispositionOf`: judged only when its
+    caller passes the declaration, recovering an undeclared seat's answer verbatim whatever keys it uses.
+    `node scripts/interp-check.mjs` passes 67/67, the new two proving the wiring rather than the unit: a *declared*
+    seat answering `{"summary":"…"}` is recorded malformed (`verdict is not one of clean|findings`, and no verdict
+    stands), and an *undeclared* seat answering `{"verdict":"banana","findings":"oops"}` cannot make the run
+    malformed — the declared seat's clean verdict stands and `malformedAnswers` is absent. Both are mutation-proven
+    on the wiring, not just the unit: with the declaration dropped from the `runSeatInner` call site nine checks go
+    red (the whole declared machinery collapses), and with it hard-coded to `true` — the schema applied to every
+    JSON seat, which is what this change removes — two checks go red: the pre-existing one that pins a classifier's
+    `{"label":"mechanical"}` as unjudged, and the new one that pins an undeclared seat's `{"verdict":"banana"}` as
+    unable to make the run malformed. The declared seat answering `{"summary":"…"}` stays green under that
+    mutation, because a declared seat is judged either way; the two reds are the checks that state the *scope*.
+    The two committee rungs declare the four seats that answer findings — the three panels and the synthesis their
+    mode's last stage ends on — and deliberately leave the mid-panel `judge` undeclared, since its `{"label":"…"}`
+    answer is not a disposition and is what the two checks above pin. `review-quick` declares the two its
+    single-seat mode runs rather than the committee's four. Each load rule is
+    mutation-proven on a copy of the tree: disabling one reddens the rules test alone and the failure names that
+    rule's own fixture — the empty list, a name the mode does not run, a name whose answer is not JSON, a list
+    without the last stage seat, a mode that writes no single answer, `review: true` without a declaration, or a
+    review route to a rung that declares none. Two further mutations are reported as they behave rather than as
+    they were hoped to: dropping the non-array guard makes `personas: null` throw inside the validator instead of
+    failing with a named error (which is why the guard is there), and removing `review-quick`'s declaration
+    reddens three checks because the router's route target loses the declaration rule 7 requires of it. The
+    declaration is a *list*, not a single name: `personas` in the plural, with the singular spelling and a bare
+    string both named load errors, since `"review-synth"` would otherwise iterate its own letters.
 
 ## Assumptions & contingencies
 

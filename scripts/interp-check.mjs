@@ -602,7 +602,7 @@ check(
 
 // Three JSON seats, three answers, one record. `review-committee` ends in `judge` then `review-synth`, so a
 // per-persona model can put a different kind of answer in each seat and the run-level record has to stay
-// unambiguous: a valid disposition from an earlier seat, a *different* persona's JSON that claims nothing, and
+// unambiguous: a valid disposition from an earlier seat, a *different* persona's JSON that declares nothing, and
 // a malformed answer that arrives last.
 const perPersonaModel = (answers) => async (args) => {
   const payload = answers[args?.persona?.name] ?? { verdict: "clean", findings: [] };
@@ -632,18 +632,45 @@ const runReviewCheck = (answers) =>
     registry,
   });
 
-// The case that made the schema global: a classifier's answer, or any JSON persona answering a different
-// contract, is recovered as data and recorded against nothing.
+// The case that made the schema global: a JSON persona the rung did not declare, answering a different contract.
+// Its answer is recovered as data and recorded against nothing — and the check is named for the *declaration*,
+// not for what the answer looks like, because that is what decides it.
 const foreignJson = await runReviewCheck({
   judge: { label: "mechanical", confidence: 0.95 },
   "review-synth": { verdict: "clean", findings: [] },
 });
 check(
-  "a JSON answer that does not claim to be a disposition is not judged by its schema",
+  "a JSON answer outside the fusion's declaration is judged by nothing",
   foreignJson.details.malformedAnswers === undefined &&
     foreignJson.details.verdict === "clean" &&
     foreignJson.details.dispositionBy === "review-synth",
   JSON.stringify({ malformed: foreignJson.details.malformedAnswers, verdict: foreignJson.details.verdict }),
+);
+
+// The declaration is what makes a seat's answer a disposition. Two consequences, neither of which an inferred
+// contract could produce, and both of which the run record has to show.
+const declaredWithoutFindings = await runReviewCheck({
+  judge: { verdict: "clean", findings: [] },
+  "review-synth": { summary: "nothing to report" },
+});
+check(
+  "a declared seat that answers without verdict or findings fails its declared contract",
+  declaredWithoutFindings.details.malformedAnswers?.[0]?.persona === "review-synth" &&
+    declaredWithoutFindings.details.verdict === undefined &&
+    declaredWithoutFindings.details.findings === undefined,
+  JSON.stringify({ malformed: declaredWithoutFindings.details.malformedAnswers, verdict: declaredWithoutFindings.details.verdict }),
+);
+
+const undeclaredClaim = await runReviewCheck({
+  judge: { verdict: "banana", findings: "oops" },
+  "review-synth": { verdict: "clean", findings: [] },
+});
+check(
+  "a seat the fusion did not declare cannot make the run malformed, whatever it claims",
+  undeclaredClaim.details.malformedAnswers === undefined &&
+    undeclaredClaim.details.verdict === "clean" &&
+    undeclaredClaim.details.dispositionBy === "review-synth",
+  JSON.stringify({ malformed: undeclaredClaim.details.malformedAnswers, verdict: undeclaredClaim.details.verdict }),
 );
 
 // A malformed answer that arrives *after* a valid one wins outright; that ordering is the one that must never
