@@ -797,14 +797,13 @@ test("seats by fusion name the alias that answered and the routes that refused",
   const skeptic = seats.find((s) => s.fusion === "review-check" && s.persona === "review-skeptic");
   assert.equal(skeptic.seats, 1);
   assert.deepEqual({ ...skeptic.answered }, { glm: 1 }, "the alias that answered, not just its model");
-  // Keyed by provider *and* model: the SQL groups by both, and a provider running two models must not
-  // read as one route refusing twice. Compared as a consumer reads it, so the map's prototype is not
-  // part of the contract.
+  // One key per *route*, named the way the answer names it — by alias when the record carries one, so
+  // an aliased route refused on two providers is one route with two reasons, not two routes.
   const refusalShape = (refusals) => Object.fromEntries(Object.entries(refusals).map(([route, reasons]) => [route, { ...reasons }]));
   assert.deepEqual(
     refusalShape(skeptic.refusals),
-    { "opencode-go/glm-5.3": { quota: 1 }, "zai/glm-5.3": { transient: 1 } },
-    "every route that refused it, by model and reason",
+    { glm: { quota: 1, transient: 1 } },
+    "every route that refused it, under the alias that answered, with its reasons",
   );
   const synth = seats.find((s) => s.persona === "review-synth");
   assert.equal(synth.seats, 1);
@@ -812,6 +811,51 @@ test("seats by fusion name the alias that answered and the routes that refused",
   assert.deepEqual({ ...synth.refusals }, {}, "a seat nobody refused has no refusals, rather than an absent row");
   db.close();
   fs.rmSync(dbPath, { force: true });
+});
+
+test("one aliased route is named the same on both halves, and a hostile name is just a name", { skip: noSqlite }, async () => {
+  // A store built here, row by row, because these are shapes the fixture session cannot express: an
+  // attempt that carries an alias, a seat with no persona, and config-supplied names that are hostile.
+  const dbPath = path.join(tempDir("join"), "matrix.db");
+  const db = openStore(dbPath);
+  db.exec("BEGIN");
+  const { lastInsertRowid: fileId } = db
+    .prepare(`INSERT INTO store_file (path, harness, size, mtime_ms, status, ingested_at) VALUES ('f.jsonl', 'omp', 1, 1, 'ok', 1)`)
+    .run();
+  const { lastInsertRowid: sessionId } = db.prepare(`INSERT INTO session (path, harness, entries) VALUES ('f.jsonl', 'omp', 1)`).run();
+  const { lastInsertRowid: runId } = db
+    .prepare(`INSERT INTO run (session_id, seq, kind, carrier, fusion) VALUES (?, 0, 'deliberation', 'toolResult', 'review')`)
+    .run(sessionId);
+  const seat = db.prepare(`INSERT INTO seat (run_id, seq, persona, alias, provider, model) VALUES (?, ?, ?, ?, ?, ?)`);
+  const attempt = db.prepare(`INSERT INTO attempt (run_id, seat_seq, idx, alias, provider, model, reason) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+  // An aliased route: answered as `glm`, refused as the same alias on another provider.
+  seat.run(runId, 0, "skeptic", "glm", "opencode-go", "glm-5.3");
+  attempt.run(runId, 0, 0, "glm", "zai", "glm-5.3", "quota");
+  // A seat with no persona at all, carrying an attempt: it must not become a refusals-only row.
+  seat.run(runId, 1, null, "ghost", "zai", "glm-5.3");
+  attempt.run(runId, 1, 0, "ghost", "zai", "glm-5.3", "transient");
+  // A hostile provider name, which must count like any other.
+  seat.run(runId, 2, "systems", "__proto__", "__proto__", "m");
+  attempt.run(runId, 2, 0, "__proto__", "__proto__", "m", "quota");
+  db.exec("COMMIT");
+
+  const rows = byFusionSeat(db);
+  assert.equal(rows.length, 2, "the null-persona seat produces no row of its own");
+
+  const skeptic = rows.find((row) => row.persona === "skeptic");
+  assert.deepEqual({ ...skeptic.answered }, { glm: 1 }, "answered by alias");
+  assert.deepEqual(Object.keys(skeptic.refusals), ["glm"], "and refused under the same alias, not provider/model");
+  assert.deepEqual({ ...skeptic.refusals.glm }, { quota: 1 });
+
+  const systems = rows.find((row) => row.persona === "systems");
+  assert.deepEqual(Object.keys(systems.answered), ["__proto__"], "a hostile name is a name");
+  assert.deepEqual({ ...systems.refusals.__proto__ }, { quota: 1 }, "its refusal is counted, not written through");
+  assert.equal(Object.prototype.quota, undefined, "and Object.prototype is untouched");
+  assert.equal({}.quota, undefined, "so is every other object's");
+
+  db.close();
+  fs.rmSync(dbPath, { force: true });
+  assert.equal(fileId !== undefined && sessionId !== undefined, true);
 });
 
 test("a record's clock is a string or absent, whatever the harness wrote", () => {

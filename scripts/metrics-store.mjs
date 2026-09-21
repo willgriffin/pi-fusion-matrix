@@ -1459,9 +1459,9 @@ export function byFusionSeat(db) {
     .all();
   const refused = db
     .prepare(
-      `SELECT r.fusion AS fusion, s.persona AS persona, a.provider AS provider, a.model AS model, a.reason AS reason, COUNT(*) AS n
+      `SELECT r.fusion AS fusion, s.persona AS persona, a.alias AS alias, a.provider AS provider, a.model AS model, a.reason AS reason, COUNT(*) AS n
        FROM attempt a JOIN seat s ON s.run_id = a.run_id AND s.seq = a.seat_seq JOIN run r ON r.id = a.run_id
-       WHERE r.kind = 'deliberation' AND s.persona IS NOT NULL GROUP BY 1, 2, 3, 4, 5`,
+       WHERE r.kind = 'deliberation' AND s.persona IS NOT NULL GROUP BY 1, 2, 3, 4, 5, 6`,
     )
     .all();
 
@@ -1499,7 +1499,10 @@ export function byFusionSeat(db) {
   }
   for (const r of refused) {
     const entry = row(r.fusion ?? "(none)", r.persona);
-    const route = routeKey(null, r.provider, r.model);
+    // The attempt's *alias* counts here as it does for an answer: an aliased route is named by its
+    // alias on both halves, or the same physical route lands under two keys — `glm` from the answer and
+    // `zai/glm-5.3` from the refusal — which is the join this reader exists to make.
+    const route = routeKey(r.alias, r.provider, r.model);
     entry.refusals[route] = entry.refusals[route] ?? Object.create(null);
     entry.refusals[route][r.reason ?? "?"] = (entry.refusals[route][r.reason ?? "?"] ?? 0) + r.n;
   }
