@@ -840,6 +840,11 @@ export async function runPipeline({ config, sources, fusion, prompt, registry, c
             degraded: seat.degraded,
             error: seat.error,
             reason: seat.reason,
+            // What *this seat* answered, when it answered findings as data. It rides the seat record so the model
+            // and its findings are one join: which model raised what, by severity, with which locations — and,
+            // compared against the run's own disposition, which of them survived into the review.
+            findings: seat.disposition?.findings,
+            verdict: seat.disposition?.verdict,
           });
           substitutions.push(...seat.substitutions);
           cascades.push(...seat.cascades);
@@ -898,6 +903,10 @@ export async function runPipeline({ config, sources, fusion, prompt, registry, c
         degraded: seat.degraded,
         error: seat.error,
         reason: seat.reason,
+        // What *this seat* answered, when it answered findings as data — the join between a model and what it
+        // found. See the note at the parallel-stage assembly above.
+        findings: seat.disposition?.findings,
+        verdict: seat.disposition?.verdict,
       });
       substitutions.push(...seat.substitutions);
       cascades.push(...seat.cascades);

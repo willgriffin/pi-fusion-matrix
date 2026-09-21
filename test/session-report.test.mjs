@@ -2407,3 +2407,108 @@ describe("plan windows", () => {
     );
   });
 });
+
+describe("seats by model", () => {
+  // The join this view exists for: a panel seat answers findings as data, they ride that seat's record, and the
+  // model is on the same record — so "how is this model doing" is a question the store can answer, over days.
+  const modelsDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-report-models-"));
+  fs.mkdirSync(path.join(modelsDir, "extensions/pi-fusion-matrix"), { recursive: true });
+  fs.writeFileSync(path.join(modelsDir, "extensions/pi-fusion-matrix/run.js"), "// a real file\n");
+  const seatFinding = (over) => ({
+    severity: "major",
+    criterion: "c1",
+    claim: "…",
+    path: "extensions/pi-fusion-matrix/run.js",
+    line: 12,
+    ...over,
+  });
+  const modelSession = extractSession(
+    [
+      { ...sessionMeta, cwd: modelsDir },
+      {
+        type: "custom_message",
+        customType: "matrix-answer",
+        content: "a review",
+        display: true,
+        timestamp: "2026-09-21T09:00:00.000Z",
+        details: {
+          fusion: "review-check",
+          seatErrors: [],
+          usage: usage(600, 60, 0.05),
+          seats: [
+            {
+              persona: "review-skeptic",
+              provider: "opencode-go",
+              model: "deepseek-v4-pro",
+              degraded: false,
+              durationMs: 40000,
+              usage: usage(400, 40, 0.03),
+              attempts: [{ reason: "transient" }],
+              verdict: "findings",
+              // Three claims: one names a file that exists, one names a file that does not, one leaves the tree.
+              findings: [seatFinding({}), seatFinding({ path: "src/nope.ts" }), seatFinding({ path: "../outside/secret.ts" })],
+            },
+            {
+              persona: "review-technical",
+              provider: "kimi-code",
+              model: "k3",
+              degraded: true,
+              durationMs: 0,
+              usage: usage(200, 20, 0.02),
+              attempts: [],
+              error: "all candidates failed",
+            },
+          ],
+        },
+      },
+    ],
+    { file: "models.jsonl", harness: "omp" },
+  );
+  const modelReport = buildReport({ sessions: [modelSession], roots: [], unreadable: [] });
+  const skepticRow = modelReport.models.get("opencode-go/deepseek-v4-pro");
+  const technicalRow = modelReport.models.get("kimi-code/k3");
+
+  after(() => fs.rmSync(modelsDir, { recursive: true, force: true }));
+
+  test("a model's seats, tokens, cost, failures and substitutions are counted", () => {
+    assert.ok(
+      skepticRow?.seats === 1 &&
+        skepticRow.tokens === 440 &&
+        Math.abs(skepticRow.cost - 0.03) < 1e-9 &&
+        skepticRow.ms === 40000 &&
+        skepticRow.degraded === 0 &&
+        skepticRow.attempts.get("transient") === 1 &&
+        skepticRow.personas.get("review-skeptic") === 1,
+      JSON.stringify(skepticRow),
+    );
+  });
+  test("a model's findings are counted, and split by whether their location can be checked", () => {
+    assert.ok(
+      skepticRow?.findings === 3 && skepticRow.located === 1 && skepticRow.unlocated === 1 && skepticRow.uncheckable === 1,
+      JSON.stringify({
+        findings: skepticRow?.findings,
+        located: skepticRow?.located,
+        unlocated: skepticRow?.unlocated,
+        uncheckable: skepticRow?.uncheckable,
+      }),
+    );
+  });
+  test("a seat that raised nothing contributes no findings, and a degraded seat is counted as one", () => {
+    assert.ok(
+      technicalRow?.seats === 1 && technicalRow.findings === 0 && technicalRow.degraded === 1,
+      JSON.stringify({ seats: technicalRow?.seats, findings: technicalRow?.findings, degraded: technicalRow?.degraded }),
+    );
+  });
+  test("the report prints the model, its seat-time and what it found", () => {
+    const text = render(modelReport);
+    assert.ok(
+      /seats by model/.test(text) &&
+        /opencode-go\/deepseek-v4-pro\s+1 seats/.test(text) &&
+        /findings 3 · located 1, path not found 1, outside the session 1/.test(text),
+      text
+        .split("\n")
+        .filter((line) => line.includes("deepseek-v4-pro"))
+        .join(" // "),
+    );
+  });
+});

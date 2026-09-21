@@ -542,6 +542,17 @@ omp -p "@/tmp/packet.md" --model fusion-matrix/review-quick --no-tools  # one ad
 `execute: false` is for — but a review packet carries the diff as text, and leaving the tool schemas out of the
 request makes every seat cheaper.
 
+**Run reviews with the repository as the working directory.** The report checks every finding's `path` against
+the session's cwd, so a review run from a scratch directory cannot tell a real location from an invented one:
+every finding in the first review this project ran named `src/disposition.ts`, a file that does not exist, and
+the marker that exists to say so could not, because the session's tree was a temp directory. From the repo, the
+same findings read `[path not found]` and you can see which ones to trust.
+
+The three panel seats (`review-skeptic`, `review-technical`, `review-systems`) answer **findings as data** in the
+same schema the disposition uses, so each seat's findings are recorded on that seat's record beside its model.
+That is what lets the report's seats-by-model section say which model raised what, over every run the store
+holds, rather than leaving it to whoever read the transcript.
+
 The last seat of a review rung answers in JSON, and the run records it: `details.dispositionBy` (which persona's
 answer stands), `details.verdict`, `details.findings` (`severity` from `blocking | major | minor | editorial`,
 `path`, `line`, `criterion`, `claim`) and `details.severityCounts`. Severity is what decides whether another
@@ -623,6 +634,14 @@ recorded at the moment it is known rather than asked for afterwards.
 The report's `outcomes` section then prints work item, latest outcome, evidence, the runs and fusion turns behind
 it, and the reported cost — with `?` for a work item that has runs and no outcome, and an `(unlabelled)` line for
 runs that named nothing at all. Neither is counted as a success.
+
+It also prints **seats by model**: per model, across every session in the store, its seats, tokens, cost and
+seat-time, its degradations and the reasons its routes were substituted — plus, where a seat answered findings as
+data, how many it raised and how many of those name a path that **exists**. That last split is the one to read.
+A single run cannot rate a model — a seat's answer is judged by a peer rather than by ground truth, and the
+synthesis merges the panel's opinions into findings that belong to the fusion — but days of runs can, and
+cost-per-finding flatters exactly the rung that invents its locations: the cheapest review this project ran
+returned five findings, two of them blocking, every one of them naming a file that does not exist.
 
 Money always states its basis: a cost is `$X reported`, with the messages whose provider reported no price
 counted beside it, never folded into a single total that reads as free.

@@ -543,10 +543,58 @@ check(
       .join(" | "),
 );
 
+// The join this slice exists for: a panel seat answers findings as data, and the findings ride *that seat's*
+// record — so a model and what it found are one lookup, over every session the store holds.
+const panelFinding = {
+  severity: "major",
+  path: "extensions/pi-fusion-matrix/run.js",
+  line: 12,
+  criterion: "c1",
+  claim: "the route is not re-resolved",
+};
+const panelModel = async (args) => ({
+  text: JSON.stringify(
+    args?.persona?.name === "review-skeptic"
+      ? { verdict: "findings", summary: "one", findings: [panelFinding] }
+      : { verdict: "clean", summary: "nothing survived", findings: [] },
+  ),
+  usage: {
+    input: 1,
+    output: 1,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 2,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  },
+  stopReason: "stop",
+  toolCalls: [],
+});
+const panelRun = await runReview(panelModel);
+const skepticSeat = panelRun.details.seats.find((seat) => seat.persona === "review-skeptic");
+const synthSeat = panelRun.details.seats.find((seat) => seat.persona === "review-synth");
+check(
+  "a panel seat's findings ride its own record, beside the model that raised them",
+  skepticSeat?.findings?.length === 1 &&
+    skepticSeat.findings[0].path === "extensions/pi-fusion-matrix/run.js" &&
+    skepticSeat.findings[0].severity === "major" &&
+    typeof skepticSeat.model === "string" &&
+    typeof skepticSeat.provider === "string" &&
+    // The synthesis answered `clean`, and that is what the run records — the seat's own answer is evidence, not
+    // the run's disposition.
+    panelRun.details.verdict === "clean" &&
+    synthSeat?.findings?.length === 0,
+  JSON.stringify({
+    seat: { persona: skepticSeat?.persona, model: skepticSeat?.model, findings: skepticSeat?.findings?.length },
+    verdict: panelRun.details.verdict,
+  }),
+);
+
 const malformedRun = await runReview(dispositionModel("I could not read the diff, sorry."));
 check(
   "an answer that is not a JSON object is recorded as malformed, not as a clean review",
-  malformedRun.details.malformedAnswers?.[0]?.persona === "review-synth" &&
+  // Every JSON seat's failure is recorded, in the order they arrived: the panel seat first, then the synthesis.
+  // A chain that kept only the last would lose the fact that the panel never answered either.
+  malformedRun.details.malformedAnswers?.map((entry) => entry.persona).join(",") === "review-skeptic,review-synth" &&
     malformedRun.details.findings === undefined &&
     malformedRun.details.verdict === undefined,
   JSON.stringify(malformedRun.details.malformedAnswers),
@@ -1484,7 +1532,7 @@ const hungRace = await Promise.race([
       ...config.fusions["review-quick"],
       id: "review-quick",
       seatTimeoutMs: 50,
-      candidates: { skeptic: ["deepseek-pro", "kimi"], "review-synth": ["deepseek-pro"] },
+      candidates: { "review-skeptic": ["deepseek-pro", "kimi"], "review-synth": ["deepseek-pro"] },
     },
     prompt: "a packet",
     callModel: hanging,

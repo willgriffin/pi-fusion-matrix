@@ -287,8 +287,14 @@ export async function verifyRun({ fusion, vars, decide, emit, signal, runGate })
       results.push({ check: entry.instructions ?? "decision", result: answers });
       for (const [id, answer] of Object.entries(answers)) {
         const low = [];
-        if (answer?.noul !== undefined && answer.noul < 0.5) low.push(`${id}=${answer.noul.toFixed(2)}`);
-        if (answer?.confidence !== undefined && answer.confidence < 0.5) low.push(`${id} confidence ${answer.confidence.toFixed(2)}`);
+        // The bar is the question's own (`warnBelow`), defaulting to 0.5. It has to be per question because the
+        // same backend scores different traffic differently: a review's long, synthetic answer sits at 0.44–0.76
+        // where a short factual answer sits at 0.9, and a bar that flags everything is a bar nobody reads.
+        // Measured 2026-09-21 across eight review runs: clean 0.23, real reviews 0.44–0.76 — so review questions
+        // warn below 0.35, which separates the one suspicious case instead of all of them.
+        const bar = entry.questions?.[id]?.warnBelow ?? 0.5;
+        if (answer?.noul !== undefined && answer.noul < bar) low.push(`${id}=${answer.noul.toFixed(2)}`);
+        if (answer?.confidence !== undefined && answer.confidence < bar) low.push(`${id} confidence ${answer.confidence.toFixed(2)}`);
         if (answer?.type === "choice" && answer.choice && /ignore|none|unclear|no$/i.test(answer.choice))
           low.push(`${id}=${answer.choice}`);
         if (low.length) emit.delta(` ⚠️ verify: ${low.join(", ")} — see details.verification\n`);

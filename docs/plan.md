@@ -1129,6 +1129,13 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
 - **a run's tokens are counted once.** `details.usage` already sums the run's seats — verified against the
   store, where a one-seat run's `details.usage.input` equals that seat's — so the seats are not added again.
   They *were*, which doubled every deliberation's tokens and cost from the reader's first version;
+- **it prints seats by model, because that is the view that accumulates.** Per model, across every session in
+  the store: seats, tokens, cost, seat-time, degradations, and the reasons its routes were substituted — plus,
+  where a seat answered findings as data, how many it raised and how many of those name a *located* path. A
+  single run cannot rate a model: a seat's answer is judged by a peer, not by ground truth, and the synthesis
+  merges the panel's opinions into findings that belong to the fusion. Days of runs can, which is why the view
+  is over the whole store rather than over a run, and why located-versus-not is the column to read: it is the
+  difference between a review's numbers meaning something and a rung winning a count by inventing its paths;
 - **filters select rows, never the accounting.** `--cwd`/`--since` decide which sessions are totalled; the
   files read, the unparsed lines and any session a filter could not attribute (a truncated header has no
   `cwd` to compare, and a malformed timestamp cannot be placed) are reported either way, and the exit
@@ -1349,6 +1356,28 @@ one, and a relative `../../etc/passwd` do the same while looking innocent.
 Two limits, stated rather than discovered later: the *class decision* sees the packet truncated to the decision
 backend's state budget (its head and tail — the panel gets it whole), and a review rung has no tools, so a packet
 that does not contain the diff is not a review.
+
+**The panels answer findings as data.** The three review personas (`review-skeptic`, `review-technical`,
+`review-systems`) are `output: "json"` and answer the same schema the disposition validates, so each seat's
+findings ride *its own* seat record (`details.seats[].findings`) beside the model that raised them. That is what
+makes a model and what it found a single lookup, accumulated over every session the store holds — see the
+report's seats-by-model section — instead of something only a reader of the transcript can know. What the run
+*itself* concludes is still the synthesis's: a panel seat's findings are evidence, not the disposition.
+
+**The verify bar is per question, and the review rungs are calibrated.** `question.warnBelow` (default 0.5) is
+the value below which a `noul` answer raises a warning, and it has to be per question because one backend scores
+different traffic differently: measured across eight review runs (2026-09-21), a `clean` verdict sat at 0.23
+while real reviews sat at 0.44–0.76. At 0.5 every review warned and none of the warnings corresponded to a
+defect — six warnings, no true positives — so the review rungs warn below **0.35**, which separates the one
+suspicious case (a clean verdict its own check could not confirm) instead of flagging all of them.
+
+**The committee's decision bar stays at 0.85, and that is a measurement rather than an oversight.** Across those
+same runs every stage decision came back `insufficient` at 0.79–0.84, so the cheap path was never taken. On
+inspection the gate is *right*: those answers read `disagrees` — the panels genuinely differed, which is exactly
+when the judge earns its call — and a converged panel skipping the judge was never what those runs were. One
+sample of "always insufficient" is not evidence to move a threshold; the point of recording `details.cascades` is
+that the data will say so when it is. The same holds for cost-per-finding, which flatters whichever rung invents
+its locations: what a review's numbers are read against is *located* findings, which the report counts.
 
 ## Critical files & anchors
 
