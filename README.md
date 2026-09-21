@@ -788,6 +788,38 @@ Exit status separates *broken* from *out of date*: `0` clean, `1` config errors,
 are additive only: `--repair` prints the `models.json` upsert snippet for an id you want in pi's own
 picker, never rewrites an alias, and never picks a replacement model. Drift is a report, not a rewrite.
 
+### The metrics store, and the interface over it
+
+`scripts/session-report.mjs` reads the sessions every time it runs, which is right for a report and
+wrong for a question asked often. `scripts/ingest-metrics.mjs` writes a **derived** SQLite index over
+the same records — `~/.omp/agent/matrix.db` by default — and the interface reads that:
+
+```bash
+node scripts/ingest-metrics.mjs                 # both harnesses' stores into the index
+node scripts/ingest-metrics.mjs --rebuild       # replace it (the `rm` of the recovery rule)
+node scripts/matrix-tui.mjs                     # the roster, the rungs and the routes, with rain
+node scripts/matrix-tui.mjs --plain --no-rain   # one frame as text
+```
+
+The JSONL stays authoritative and the index is rebuildable: ingesting twice is identical, `--rebuild`
+reproduces it, and the reader's own units (`extractSession`, `pathClaim`, `isFinding`) are what the
+ingest reads with — one reader of the record contract, not two. Three things it will not do quietly:
+a line that does not parse lands with its file and line; a file that will not read is named; and every
+cost carries its **basis** — `reported` (the provider priced it), `estimated` (its own rate card from
+the harness's catalogue), `list` (the same model's rate under another provider, so a plan-subsidised
+turn is comparable to a metered rung), or `no rate`. A total never mixes bases, and money always prints
+with the count of seats it covers.
+
+The interface joins that index to the configuration, three tabs at a time: **aliases** (what each alias
+names, its routes, and what the store saw it do), **fusions** (how each rung runs, how it ended, what
+it cost, what its reviews produced) and **routes** (per fusion and seat: the ordered candidates from
+config, which alias actually answered, and every route refused). `e` proposes a change — a seat's
+candidate alias, or an alias's route order — and the status bar shows it, the layer it would be written
+to, and whether the config still validates; `s` writes it and `esc` discards it. The rain is a real
+field (`scripts/tui-rain.mjs`, seeded and stepped by frame), drawn under the panels, and `a` turns it
+off; `c` drops the colour entirely, and `NO_COLOR` does the same on start. Every unit of the interface
+is pure and tested; only the driver needs a terminal.
+
 ## Verifying the package itself
 
 Offline — no keys, no network, no GPU. These are the checks that must still run when a provider's
