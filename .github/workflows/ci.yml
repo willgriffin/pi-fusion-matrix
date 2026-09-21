@@ -1,0 +1,92 @@
+# The gates, where nobody has to remember to run them.
+#
+# This workflow is the machine version of `AGENTS.md`'s Validation section, and the two are meant to be the same
+# list: a gate that runs here but is not written there is a gate nobody can reproduce, and a gate written there
+# but not run here is a habit.
+#
+# No keys, no secrets, no network beyond installing the dev dependencies: the unit suite strips
+# `TYPESAFE_API_KEY` from its own environment (a test that passes only where a key is exported is a test that
+# lies about its isolation), the contract runner talks to the local stubs this workflow starts, and every check
+# that needs a credential sets its own fixture.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch makes the first run's result irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `lint:commits` reads the commits a branch adds, which needs the base it forked from.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          # The floor the package declares is 20.19 — the *toolchain's* floor, not the runtime's — and 22 is the
+          # oldest line with `node:sqlite` (22.5) present, so the reader's plan-window section exercises its real
+          # path here rather than its named-absence path.
+          node-version: 22
+
+      - name: install
+        run: npm ci
+
+      - name: conventional commits
+        # A pull request's commits, or the merge commit on a push to main. No range to check is not a failure.
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            npm run lint:commits -- --from "${{ github.event.pull_request.base.sha }}" --to "${{ github.event.pull_request.head.sha }}"
+          else
+            npm run lint:commits
+          fi
+
+      - name: the pull request's title, as the commit it becomes
+        # A squash merge turns the title into the commit on main, so the title is linted as a message rather than
+        # trusted: by the time it lands, nothing else will look at it.
+        if: github.event_name == 'pull_request'
+        run: npm run lint:commits -- --message "${{ github.event.pull_request.title }}"
+
+      - name: format
+        run: npm run format:check
+
+      - name: lint
+        run: npm run lint
+
+      - name: unit tests, and the coverage floor
+        run: npm test
+
+      - name: start the local decision backends
+        # The contract runner needs the decision stub; the probes need both. Started in the background and waited
+        # for, because a check that raced a stub would fail for a reason that is not the code's.
+        run: |
+          node scripts/typesafe-stub.mjs &
+          node scripts/semif-stub.mjs &
+          for port in 8793 8792; do
+            for attempt in $(seq 1 40); do
+              if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then exec 3<&-; break; fi
+              sleep 0.25
+            done
+          done
+
+      - name: interpreter contracts
+        run: node scripts/interp-check.mjs
+
+      - name: doctor
+        run: node scripts/doctor.mjs
+
+      - name: the run-record reader's own checks
+        run: node scripts/session-report.mjs --check
+
+      - name: backend probes
+        run: |
+          node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone
+          node scripts/semif-probe.mjs --backend http://127.0.0.1:8792/score
