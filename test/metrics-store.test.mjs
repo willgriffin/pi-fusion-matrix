@@ -99,13 +99,23 @@ function writeFixtureStore() {
             template: "muse-spark-1.3-contributor",
             thinking: null,
             attempts: [
-              { alias: "muse", seat: "muse@opencode-go", provider: "opencode-go", model: "muse-spark-1.3-contributor", reason: "thinking", detail: "level refused" },
+              {
+                alias: "muse",
+                seat: "muse@opencode-go",
+                provider: "opencode-go",
+                model: "muse-spark-1.3-contributor",
+                reason: "thinking",
+                detail: "level refused",
+              },
             ],
           },
         },
       },
     },
-    { type: "message", message: { role: "toolResult", toolName: "read", isError: true, content: [], timestamp: "2026-09-20T10:01:30.000Z" } },
+    {
+      type: "message",
+      message: { role: "toolResult", toolName: "read", isError: true, content: [], timestamp: "2026-09-20T10:01:30.000Z" },
+    },
     {
       type: "message",
       message: {
@@ -132,12 +142,33 @@ function writeFixtureStore() {
               usage: usage(50, 10, 0),
               durationMs: 400,
               attempts: [
-                { alias: "glm", seat: "glm@opencode-go", provider: "opencode-go", model: "glm-5.3", reason: "quota", detail: "usage limit reached" },
-                { alias: "glm", seat: "glm@zai", provider: "zai", model: "glm-5.3", reason: "transient", detail: "connection reset", usage: usage(7, 1, 0) },
+                {
+                  alias: "glm",
+                  seat: "glm@opencode-go",
+                  provider: "opencode-go",
+                  model: "glm-5.3",
+                  reason: "quota",
+                  detail: "usage limit reached",
+                },
+                {
+                  alias: "glm",
+                  seat: "glm@zai",
+                  provider: "zai",
+                  model: "glm-5.3",
+                  reason: "transient",
+                  detail: "connection reset",
+                  usage: usage(7, 1, 0),
+                },
               ],
               findings: [
                 { severity: "major", path: "scripts/kept.mjs", line: 12, criterion: "criterion one", claim: "a claim that survives" },
-                { severity: "minor", path: "scripts/dropped.mjs", line: null, criterion: "criterion two", claim: "a claim the synthesis dropped" },
+                {
+                  severity: "minor",
+                  path: "scripts/dropped.mjs",
+                  line: null,
+                  criterion: "criterion two",
+                  claim: "a claim the synthesis dropped",
+                },
                 // Not a finding: the contract wants a criterion *and* a claim, and this has none.
                 { severity: "minor", path: "scripts/no-claim.mjs", line: 3, criterion: "criterion three" },
               ],
@@ -158,7 +189,13 @@ function writeFixtureStore() {
           seatErrors: [],
           substitutions: [{ seat: "review-skeptic", from: "glm@opencode-go", to: "glm@zai", reason: "transient" }],
           cascades: [
-            { seat: "review-skeptic", kind: "decision", sufficient: false, advancedTo: "next candidate", answer: { type: "choice", choice: "partial", confidence: 0.6 } },
+            {
+              seat: "review-skeptic",
+              kind: "decision",
+              sufficient: false,
+              advancedTo: "next candidate",
+              answer: { type: "choice", choice: "partial", confidence: 0.6 },
+            },
             { seat: "review-synth", kind: "decision", sufficient: true, answer: { type: "choice", choice: "agrees", confidence: 0.9 } },
           ],
           routing: { answer: { type: "choice", choice: "standard", confidence: 0.62 }, threshold: 0.6, routedTo: "review-check" },
@@ -174,7 +211,11 @@ function writeFixtureStore() {
           dispositionBy: "review-synth",
           verdict: "findings",
           severityCounts: { major: 1 },
-          findings: [{ severity: "major", path: "scripts/kept.mjs", line: 12, criterion: "criterion one", claim: "the kept finding" }],
+          findings: [
+            { severity: "major", path: "scripts/kept.mjs", line: 12, criterion: "criterion one", claim: "the kept finding" },
+            // A path that leaves the session's tree cannot be checked from here, and is never "found".
+            { severity: "minor", path: "../../etc/passwd", line: null, criterion: "criterion four", claim: "a claim outside the tree" },
+          ],
           malformedAnswers: [{ persona: "review-skeptic", reason: "the answer was not a JSON object", supersededBy: "review-synth" }],
           usage: usage(250, 50, 0.01),
           decisionUsage: usage(5, 2, 0),
@@ -184,9 +225,21 @@ function writeFixtureStore() {
         },
       },
     },
-    { type: "custom_message", customType: "matrix-label", content: "label", details: { workItem: "#14", outcome: "landed" }, timestamp: "2026-09-20T10:03:00.000Z" },
+    {
+      type: "custom_message",
+      customType: "matrix-label",
+      content: "label",
+      details: { workItem: "#14", outcome: "landed" },
+      timestamp: "2026-09-20T10:03:00.000Z",
+    },
     // Ours, but a shape this build does not know: counted, never silently dropped.
-    { type: "custom_message", customType: "matrix-answer", content: "", details: { seats: [], cascades: [] }, timestamp: "2026-09-20T10:04:00.000Z" },
+    {
+      type: "custom_message",
+      customType: "matrix-answer",
+      content: "",
+      details: { seats: [], cascades: [] },
+      timestamp: "2026-09-20T10:04:00.000Z",
+    },
   ];
   const ompText = `${ompEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n{ this line is not json\n`;
   fs.writeFileSync(path.join(ompDir, "omp-1.jsonl"), ompText);
@@ -268,7 +321,7 @@ test("ingest: reads both roots, lands every shape, and says what it could not us
   assert.equal(counts.proxyRuns, 1);
   assert.equal(counts.seats, 2);
   assert.equal(counts.seatFindings, 2, "the finding with no path is not a finding");
-  assert.equal(counts.runFindings, 1);
+  assert.equal(counts.runFindings, 2, "the kept finding and one whose path leaves the tree");
   assert.equal(counts.malformedAnswers, 1);
   assert.equal(counts.cascades, 2);
   assert.equal(counts.attempts, 3, "two on the seat, one on the proxy turn");
@@ -282,7 +335,10 @@ test("ingest: reads both roots, lands every shape, and says what it could not us
   // The malformed line lands with its file, its line and its reason — the line number is the last
   // non-empty line of the file it was written on.
   const failure = db.prepare(`SELECT * FROM parse_failure`).get();
-  const lastLine = fs.readFileSync(failure.path, "utf8").split("\n").filter((line) => line.trim()).length;
+  const lastLine = fs
+    .readFileSync(failure.path, "utf8")
+    .split("\n")
+    .filter((line) => line.trim()).length;
   assert.equal(failure.line, lastLine);
   assert.match(failure.message, /JSON/);
   const stored = db.prepare(`SELECT * FROM store_file WHERE path = ?`).get(failure.path);
@@ -475,7 +531,12 @@ test("the store's numbers agree with the report's aggregate over the same fixtur
   const { db, dbPath, ompFile } = await openFixture();
 
   const parsed = parseLines(fs.readFileSync(ompFile, "utf8"));
-  const session = extractSession(parsed.entries, { file: ompFile, harness: "omp", unparsed: parsed.unparsed, parseFailures: parsed.failures });
+  const session = extractSession(parsed.entries, {
+    file: ompFile,
+    harness: "omp",
+    unparsed: parsed.unparsed,
+    parseFailures: parsed.failures,
+  });
   const report = aggregate([session]);
 
   const models = byModel(db);
@@ -500,8 +561,9 @@ test("the store's numbers agree with the report's aggregate over the same fixtur
   assert.equal(fusions[0].malformed, 1);
   assert.deepEqual(fusions[0].verdicts, { findings: 1 });
   assert.deepEqual(fusions[0].workItems, { "#14": 1 });
-  assert.equal(fusions[0].marked.total, 1);
-  assert.equal(fusions[0].marked.unlocated + fusions[0].marked.located + fusions[0].marked.uncheckable, 1);
+  assert.equal(fusions[0].marked.total, 2);
+  assert.equal(fusions[0].marked.uncheckable, 1, "a path outside the session is uncheckable, never found");
+  assert.equal(fusions[0].marked.unlocated + fusions[0].marked.located + fusions[0].marked.uncheckable, 2);
 
   // Verify answers keep the choice question as well as the score, and name the model that answered.
   const verify = verifyByQuestion(db);
@@ -604,7 +666,17 @@ test("rowsForSession is pure and complete for one session", { skip: noSqlite }, 
           content: [{ type: "toolCall", id: "c", name: "write", arguments: { path: "xd://matrix" } }],
         },
       }),
-      JSON.stringify({ type: "message", message: { role: "toolResult", toolCallId: "c", toolName: "matrix", isError: true, content: [], timestamp: "2026-09-20T00:00:02.000Z" } }),
+      JSON.stringify({
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "c",
+          toolName: "matrix",
+          isError: true,
+          content: [],
+          timestamp: "2026-09-20T00:00:02.000Z",
+        },
+      }),
     ].join("\n"),
   );
   const session = extractSession(parsed.entries, { file: "f", harness: "omp" });

@@ -45,15 +45,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import {
-  DEFAULT_ROOTS,
-  FUSION_API,
-  extractSession,
-  findSessions,
-  isFinding,
-  parseLines,
-  pathClaim,
-} from "./session-report.mjs";
+import { DEFAULT_ROOTS, FUSION_API, extractSession, findSessions, isFinding, parseLines, pathClaim } from "./session-report.mjs";
 
 export { DEFAULT_ROOTS, FUSION_API };
 
@@ -377,6 +369,19 @@ export function usageOf(usage) {
 const str = (value) => (typeof value === "string" && value ? value : null);
 const int = (value) => (Number.isFinite(value) ? value : null);
 
+/**
+ * The route an attempt was made on. Older records name it in the `seat` label only —
+ * `alias@provider`, written by the same `label()` that fills `provider` — because the proxy path
+ * gained the separate `provider`/`model` keys after those sessions were written. A refusal belongs
+ * to the route that was *refused*, so the label is read before any fallback to the record's provider
+ * (which, for a turn that advanced, is the route that answered).
+ */
+const routeOf = (attempt, fallbackProvider) => {
+  const label = str(attempt?.seat);
+  const fromLabel = label && label.includes("@") ? label.slice(label.lastIndexOf("@") + 1) : null;
+  return { provider: str(attempt?.provider) ?? fromLabel ?? str(fallbackProvider), model: str(attempt?.model) };
+};
+
 function locationOf(finding, cwd) {
   const { where, found, outside } = pathClaim(finding, cwd);
   if (where === undefined) return "uncheckable";
@@ -504,13 +509,14 @@ export function rowsForSession(session) {
       children.set(seq, {
         attempts: attempts.map((a, idx) => {
           const au = usageOf(a?.usage);
+          const route = routeOf(a, p.provider);
           return {
             seat_seq: null,
             idx,
             alias: str(a?.alias),
             seat: str(a?.seat),
-            provider: str(a?.provider),
-            model: str(a?.model),
+            provider: route.provider,
+            model: route.model,
             reason: str(a?.reason),
             detail: str(a?.detail)?.slice(0, 200) ?? null,
             duration_ms: int(a?.durationMs),
@@ -544,7 +550,7 @@ export function rowsForSession(session) {
       fusion: str(record.fusion) ?? str(d.fusion),
       mode: str(d.mode),
       // `rounds` is an array of a debate's rounds; the count is what the record means by it.
-      rounds: Array.isArray(d.rounds) ? d.rounds.length : (Number.isFinite(d.rounds) ? d.rounds : 0),
+      rounds: Array.isArray(d.rounds) ? d.rounds.length : Number.isFinite(d.rounds) ? d.rounds : 0,
       duration_ms: int(d.durationMs),
       seats: seats.length,
       degraded_seats: seats.filter((s) => s?.degraded).length,
@@ -610,13 +616,14 @@ export function rowsForSession(session) {
       attempts: seats.flatMap((s, seatSeq) =>
         (Array.isArray(s?.attempts) ? s.attempts : []).map((a, idx) => {
           const au = usageOf(a?.usage);
+          const route = routeOf(a, s?.provider);
           return {
             seat_seq: seatSeq,
             idx,
             alias: str(a?.alias),
             seat: str(a?.seat),
-            provider: str(a?.provider),
-            model: str(a?.model),
+            provider: route.provider,
+            model: route.model,
             reason: str(a?.reason),
             detail: str(a?.detail)?.slice(0, 200) ?? null,
             duration_ms: int(a?.durationMs),
@@ -687,7 +694,9 @@ export function rowsForSession(session) {
           ];
         }
         if (typeof result.skipped === "string") {
-          return [row(0, { question: null, kind: "skipped", value: null, choice: null, confidence: null, detail: result.skipped.slice(0, 200) })];
+          return [
+            row(0, { question: null, kind: "skipped", value: null, choice: null, confidence: null, detail: result.skipped.slice(0, 200) }),
+          ];
         }
         return Object.entries(result).map(([question, a], idx) =>
           row(idx, {
@@ -867,7 +876,17 @@ function applyPriceCard(db, card, now) {
   db.exec("BEGIN");
   for (const row of card.rows) {
     const prior = seen.get(row.provider, row.model);
-    upsert.run(row.provider, row.model, row.input, row.output, row.cache_read, row.cache_write, card.source, prior?.first_seen_ms ?? now, now);
+    upsert.run(
+      row.provider,
+      row.model,
+      row.input,
+      row.output,
+      row.cache_read,
+      row.cache_write,
+      card.source,
+      prior?.first_seen_ms ?? now,
+      now,
+    );
   }
   db.exec("COMMIT");
   db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('price_source', ?)`).run(card.source);
@@ -1046,7 +1065,10 @@ const usable = (row) => (row && [row.input, row.output, row.cache_read, row.cach
 const cardCost = (usage, rates) =>
   rates === null || rates === undefined
     ? null
-    : (usage.input * rates.input + usage.output * rates.output + usage.cache_read * rates.cache_read + usage.cache_write * rates.cache_write) /
+    : (usage.input * rates.input +
+        usage.output * rates.output +
+        usage.cache_read * rates.cache_read +
+        usage.cache_write * rates.cache_write) /
       1e6;
 
 /**
@@ -1073,11 +1095,15 @@ export function pricedUsage(db, provider, model, usage) {
   return { basis: "no rate", amount: null, via: null };
 }
 
-const money = () => ({ reported: 0, estimated: 0, list: 0, noRate: 0 });
+const money = () => ({ reported: 0, estimated: 0, list: 0, noRate: 0, priced: 0 });
 
 const addMoney = (bucket, priced) => {
-  if (priced.basis === "reported") bucket.reported += priced.amount;
-  else if (priced.basis === "estimated") bucket.estimated += priced.amount;
+  // `priced` counts the usages the reported total actually covers: a sum printed without its
+  // denominator reads as a price for everything, and a plan's unpriced tokens are not free.
+  if (priced.basis === "reported") {
+    bucket.reported += priced.amount;
+    bucket.priced += 1;
+  } else if (priced.basis === "estimated") bucket.estimated += priced.amount;
   else if (priced.basis === "list") bucket.list += priced.amount;
   else bucket.noRate += 1;
   return bucket;
@@ -1342,11 +1368,27 @@ export function byProxyAlias(db) {
        JOIN run r ON r.id = a.run_id WHERE a.seat_seq IS NULL GROUP BY 1, 2`,
     )
     .all();
+
+  // One alias can walk more than one route (`deepseek-flash` was refused on `alibaba-token-plan` and
+  // answered on `cline-pass`), so an alias is a *sum* over its routes — overwriting per route reported
+  // one route's turns as the alias's.
   const byAlias = new Map();
-  for (const row of turns) byAlias.set(row.alias, { ...row, levels: {}, refusals: {} });
-  for (const row of levels) if (byAlias.has(row.alias)) byAlias.get(row.alias).levels[row.thinking] = row.n;
-  for (const row of refusals) if (byAlias.has(row.alias)) byAlias.get(row.alias).refusals[row.reason] = row.n;
-  return [...byAlias.values()];
+  const row = (alias) => {
+    if (!byAlias.has(alias)) {
+      byAlias.set(alias, { alias, turns: 0, dropped: 0, recorded: 0, routes: {}, levels: {}, refusals: {} });
+    }
+    return byAlias.get(alias);
+  };
+  for (const r of turns) {
+    const entry = row(r.alias);
+    entry.turns += r.turns;
+    entry.dropped += r.dropped;
+    entry.recorded += r.recorded;
+    entry.routes[`${r.provider}/${r.model}`] = (entry.routes[`${r.provider}/${r.model}`] ?? 0) + r.turns;
+  }
+  for (const r of levels) row(r.alias).levels[r.thinking] = r.n;
+  for (const r of refusals) row(r.alias).refusals[r.reason] = r.n;
+  return [...byAlias.values()].sort((a, b) => b.turns - a.turns);
 }
 
 /** What the store holds, as counts: the ingest's own accounting, and every reader's denominator. */
