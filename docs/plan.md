@@ -1137,14 +1137,13 @@ keeps its degraded seats, `seatErrors` and substitutions, and a run that threw r
 
 Exit status: `0` report produced, `1` the store could not be accounted for (missing or empty `--dir`,
 unreadable `--session`, an unreadable file or directory, a line that did not parse, or a session a filter
-could not attribute), `2` `--check` failed. `--check` is the reader's own accounting, checked against fixtures — 99 checks as a normal
-user, measured; seven of them are permission-dependent and print as skipped under root instead of being
-counted, so the printed `N/N` is always the real total and no root figure is asserted here — and, as
-for the interpreter contracts, each of those checks is verified the same way it is written: by temporarily
-mutating the reader and watching the check fail (a manual pass run with a throwaway script, not a committed
-harness). The instrument is therefore held to the standard of the pipeline it reads. **This paragraph is the
-one place the report's check count lives**: a verification item that adds checks names the checks it adds and
-not the total, because a total restated in six items is wrong in five of them the moment any slice adds one.
+could not attribute). **The reader's own accounting is a unit test, not a `--check` branch**: it lives in
+`test/session-report.test.mjs`, is run by `npm test` like every other module's behaviour, and is counted by
+that run's own output — a module whose checks can only be exercised by running its script is a module whose
+units nobody can test, and the reader is thirty-eight hundred lines of units. Its checks are verified the same
+way they are written, as for the interpreter contracts: by mutating the reader and watching a named check fail.
+The CLI path that no unit test can reach — argument parsing and the report it prints — is a smoke test
+(`node scripts/session-report.mjs --json`), run by CI rather than asserted here.
 
 ### Step 9 — Proxy mode: a fusion that answers agent turns
 
@@ -1601,10 +1600,10 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     with `--online` exits 3; a single-route alias is reported rather than passed silently; and `--repair`
     prints its snippet while leaving every tracked file byte-identical (asserted by hash).
 
-22. **The run record survives, and the report reads it** — `node scripts/session-report.mjs --check` is green
-    (its count is stated once, in Step 8: items that add checks name their own, not the total, because a total
-    restated in six places is a total that is wrong in five of them), each check having been shown
-    to fail under a temporary mutation of the reader, then in a scratch `cwd` (Step 8's prerequisites):
+22. **The run record survives, and the report reads it** — `test/session-report.test.mjs` is green under
+    `npm test` (its count is that run's own output; this item names the checks it added, not the total), each
+    check having been shown to fail under a temporary mutation of the reader, then in a scratch `cwd`
+    (Step 8's prerequisites):
     `node scripts/session-report.mjs --cwd <scratch> --json` on the store *before* a `/matrix` run shows
     zero deliberation records, and after `/matrix quick "…"` in **both** pi and omp it shows one, with the
     answer message carrying `details.fusion` — then `--verbose` names that run. A failed run records itself:
@@ -1697,8 +1696,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     mutated (the label not read, the first label kept instead of the latest, a half-written label counted,
     unlabelled runs uncounted, a sums object merged as a usage, a seat clock dropped).
 
-28. **The device protocol and the run's own token count** — `node scripts/session-report.mjs --check` passes
-    81/81, the new ones covering: a record omp wrapped as `details.xdev.inner` is read as a deliberation run
+28. **The device protocol and the run's own token count** — `test/session-report.test.mjs` covers: a record omp wrapped as `details.xdev.inner` is read as a deliberation run
     with its fusion, seats and usage; a `write` to `xd://matrix` counts as a `matrix` call while `read` of the
     same path stays a `read`; the result row names the tool that ran; the unwrapped count is reported; and a
     run's tokens equal its own `usage`, not that plus its seats. Then live: the two `matrix` runs made through
@@ -1708,8 +1706,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     same store reported no deliberation records at all. Each must fail when the unwrap, the attribution, the
     result naming, the unwrapped count or the single-count rule is mutated.
 
-29. **Plan windows, and the join to our refusals** — `node scripts/session-report.mjs --check` passes 99/99, the
-    new ones covering: the ledger read read-only with the *latest* reading standing for each window; a reset the
+29. **Plan windows, and the join to our refusals** — `test/session-report.test.mjs` covers: the ledger read read-only with the *latest* reading standing for each window; a reset the
     provider never stated printed as "no reset stated" and never as 1970; a missing ledger named as an absence;
     and the join counting a refusal as explained only by a reading that covers its moment (exhausted versus ok),
     with refusals no reading covers counted separately and a provider we used with no window named. Five more
@@ -1744,8 +1741,8 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     `../outside/secret.ts` is reported as `[path not found]` instead of `[path outside the session]`, which is how
     an automated reviewer found it. The five load errors are the `config` rules: `execute: false` with `proxy`,
     `review` without `execute: false`, `review` without `route`, a review route target that is an executor, and a
-    JSON-writing seat without `execute: false`. `node scripts/session-report.mjs --check` is green, six of
-    them reading a disposition out of a session: its verdict, the persona that stands, its severities, and its
+    JSON-writing seat without `execute: false`. `test/session-report.test.mjs` reads a disposition in six of its
+    checks out of a session: its verdict, the persona that stands, its severities, and its
     finding paths — one under the session's cwd, one that does not exist (so `[path not found]`), one absolute
     (so `[path outside the session]`, never resolved) — a malformed answer a later one superseded, and a chain
     of two bad answers counted entry by entry. Then live: a packet reviewed through

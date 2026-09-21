@@ -88,7 +88,8 @@ Two kinds, and the difference is deliberate:
 
 - `test/*.test.mjs` — unit tests, `node --test`, one file per module, run by `npm test`. Every
   exported decision (validation rules, truncation, the failure taxonomy, deadline handling) has one
-  here. These are the tests a change to one module must not break.
+  here, and the report reader's own accounting lives here too rather than in a `--check` branch: a
+  module whose behaviour can only be exercised by running its script is a module nobody can test.
 - **Coverage is a ratchet, and it is measured over the modules the unit tests load.** `npm test` carries
   `--test-coverage-{lines,branches,functions}` thresholds, so removing a test fails the run even when every
   remaining test passes. The floor is pinned just under the achieved figure and raised by each slice that adds
@@ -117,7 +118,7 @@ node scripts/typesafe-probe.mjs --backend http://127.0.0.1:8793/v1/systemone
 node scripts/semif-probe.mjs    --backend http://127.0.0.1:8792/score
 node scripts/interp-check.mjs                                           # interpreter contracts
 node scripts/doctor.mjs                                                 # config + connectivity
-node scripts/session-report.mjs --check                                 # run-record reader contracts
+node scripts/session-report.mjs --json > /dev/null                       # the reader, as a program
 ```
 
 The interpreter and doctor checks need no keys, no network, and no quota — they are the checks that must
