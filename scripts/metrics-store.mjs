@@ -1427,6 +1427,90 @@ export function byProxyAlias(db) {
   return [...byAlias.values()].sort((a, b) => b.turns - a.turns);
 }
 
+/**
+ * One route's name, for both halves of the join: the alias when the seat was configured with one, the
+ * provider/model when only that is known, and one sentinel when neither is — a consumer must not have to
+ * learn two words for "this route cannot be named".
+ */
+const routeKey = (alias, provider, model) =>
+  str(alias) ?? (str(provider) && str(model) ? `${provider}/${model}` : (str(provider) ?? "unknown"));
+
+/**
+ * What each fusion's seat actually ran, route by route: the answer a seat gave (alias, provider,
+ * model), how often, and every route that refused it. This is the join the routes tab is made of —
+ * config says what a seat *may* walk, this says what it *did*.
+ *
+ * The two halves describe the *same* population: a seat with no persona is excluded from both (it is
+ * not a seat the per-persona view can report), and a refusal is keyed by the same route name the answer
+ * is, model included — the SQL groups by provider *and* model, and collapsing that in JavaScript would
+ * report one route refusing twice where two refused once each.
+ */
+export function byFusionSeat(db) {
+  const answered = db
+    .prepare(
+      `SELECT r.fusion AS fusion, s.persona AS persona, s.alias AS alias, s.provider AS provider, s.model AS model,
+        COUNT(*) AS seats, SUM(s.degraded) AS degraded, SUM(s.total) AS tokens,
+        SUM(COALESCE(s.duration_ms, 0)) AS seatMs, SUM(COALESCE(s.cost_reported_usd, 0)) AS reportedUsd,
+        SUM(CASE WHEN s.cost_reported_usd IS NULL THEN 1 ELSE 0 END) AS unpricedSeats
+       FROM seat s JOIN run r ON r.id = s.run_id
+       WHERE r.kind = 'deliberation' AND s.persona IS NOT NULL
+       GROUP BY 1, 2, 3, 4, 5`,
+    )
+    .all();
+  const refused = db
+    .prepare(
+      `SELECT r.fusion AS fusion, s.persona AS persona, a.alias AS alias, a.provider AS provider, a.model AS model, a.reason AS reason, COUNT(*) AS n
+       FROM attempt a JOIN seat s ON s.run_id = a.run_id AND s.seq = a.seat_seq JOIN run r ON r.id = a.run_id
+       WHERE r.kind = 'deliberation' AND s.persona IS NOT NULL GROUP BY 1, 2, 3, 4, 5, 6`,
+    )
+    .all();
+
+  const seats = new Map();
+  const row = (fusion, persona) => {
+    const key = `${fusion}|${persona}`;
+    if (!seats.has(key)) {
+      seats.set(key, {
+        fusion,
+        persona,
+        seats: 0,
+        degraded: 0,
+        tokens: 0,
+        seatMs: 0,
+        reportedUsd: 0,
+        unpricedSeats: 0,
+        // Prototype-safe maps: an alias or provider named `__proto__` must count, not read back
+        // `Object.prototype` and write through to it.
+        answered: Object.create(null),
+        refusals: Object.create(null),
+      });
+    }
+    return seats.get(key);
+  };
+  for (const a of answered) {
+    const entry = row(a.fusion ?? "(none)", a.persona);
+    entry.seats += a.seats;
+    entry.degraded += a.degraded;
+    entry.tokens += a.tokens;
+    entry.seatMs += a.seatMs;
+    entry.reportedUsd += a.reportedUsd;
+    entry.unpricedSeats += a.unpricedSeats;
+    const route = routeKey(a.alias, a.provider, a.model);
+    entry.answered[route] = (entry.answered[route] ?? 0) + a.seats;
+  }
+  for (const r of refused) {
+    const entry = row(r.fusion ?? "(none)", r.persona);
+    // The attempt's *alias* counts here as it does for an answer: an aliased route is named by its
+    // alias on both halves, or the same physical route lands under two keys — `glm` from the answer and
+    // `zai/glm-5.3` from the refusal — which is the join this reader exists to make.
+    const route = routeKey(r.alias, r.provider, r.model);
+    entry.refusals[route] = entry.refusals[route] ?? Object.create(null);
+    entry.refusals[route][r.reason ?? "?"] = (entry.refusals[route][r.reason ?? "?"] ?? 0) + r.n;
+  }
+  return [...seats.values()].sort(
+    (a, b) => (a.fusion ?? "").localeCompare(b.fusion ?? "") || String(a.persona).localeCompare(String(b.persona)),
+  );
+}
+
 /** What the store holds, as counts: the ingest's own accounting, and every reader's denominator. */
 export function totals(db) {
   const count = (sql) => db.prepare(sql).get().n;

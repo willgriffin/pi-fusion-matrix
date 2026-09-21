@@ -61,6 +61,27 @@ function harnessOfPath(file) {
   return "session";
 }
 
+/**
+ * The record's own clock as one representation. omp stores epoch milliseconds on the *message* and an
+ * ISO string on the *entry*, so a reader that takes the message's value first got a number where every
+ * downstream `Date.parse` expected a string — the metrics store's turn rows came out with no time at
+ * all, and the report's quota join has been reading those refusals as unplaceable. This normaliser runs
+ * at each of the two places an `at` enters the record (a turn and a tool result), and never at a third:
+ * a new `at` assignment without it is the defect coming back.
+ *
+ * A value it cannot represent is *absent*, never guessed and never a crash: a finite number outside the
+ * ECMAScript Date range (`|v| > 8.64e15`, e.g. an epoch in nanoseconds) would make `toISOString` throw,
+ * and one bad row must not take a whole session's extraction with it. A string is passed through as
+ * written — the harness wrote it, and a reader is not the place to declare it malformed.
+ */
+export const isoTime = (value) => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  }
+  return typeof value === "string" ? value : undefined;
+};
+
 /** Where omp keeps its plan ledger: one row per reading, per provider, per limit window. */
 const PLAN_LEDGER = path.join(os.homedir(), ".omp", "agent", "agent.db");
 
@@ -394,7 +415,10 @@ export function extractSession(entries, meta = {}) {
         ttftMs: Number.isFinite(message.ttft) ? message.ttft : undefined,
         toolCalls: callParts.map((call) => call.name),
         toolCallParts: callParts.map((call, index) => ({ id: parts[index]?.id, name: call.name, device: call.device })),
-        at: message.timestamp ?? entry.timestamp,
+        // The message's clock wins where it is representable; a value isoTime cannot represent (a
+        // non-finite or out-of-range number) falls through to the entry's own ISO string rather than
+        // silently costing the turn a time it had.
+        at: isoTime(message.timestamp) ?? isoTime(entry.timestamp),
       };
       session.turns.push(current);
       for (const part of current.toolCallParts) if (part.id !== undefined) callIndex.set(String(part.id), part);
@@ -425,7 +449,7 @@ export function extractSession(entries, meta = {}) {
         isError: message.isError === true,
         device: call?.device === true,
         after: current,
-        at: message.timestamp ?? entry.timestamp,
+        at: isoTime(message.timestamp) ?? isoTime(entry.timestamp),
       });
       const details = unwrapDetails(message.details);
       if (typeof details?.fusion === "string") {

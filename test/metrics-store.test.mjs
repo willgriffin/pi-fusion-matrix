@@ -25,11 +25,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { aggregate, extractSession, parseLines } from "../scripts/session-report.mjs";
+import { aggregate, extractSession, isoTime, parseLines } from "../scripts/session-report.mjs";
 import {
   SCHEMA_VERSION,
   byFusion,
   byModel,
+  byFusionSeat,
   byProxyAlias,
   ingest,
   loadSqlite,
@@ -788,6 +789,116 @@ test("a file that stops being readable takes its old rows with it", { skip: noSq
   assert.deepEqual(totals(rebuilt), totals(incremental), "the incrementally updated store equals a rebuild");
   rebuilt.close();
   incremental.close();
+});
+
+test("seats by fusion name the alias that answered and the routes that refused", { skip: noSqlite }, async () => {
+  const { db, dbPath } = await openFixture();
+  const seats = byFusionSeat(db);
+  const skeptic = seats.find((s) => s.fusion === "review-check" && s.persona === "review-skeptic");
+  assert.equal(skeptic.seats, 1);
+  assert.deepEqual({ ...skeptic.answered }, { glm: 1 }, "the alias that answered, not just its model");
+  // One key per *route*, named the way the answer names it — by alias when the record carries one, so
+  // an aliased route refused on two providers is one route with two reasons, not two routes.
+  const refusalShape = (refusals) => Object.fromEntries(Object.entries(refusals).map(([route, reasons]) => [route, { ...reasons }]));
+  assert.deepEqual(
+    refusalShape(skeptic.refusals),
+    { glm: { quota: 1, transient: 1 } },
+    "every route that refused it, under the alias that answered, with its reasons",
+  );
+  const synth = seats.find((s) => s.persona === "review-synth");
+  assert.equal(synth.seats, 1);
+  assert.deepEqual({ ...synth.answered }, { kimi: 1 });
+  assert.deepEqual({ ...synth.refusals }, {}, "a seat nobody refused has no refusals, rather than an absent row");
+  db.close();
+  fs.rmSync(dbPath, { force: true });
+});
+
+test("one aliased route is named the same on both halves, and a hostile name is just a name", { skip: noSqlite }, async () => {
+  // A store built here, row by row, because these are shapes the fixture session cannot express: an
+  // attempt that carries an alias, a seat with no persona, and config-supplied names that are hostile.
+  const dbPath = path.join(tempDir("join"), "matrix.db");
+  const db = openStore(dbPath);
+  db.exec("BEGIN");
+  db.prepare(`INSERT INTO store_file (path, harness, size, mtime_ms, status, ingested_at) VALUES ('f.jsonl', 'omp', 1, 1, 'ok', 1)`).run();
+  const sessionId = db.prepare(`INSERT INTO session (path, harness, entries) VALUES ('f.jsonl', 'omp', 1)`).run().lastInsertRowid;
+  const runId = db
+    .prepare(`INSERT INTO run (session_id, seq, kind, carrier, fusion) VALUES (?, 0, 'deliberation', 'toolResult', 'review')`)
+    .run(sessionId).lastInsertRowid;
+  const seat = db.prepare(`INSERT INTO seat (run_id, seq, persona, alias, provider, model) VALUES (?, ?, ?, ?, ?, ?)`);
+  const attempt = db.prepare(`INSERT INTO attempt (run_id, seat_seq, idx, alias, provider, model, reason) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+
+  // One aliased route, refused twice on two providers: one key, both reasons.
+  seat.run(runId, 0, "skeptic", "glm", "opencode-go", "glm-5.3");
+  attempt.run(runId, 0, 0, "glm", "zai", "glm-5.3", "quota");
+  attempt.run(runId, 0, 1, "glm", "opencode-go", "glm-5.3", "transient");
+  // A *different* aliased route refusing the same seat: two routes, two keys.
+  attempt.run(runId, 0, 2, "kimi", "kimi-coding", "k3", "quota");
+  // A refusal that carries no alias at all: the key falls back to provider/model.
+  attempt.run(runId, 0, 3, null, "zai", "glm-4.6", "quota");
+  // A seat with no persona at all, carrying an attempt: it must not become a refusals-only row.
+  seat.run(runId, 1, null, "ghost", "zai", "glm-5.3");
+  attempt.run(runId, 1, 0, "ghost", "zai", "glm-5.3", "transient");
+  // A hostile provider name, which must count like any other.
+  seat.run(runId, 2, "systems", "__proto__", "__proto__", "m");
+  attempt.run(runId, 2, 0, "__proto__", "__proto__", "m", "quota");
+  db.exec("COMMIT");
+
+  const rows = byFusionSeat(db);
+  assert.equal(rows.length, 2, "the null-persona seat produces no row of its own");
+
+  const skeptic = rows.find((row) => row.persona === "skeptic");
+  const reasons = (route) => ({ ...skeptic.refusals[route] });
+  assert.deepEqual({ ...skeptic.answered }, { glm: 1 }, "answered by alias");
+  assert.deepEqual(
+    Object.keys(skeptic.refusals).sort(),
+    ["glm", "kimi", "zai/glm-4.6"],
+    "one key per route: the alias, another alias, and the un-aliased fallback",
+  );
+  assert.deepEqual(reasons("glm"), { quota: 1, transient: 1 }, "the same route refused on two providers is one key with both reasons");
+  assert.deepEqual(reasons("kimi"), { quota: 1 }, "a different aliased route keeps its own key");
+  assert.deepEqual(reasons("zai/glm-4.6"), { quota: 1 }, "an attempt with no alias falls back to provider/model");
+
+  const systems = rows.find((row) => row.persona === "systems");
+  assert.deepEqual(Object.keys(systems.answered), ["__proto__"], "a hostile name is a name");
+  assert.deepEqual({ ...systems.refusals.__proto__ }, { quota: 1 }, "its refusal is counted, not written through");
+  assert.equal(Object.prototype.quota, undefined, "and Object.prototype is untouched");
+  assert.equal({}.quota, undefined, "so is every other object's");
+
+  db.close();
+  fs.rmSync(dbPath, { force: true });
+});
+
+test("a record's clock is a string or absent, whatever the harness wrote", () => {
+  const entries = [
+    { type: "session", id: "s", cwd: "/tmp/x", timestamp: "2026-09-20T00:00:00.000Z" },
+    // omp writes epoch milliseconds on the message.
+    { type: "message", message: { role: "assistant", provider: "p", model: "m", timestamp: 1789862400000, content: [] } },
+    // A finite number outside the Date range — the shape that used to make toISOString throw and take
+    // the whole session's extraction with it.
+    { type: "message", message: { role: "assistant", provider: "p", model: "m", timestamp: 1.7e18, content: [] } },
+    // A message clock the normaliser cannot represent, with a usable one on the entry: the entry wins
+    // rather than the turn losing its time.
+    {
+      type: "message",
+      timestamp: "2026-09-20T00:00:05.000Z",
+      message: { role: "assistant", provider: "p", model: "m", timestamp: Number.NaN, content: [] },
+    },
+  ];
+  const session = extractSession(entries, { file: "f", harness: "omp" });
+
+  assert.equal(session.turns.length, 3);
+  assert.equal(session.turns[0].at, "2026-09-20T00:00:00.000Z", "epoch milliseconds became an ISO string");
+  assert.equal(typeof session.turns[0].at, "string");
+  assert.equal(session.turns[1].at, undefined, "an out-of-range epoch is absent, not a crash");
+  assert.equal(session.turns[2].at, "2026-09-20T00:00:05.000Z", "the entry's clock stands in for an unrepresentable message one");
+
+  // And the normaliser itself, at its edges.
+  assert.equal(isoTime(1789862400000), "2026-09-20T00:00:00.000Z");
+  assert.equal(isoTime("2026-09-20T00:00:00.000Z"), "2026-09-20T00:00:00.000Z");
+  assert.equal(isoTime(1.7e18), undefined);
+  assert.equal(isoTime(Number.NaN), undefined);
+  assert.equal(isoTime(undefined), undefined);
+  assert.equal(isoTime({}), undefined);
 });
 
 test("the CLI accounts for the store it built, and refuses a flag it does not take", { skip: noSqlite }, async () => {
