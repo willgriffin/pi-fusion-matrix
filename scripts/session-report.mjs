@@ -61,6 +61,16 @@ function harnessOfPath(file) {
   return "session";
 }
 
+/**
+ * The record's own clock as one representation. omp stores epoch milliseconds on the *message* and an
+ * ISO string on the *entry*, so a reader that takes the message's value first got a number where every
+ * downstream `Date.parse` expected a string — the metrics store's turn rows came out with no time at
+ * all, and the report's quota join has been reading those refusals as unplaceable. One normaliser,
+ * used wherever an `at` enters the record.
+ */
+export const isoTime = (value) =>
+  typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString() : typeof value === "string" ? value : undefined;
+
 /** Where omp keeps its plan ledger: one row per reading, per provider, per limit window. */
 const PLAN_LEDGER = path.join(os.homedir(), ".omp", "agent", "agent.db");
 
@@ -394,7 +404,7 @@ export function extractSession(entries, meta = {}) {
         ttftMs: Number.isFinite(message.ttft) ? message.ttft : undefined,
         toolCalls: callParts.map((call) => call.name),
         toolCallParts: callParts.map((call, index) => ({ id: parts[index]?.id, name: call.name, device: call.device })),
-        at: message.timestamp ?? entry.timestamp,
+        at: isoTime(message.timestamp ?? entry.timestamp),
       };
       session.turns.push(current);
       for (const part of current.toolCallParts) if (part.id !== undefined) callIndex.set(String(part.id), part);
@@ -425,7 +435,7 @@ export function extractSession(entries, meta = {}) {
         isError: message.isError === true,
         device: call?.device === true,
         after: current,
-        at: message.timestamp ?? entry.timestamp,
+        at: isoTime(message.timestamp ?? entry.timestamp),
       });
       const details = unwrapDetails(message.details);
       if (typeof details?.fusion === "string") {

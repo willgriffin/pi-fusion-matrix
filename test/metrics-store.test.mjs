@@ -30,6 +30,7 @@ import {
   SCHEMA_VERSION,
   byFusion,
   byModel,
+  byFusionSeat,
   byProxyAlias,
   ingest,
   loadSqlite,
@@ -788,6 +789,21 @@ test("a file that stops being readable takes its old rows with it", { skip: noSq
   assert.deepEqual(totals(rebuilt), totals(incremental), "the incrementally updated store equals a rebuild");
   rebuilt.close();
   incremental.close();
+});
+
+test("seats by fusion name the alias that answered and the routes that refused", { skip: noSqlite }, async () => {
+  const { db, dbPath } = await openFixture();
+  const seats = byFusionSeat(db);
+  const skeptic = seats.find((s) => s.fusion === "review-check" && s.persona === "review-skeptic");
+  assert.equal(skeptic.seats, 1);
+  assert.deepEqual(skeptic.answered, { glm: 1 }, "the alias that answered, not just its model");
+  assert.deepEqual(skeptic.refusals, { "opencode-go": { quota: 1 }, zai: { transient: 1 } }, "every route that refused it, by reason");
+  const synth = seats.find((s) => s.persona === "review-synth");
+  assert.equal(synth.seats, 1);
+  assert.deepEqual(synth.answered, { kimi: 1 });
+  assert.deepEqual(synth.refusals, {}, "a seat nobody refused has no refusals, rather than an absent row");
+  db.close();
+  fs.rmSync(dbPath, { force: true });
 });
 
 test("the CLI accounts for the store it built, and refuses a flag it does not take", { skip: noSqlite }, async () => {

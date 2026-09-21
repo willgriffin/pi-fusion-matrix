@@ -1427,6 +1427,72 @@ export function byProxyAlias(db) {
   return [...byAlias.values()].sort((a, b) => b.turns - a.turns);
 }
 
+/**
+ * What each fusion's seat actually ran, route by route: the answer a seat gave (alias, provider,
+ * model), how often, and every route that refused it. This is the join the routes tab is made of —
+ * config says what a seat *may* walk, this says what it *did*.
+ */
+export function byFusionSeat(db) {
+  const answered = db
+    .prepare(
+      `SELECT r.fusion AS fusion, s.persona AS persona, s.alias AS alias, s.provider AS provider, s.model AS model,
+        COUNT(*) AS seats, SUM(s.degraded) AS degraded, SUM(s.total) AS tokens,
+        SUM(COALESCE(s.duration_ms, 0)) AS seatMs, SUM(COALESCE(s.cost_reported_usd, 0)) AS reportedUsd,
+        SUM(CASE WHEN s.cost_reported_usd IS NULL THEN 1 ELSE 0 END) AS unpricedSeats
+       FROM seat s JOIN run r ON r.id = s.run_id
+       WHERE r.kind = 'deliberation' AND s.persona IS NOT NULL
+       GROUP BY 1, 2, 3, 4, 5`,
+    )
+    .all();
+  const refused = db
+    .prepare(
+      `SELECT r.fusion AS fusion, s.persona AS persona, a.provider AS provider, a.model AS model, a.reason AS reason, COUNT(*) AS n
+       FROM attempt a JOIN seat s ON s.run_id = a.run_id AND s.seq = a.seat_seq JOIN run r ON r.id = a.run_id
+       WHERE r.kind = 'deliberation' GROUP BY 1, 2, 3, 4, 5`,
+    )
+    .all();
+
+  const seats = new Map();
+  const row = (fusion, persona) => {
+    const key = `${fusion}|${persona}`;
+    if (!seats.has(key)) {
+      seats.set(key, {
+        fusion,
+        persona,
+        seats: 0,
+        degraded: 0,
+        tokens: 0,
+        seatMs: 0,
+        reportedUsd: 0,
+        unpricedSeats: 0,
+        answered: {},
+        refusals: {},
+      });
+    }
+    return seats.get(key);
+  };
+  for (const a of answered) {
+    const entry = row(a.fusion ?? "(none)", a.persona);
+    entry.seats += a.seats;
+    entry.degraded += a.degraded;
+    entry.tokens += a.tokens;
+    entry.seatMs += a.seatMs;
+    entry.reportedUsd += a.reportedUsd;
+    entry.unpricedSeats += a.unpricedSeats;
+    const route = a.alias ?? (a.provider && a.model ? `${a.provider}/${a.model}` : "no route");
+    entry.answered[route] = (entry.answered[route] ?? 0) + a.seats;
+  }
+  for (const r of refused) {
+    const entry = row(r.fusion ?? "(none)", r.persona);
+    const route = r.provider ?? "unknown";
+    entry.refusals[route] = entry.refusals[route] ?? {};
+    entry.refusals[route][r.reason ?? "?"] = (entry.refusals[route][r.reason ?? "?"] ?? 0) + r.n;
+  }
+  return [...seats.values()].sort(
+    (a, b) => (a.fusion ?? "").localeCompare(b.fusion ?? "") || String(a.persona).localeCompare(String(b.persona)),
+  );
+}
+
 /** What the store holds, as counts: the ingest's own accounting, and every reader's denominator. */
 export function totals(db) {
   const count = (sql) => db.prepare(sql).get().n;
