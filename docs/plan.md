@@ -1384,6 +1384,17 @@ while real reviews sat at 0.44–0.76. At 0.5 every review warned and none of th
 defect — six warnings, no true positives — so the review rungs warn below **0.35**, which separates the one
 suspicious case (a clean verdict its own check could not confirm) instead of flagging all of them.
 
+**The warning bar and a review's clean floor are two different numbers, and both are written down here so
+neither is recalibrated blind.** `warnBelow` is the *pipeline's* threshold for printing a `⚠️ verify:` line: a
+prompt to look, and nothing more — `verify` stays report-only and never blocks or rewrites a run. A *review
+cycle* that reads these records applies its own floor, and the review policy's is `noul >= 0.5` with
+confidence ≥ 0.5 on the questions it names. So a score in [0.35, 0.5) is a run that warns nothing and still
+cannot be called clean by a reviewer under that policy — by design, because the two answer different
+questions, and stated here rather than left for a maintainer to discover. Raising `warnBelow` to 0.5 to
+"match" would not close the gap: it would flag every real review, which is the miscalibration the measurement
+above exists to prevent. What would close it is the panel scoring above the floor, which the store now
+measures per question and per model.
+
 **The committee's decision bar stays at 0.85, and that is a measurement rather than an oversight.** Across those
 same runs every stage decision came back `insufficient` at 0.79–0.84, so the cheap path was never taken. On
 inspection the gate is *right*: those answers read `disagrees` — the panels genuinely differed, which is exactly
@@ -1515,8 +1526,8 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    `node scripts/typesafe-probe.mjs --backend https://api.typesafe.ai/v1/systemone`; it must exit 0 and
    print the answering `model` (`jev-1.13.0`). Then run `review-check` live
    (`/matrix review-check "…"`) and confirm
-   `details.verification[].result` carries three typed answers (`noul`, `noul`, `noul`) and that each
-   `choice`/`score` answer has `confidence`. A `401` here means the key is absent or wrong, not that
+   `details.verification[].result` carries three typed answers (`noul`, `noul`, `noul`) and that every
+   answer carries its `confidence`. A `401` here means the key is absent or wrong, not that
    the wiring is broken. **Verified live 2026-09-18**: the probe exits 0 printing `jev-1.13.0`, and a
    live `review-check` run cascaded (`decision insufficient (agrees, conf 0.81, needs >= 0.85)` → the
    judge ran → the synthesis answered), with verify reporting `grounded_in_panel=0.22` and
