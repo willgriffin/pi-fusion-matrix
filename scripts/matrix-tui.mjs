@@ -14,13 +14,14 @@
  *   node scripts/matrix-tui.mjs --plain              # one frame as text, for a pipe or a test
  *   node scripts/matrix-tui.mjs --no-rain --no-color # quiet, and readable on a mono terminal
  *
- * Editing is deliberate and two-step. `⏎` expands an alias into the routes it walks, where `K`/`J`
- * reorder them, `n` has you type a name to add one and `d` drops one; `e` re-points a seat on the routes tab. Each change is
- * a *proposal*: the status bar shows it, the layer it would be written to, *and whether the config
- * still validates*; `s` writes it, `esc` goes back (discarding a proposal, then leaving a route, then
- * collapsing an alias) and only `q` quits. A change that would not load is refused with the loader's
- * own message before the file is touched — the same rule the loader enforces, not a second opinion
- * about it.
+ * Editing is deliberate. `⏎` expands an alias into the routes it walks, where `K`/`J` reorder them and
+ * `d` drops one — each staged as a two-step *proposal*: the status bar shows it, the layer it would be
+ * written to, *and whether the config still validates*; `s` writes it. `n` has you type a name to add
+ * one and submits it straight through that same validated write — the prompt's submit creates and
+ * saves, no second `s` — while `e` re-points a seat on the routes tab. `esc` goes back (discarding a
+ * proposal, then leaving a route, then collapsing an alias) and only `q` quits. A change that would
+ * not load is refused with the loader's own message before the file is touched — the same rule the
+ * loader enforces, not a second opinion about it.
  *
  * The driver is the only part that needs a terminal: the rain (`tui-rain.mjs`), the layout, the
  * tables and the key handling (`tui-view.mjs`) are pure, so a test drives the interface without a TTY
@@ -138,9 +139,9 @@ const READ_ONLY = "the fusions tab is read-only for now";
  *
  * `1`/`2`/`3` are the only keys that switch tabs; `tab`/`shift-tab`, the arrows and `h`/`l` walk the
  * rows *inside* one — a tree on the aliases tab, where `enter` expands an alias into its routes and
- * the arrows move between a route and its parent. `K`/`J`/`n`/`d` reshape the route list under the
- * cursor as proposals, `esc` is back (a pending change first, then a route, then an expansion), and
- * only `q` ever quits.
+ * the arrows move between a route and its parent. `K`/`J`/`d` reshape the route list under the cursor
+ * as staged proposals `s` writes while `n`'s prompt saves what it adds as it submits, `esc` is back
+ * (a pending change first, then a route, then an expansion), and only `q` ever quits.
  */
 export function applyKey(state, key) {
   const next = { ...state, cursors: { ...state.cursors }, message: state.message };
@@ -185,6 +186,9 @@ export function applyKey(state, key) {
       else {
         next.input = null;
         accept(input.pending(name));
+        // Submitting the prompt is create *and* save: the staged proposal goes through the same
+        // loader-validated write `s` runs, so the name just typed lands without a second key.
+        return { state: next, effect: "save" };
       }
     } else if (key === "escape") next.input = null;
     else if (key === "ctrl-c") return { state: next, effect: "quit" };
@@ -264,7 +268,12 @@ export function applyKey(state, key) {
     else accept(proposeRouteDrop({ state, row }));
   } else if (key === "n") {
     if (tab !== "aliases" || !row) next.message = LIST_KEYS;
-    else next.input = { title: `${listOwner(row)}: add route`, value: "", pending: (name) => proposeRouteAdd({ state, row, ref: name }) };
+    else {
+      // The list being named is on screen while the name is typed: the row it belongs to — a route's
+      // parent, or the parent itself — expands, and its children follow it so the cursor stays put.
+      setExpanded(listOwner(row), true);
+      next.input = { title: `${listOwner(row)}: add route`, value: "", pending: (name) => proposeRouteAdd({ state, row, ref: name }) };
+    }
   } else if (key === "e") {
     // Only the aliases tab answers with a hint instead of a proposal: its list has its own keys.
     if (tab === "aliases") next.message = EDIT_HINT;
@@ -283,7 +292,12 @@ export function applyKey(state, key) {
   return { state: next, effect: "none" };
 }
 
-/** A terminal chunk into a key name. Arrows and shift-tab arrive as escape sequences in one chunk. */
+/**
+ * A terminal chunk into a key name. Arrows and shift-tab arrive as escape sequences in one chunk, and
+ * an escape-prefixed chunk is never text: what is not a sequence this knows is `escape`, so nothing the
+ * terminal sent as a sequence can end up typed into a field. Hosts that spell key names instead of
+ * sending bytes map to the same ones; anything else arrives verbatim, a paste whole.
+ */
 export function keyName(chunk) {
   if (chunk === "\t") return "tab";
   if (chunk === "\r" || chunk === "\n") return "return";
@@ -297,7 +311,12 @@ export function keyName(chunk) {
     if (code === "C") return "right";
     if (code === "D") return "left";
     if (code === "Z") return "shift-tab";
+    return "escape";
   }
+  if (chunk.startsWith("\x1b")) return "escape";
+  if (chunk === "Escape" || chunk === "escape" || chunk === "ESC") return "escape";
+  if (chunk === "Enter" || chunk === "Return") return "return";
+  if (chunk === "Backspace") return "backspace";
   return chunk;
 }
 
@@ -523,8 +542,9 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
       "       K/J move route · n add route · d drop route · e edit (routes) · s save · esc back/discard · R reingest",
       "       r reload · a rain · c colour · q quit",
       "e re-points a seat (routes tab); ⏎ expands an alias into the routes K/J, n and d reshape",
-      "every change is a proposal: the bar shows it and whether it still validates, s writes it to the",
-      "layer named under it once the loader accepts it, and esc goes back and discards it",
+      "K/J/d stage a proposal: the bar shows it and whether it still validates, s writes it to the",
+      "layer named under it once the loader accepts it; n writes the name you type through that same",
+      "validated write the moment the prompt is submitted, and esc goes back and discards",
       "$report is what providers priced (with the seats it covers), $est is their own rate card applied to",
       "unpriced seats, $list is the same tokens at list price — one basis per column, never folded together",
     ];

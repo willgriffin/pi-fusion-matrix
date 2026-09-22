@@ -229,7 +229,7 @@ test("esc is back: it closes a modal, never the matrix", async (t) => {
   panel.dispose();
 });
 
-test("n asks for the route's name — typing is visible, enter stages it, esc backs out", async (t) => {
+test("n asks for the route's name — submitting creates it and it shows up", async (t) => {
   const { panel, calls, layerFile } = await mountPanel(t, "aliases");
   const found = findRow(panel, (providers) => providers.length > 0);
   assert.ok(found, "the config carries a parent alias to add a route to");
@@ -244,14 +244,21 @@ test("n asks for the route's name — typing is visible, enter stages it, esc ba
   assert.equal(calls.done, 0, "…and the matrix lives");
   panel.handleInput("n");
   panel.handleInput("zai");
-  panel.handleInput("\r");
-  assert.ok(panel.state.pending, "enter turns the typed name into a proposal");
-  assert.equal(panel.state.pending.listOf, found.row.alias, "…on the alias the cursor sits on");
-  panel.handleInput("s");
-  await until(() => panel.state.pending === null, "the proposal to be spent");
+  const sequence = String.fromCharCode(27) + "[27~"; // the reader's esc arrives as an escape-sequence chunk, not a name
+  panel.handleInput(sequence);
+  assert.equal(panel.state.input, null, "an escape sequence backs out too — it is never text to type into the field");
+  assert.equal(calls.done, 0, "…and it is still back, not out");
+  const tail = "[27~";
+  assert.ok(!JSON.stringify(panel.state).includes(tail), "the sequence's tail is nowhere in the state");
+  assert.ok(!panel.render(100).some((line) => line.includes(tail)), "…nor anywhere in the frame");
+  panel.handleInput("n");
+  panel.handleInput("zai");
+  panel.handleInput("\r"); // submitting is create and save both — no separate "s" to land it
+  await until(() => panel.state.pending === null, "the submit to be written through");
   const written = JSON.parse(fs.readFileSync(layerFile, "utf8"));
   const providers = written.aliases?.[found.row.alias]?.providers ?? [];
   assert.deepEqual(providers, [...found.providers, "zai"], "the typed name is the alias's last route on disk");
+  assert.ok(shows(panel.render(100), "zai"), "…and it is on screen among the row's expanded children");
   panel.dispose();
 });
 

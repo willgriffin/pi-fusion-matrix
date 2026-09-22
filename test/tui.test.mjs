@@ -664,16 +664,46 @@ test("numbers switch tabs; arrows, h/l and the tab key walk one tab's rows", () 
 });
 
 test("a terminal chunk becomes one key name", () => {
-  assert.equal(keyName("\u001b[A"), "up");
-  assert.equal(keyName("\u001b[B"), "down");
-  assert.equal(keyName("\u001b[Z"), "shift-tab");
-  assert.equal(keyName("\u001b"), "escape");
-  assert.equal(keyName("\t"), "tab");
-  assert.equal(keyName("\r"), "return");
-  assert.equal(keyName("\u0003"), "ctrl-c", "ctrl-c is its own name now: `q` must stay typeable text");
+  // The control bytes under test, built at runtime rather than spelled as source escapes.
+  const esc = String.fromCharCode(27);
+  const tab = String.fromCharCode(9);
+  const cr = String.fromCharCode(13);
+  const lf = String.fromCharCode(10);
+  const bs = String.fromCharCode(8);
+  const del = String.fromCharCode(127);
+  const etx = String.fromCharCode(3);
+
+  // Arrows and shift-tab are the only escape sequences that name a key of their own.
+  assert.equal(keyName(esc + "[A"), "up");
+  assert.equal(keyName(esc + "[B"), "down");
+  assert.equal(keyName(esc + "[C"), "right");
+  assert.equal(keyName(esc + "[D"), "left");
+  assert.equal(keyName(esc + "[Z"), "shift-tab");
+
+  // Every other chunk carrying an escape byte is the escape key — an escape sequence is never
+  // text, whatever tail the terminal coalesced onto it.
+  assert.equal(keyName(esc), "escape", "the bare byte");
+  assert.equal(keyName(esc + "[27~"), "escape", "an unknown CSI sequence is escape, not typing");
+  assert.equal(keyName(esc + "O"), "escape", "and an unknown SS3 one");
+  assert.equal(keyName(esc + "zai"), "escape", "even with text coalesced onto it");
+  assert.equal(keyName(esc + esc + "zai"), "escape", "or a second escape dragged along");
+
+  // Hosts that deliver key names rather than bytes spell some of them out.
+  for (const name of ["Escape", "escape", "ESC"]) assert.equal(keyName(name), "escape", `${name} names the escape key`);
+  assert.equal(keyName("Enter"), "return", "enter by name");
+  assert.equal(keyName("Return"), "return");
+  assert.equal(keyName("Backspace"), "backspace");
+
+  assert.equal(keyName(tab), "tab");
+  assert.equal(keyName(cr), "return");
+  assert.equal(keyName(lf), "return", "the line feed is enter too");
+  assert.equal(keyName(etx), "ctrl-c", "ctrl-c is its own name now: `q` must stay typeable text");
   assert.equal(keyName("j"), "j");
-  assert.equal(keyName("\u007f"), "backspace");
-  assert.equal(keyName("\b"), "backspace", "the terminal's delete and its backspace are one key");
+  assert.equal(keyName(del), "backspace");
+  assert.equal(keyName(bs), "backspace", "the terminal's delete and its backspace are one key");
+
+  // A paste is text whatever it looks like — it arrives whole and stays whole.
+  assert.equal(keyName("cline-pass"), "cline-pass", "a paste is not chopped into keys");
 
   // And that name quits wherever it lands: out in the open, under a picker, inside the name prompt.
   assert.equal(applyKey(editState(), "ctrl-c").effect, "quit");
@@ -902,6 +932,45 @@ test("n asks for the route's name from any row of the aliases list", () => {
   assert.equal(applyKey(cursorOn(solo, parent), "n").state.input.title, "solo: add route");
 });
 
+test("n expands the row's list as it asks: the route being named is on screen", () => {
+  // The reader's report: the added entry never showed up — its list stayed shut while the name was
+  // asked for and after it landed. `n` opens the list it edits, so the row is in sight before,
+  // during and after the prompt, the cursor staying on the row `n` was pressed on.
+  const closed = editState();
+  const parent = closed.rows.aliases.find((row) => row.kind === "alias" && row.alias === "kimi");
+  assert.equal(parent.expanded, false, "the fixture stands: the list is shut");
+  const before = closed.rows.aliases.length;
+
+  const asked = applyKey(cursorOn(closed, parent), "n").state;
+  assert.ok(asked.input, "the prompt opens over the visible list");
+  assert.equal(asked.expanded.kimi, true, "the list it will edit is open");
+  assert.equal(asked.rows.aliases.length, before + parent.childCount, "its routes are the rows the list grew by");
+  assert.deepEqual(
+    asked.rows.aliases.filter((row) => row.kind === "route" && row.parent === "kimi").map((row) => row.provider),
+    ["opencode-go", "kimi-code"],
+  );
+  assert.equal(asked.cursors.aliases, closed.cursors.aliases, "the cursor stays on the row `n` was pressed on");
+  assert.equal(asked.rows.aliases[asked.cursors.aliases].alias, "kimi", "which is still the parent");
+
+  const named = applyKey(applyKey(asked, "zai").state, "return").state;
+  assert.deepEqual(
+    named.rows.aliases.filter((row) => row.kind === "route" && row.parent === "kimi").map((row) => row.provider),
+    ["opencode-go", "kimi-code", "zai"],
+    "and what it names lands in the list that is still open",
+  );
+
+  // On a route row the list is already open — `n` asks its parent's question and leaves it open.
+  const open = expandedOn(editState(), "kimi");
+  const onRoute = applyKey(cursorOn(open, routeRow(open, "kimi", "opencode-go")), "n").state;
+  assert.ok(onRoute.input);
+  assert.equal(onRoute.expanded.kimi, true);
+  assert.deepEqual(
+    onRoute.rows.aliases.filter((row) => row.kind === "route" && row.parent === "kimi").map((row) => row.provider),
+    ["opencode-go", "kimi-code"],
+    "and the routes stay on screen under it",
+  );
+});
+
 test("the name prompt takes text: letters one key at a time, a paste whole, backspace takes it back", () => {
   const open = applyKey(expandedOn(editState(), "kimi"), "n").state;
   assert.equal(open.input.value, "");
@@ -934,46 +1003,52 @@ test("the name prompt takes text: letters one key at a time, a paste whole, back
   assert.equal(applyKey(open, String.fromCharCode(1) + "z").state.input.value, "z");
 });
 
-test("entering a name stages the route after the cursor's, or at the end of its alias's list", () => {
+test("entering a name creates and saves the route after the cursor's, or at the end of its alias's list", () => {
   const open = expandedOn(editState(), "kimi");
   const type = (world, text) => applyKey(applyKey(world, "n").state, text).state;
 
-  // On a route row the name lands right after it — and what the table shows is the proposal.
+  // On a route row the name lands right after it — what the table shows is the proposal, and the
+  // submit is the save: one Enter is create and write both, with no second `s` to ask for.
   const staged = applyKey(type(cursorOn(open, routeRow(open, "kimi", "opencode-go")), "zai"), "return");
+  assert.equal(staged.effect, "save", "submitting the name asks for the write");
   assert.equal(staged.state.input, null, "the prompt closes on the name");
   assert.equal(staged.state.pending.listOf, "kimi");
   assert.deepEqual(staged.state.pending.patch.aliases.kimi.providers, ["opencode-go", "zai", "kimi-code"]);
   assert.deepEqual(staged.state.pending.errors, [], "the loader's verdict travels with the proposal");
   assert.match(staged.state.pending.summary, /kimi/);
-  assert.equal(staged.state.message, "proposed — s saves, esc discards");
   assert.deepEqual(
     staged.state.rows.aliases.filter((row) => row.kind === "route" && row.parent === "kimi").map((row) => row.provider),
     ["opencode-go", "zai", "kimi-code"],
   );
 
   // On the parent row there is no route to sit after, so the name goes to the end of the list.
-  const appended = applyKey(type(open, "zai"), "return").state;
-  assert.deepEqual(appended.pending.patch.aliases.kimi.providers, ["opencode-go", "kimi-code", "zai"]);
-  assert.equal(appended.pending.listOf, "kimi");
-  assert.deepEqual(appended.pending.errors, []);
+  const appended = applyKey(type(open, "zai"), "return");
+  assert.equal(appended.effect, "save", "…and the submit saves it there");
+  assert.equal(appended.state.pending.listOf, "kimi");
+  assert.deepEqual(appended.state.pending.patch.aliases.kimi.providers, ["opencode-go", "kimi-code", "zai"]);
+  assert.deepEqual(appended.state.pending.errors, []);
 
   // An alias walking no providers gets its first route the same way.
   const solo = soloState();
   const parent = solo.rows.aliases.find((row) => row.kind === "alias" && row.alias === "solo");
-  const first = applyKey(type(cursorOn(solo, parent), "zai"), "return").state;
-  assert.deepEqual(first.pending.patch.aliases.solo.providers, ["zai"], "the first route is the whole list");
-  assert.deepEqual(first.pending.errors, []);
+  const first = applyKey(type(cursorOn(solo, parent), "zai"), "return");
+  assert.equal(first.effect, "save");
+  assert.deepEqual(first.state.pending.patch.aliases.solo.providers, ["zai"], "the first route is the whole list");
+  assert.deepEqual(first.state.pending.errors, []);
 
-  // Two names typed in a row against one alias add up to one pending change holding the net list.
-  const net = applyKey(type(cursorOn(staged.state, routeRow(staged.state, "kimi", "zai")), "cleo"), "return").state;
-  assert.equal(net.pending.listOf, "kimi");
-  assert.deepEqual(net.pending.patch.aliases.kimi.providers, ["opencode-go", "zai", "cleo", "kimi-code"], "both names, one proposal");
-  assert.deepEqual(net.pending.errors, []);
+  // Two names typed in a row against one alias add up to one pending change holding the net list —
+  // and each submit is a save over the one pending it accumulates into.
+  const net = applyKey(type(cursorOn(staged.state, routeRow(staged.state, "kimi", "zai")), "cleo"), "return");
+  assert.equal(net.effect, "save");
+  assert.equal(net.state.pending.listOf, "kimi");
+  assert.deepEqual(net.state.pending.patch.aliases.kimi.providers, ["opencode-go", "zai", "cleo", "kimi-code"], "both names, one proposal");
+  assert.deepEqual(net.state.pending.errors, []);
 });
 
 test("a blank name is refused with the prompt still open and the typing intact", () => {
   const open = applyKey(expandedOn(editState(), "kimi"), "n").state;
   const blank = applyKey(open, "return");
+  assert.equal(blank.effect, "none", "a blank name writes nothing");
   assert.ok(blank.state.input, "the prompt stays open");
   assert.equal(blank.state.message, "a route needs a name");
   assert.equal(blank.state.pending, null);
@@ -981,6 +1056,7 @@ test("a blank name is refused with the prompt still open and the typing intact",
   const spaces = [" ", " ", " "].reduce((world, key) => applyKey(world, key).state, open);
   assert.equal(spaces.input.value, "   ");
   const refused = applyKey(spaces, "return");
+  assert.equal(refused.effect, "none", "whitespace writes nothing either");
   assert.ok(refused.state.input, "whitespace is not a name either");
   assert.equal(refused.state.message, "a route needs a name");
   assert.equal(refused.state.input.value, "   ", "and what was typed is still there to fix");
@@ -1019,6 +1095,29 @@ test("the staging keeps the verdict it is handed: a refusal's summary, a complai
   );
   assert.deepEqual(complained.state.pending.errors, ["boom"]);
   assert.equal(complained.state.message, "", "an invalid change leaves the status line to the verdict bar");
+});
+
+test("an escape sequence backs out of the name prompt and never lands in the typing", () => {
+  // The reader's report: hitting escape typed the escape's own characters into the field. The
+  // chunk a real escape key arrives in is built here at runtime — it is one key, never its bytes as
+  // text — so it closes the prompt with nothing of itself left anywhere behind.
+  const typed = applyKey(applyKey(expandedOn(editState(), "kimi"), "n").state, "zai").state;
+  assert.equal(typed.input.value, "zai", "the fixture stands: there is typing to leave alone");
+
+  const chunk = String.fromCharCode(27) + "[27~";
+  assert.equal(keyName(chunk), "escape", "the terminal's chunk is the escape key");
+  const closed = applyKey(typed, keyName(chunk));
+  assert.equal(closed.state.input, null, "and escape is back");
+  assert.notEqual(closed.effect, "quit", "…never a way out");
+  const json = JSON.stringify(closed.state);
+  assert.equal(json.includes("[27~"), false, "no fragment of the sequence was typed");
+  // JSON spells a raw escape byte out as the six characters backslash-u001b; none of that is here.
+  assert.equal(json.includes(String.fromCharCode(92) + "u001b"), false, "and no escape byte is left in the state");
+
+  // The bare escape key closes the prompt just as cleanly, changing nothing else.
+  const backed = applyKey(typed, "escape");
+  assert.equal(backed.state.input, null);
+  assert.deepEqual({ ...backed.state, input: "closed" }, { ...typed, input: "closed" }, "it closes the prompt and changes nothing else");
 });
 
 test("escape backs out of the name prompt and changes nothing else; ctrl-c quits from inside it", () => {
