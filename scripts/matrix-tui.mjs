@@ -3,12 +3,13 @@
  * matrix-tui.mjs — a terminal interface for the fusion matrix: the roster, the rungs, and the routes,
  * with the rain behind them.
  *
- * Three tabs, and each one joins the configuration to the metrics store (#14) rather than restating
+ * Four tabs, and each one joins the configuration to the metrics store (#14) rather than restating
  * it: **aliases** (what each alias names, the routes it may walk, and what the store saw it do),
  * **fusions** (how each rung runs, how it ended, what it cost, what its reviews produced), and
  * **routes** (per fusion and seat: what the config offers, which alias actually answered, and every
- * route that refused it). A column that only repeats the config would be a decoration, so every one
- * carries a number the store answered.
+ * route that refused it), and **personas** (the prompt behind every face — its text or its file and
+ * the sampling knobs — plus the seats that walk it). A column that only repeats the config would be a
+ * decoration, so every one carries a number the store answered.
  *
  *   node scripts/matrix-tui.mjs                      # the whole interface, rain and all
  *   node scripts/matrix-tui.mjs --plain              # one frame as text, for a pipe or a test
@@ -22,8 +23,13 @@
  * the list beside the tree, and `s` writes the picked list through that same validated write. At alias
  * level `n` builds a new alias — its name is the one prompt left, and the alias's `model` is its first
  * route's picked model; at route level the builder holds that alias's whole list, seeded with what it
- * walks now. `e` re-points a seat on the routes tab. `esc` goes back (a builder step, then a prompt
- * step, then discarding a proposal, then leaving a route, then collapsing an alias) and only `q` quits.
+ * walks now. `e` re-points a seat on the routes tab. The **personas** tab edits through the *persona
+ * editor*: `n` names a persona and drops straight in, `e` edits one, `⏎` opens a field — the prompt as
+ * editable text or its file, then temperature, thinking and output — and `s` writes the whole draft,
+ * the prompt file first, then the layer; `d` drops one where the layer may, and `⏎`/`e` on a seat
+ * re-points it exactly as the routes tab does. `esc` goes back (a field editor, then a draft, then a
+ * builder or prompt step, then discarding a proposal, then leaving a row, then collapsing one) and
+ * only `q` quits.
  * A change that would not load is refused with the loader's own message before the file is touched —
  * the same rule the loader enforces, not a second opinion about it.
  *
@@ -48,6 +54,7 @@ import {
   gridLine,
   paintTable,
   paletteFor,
+  personaRows,
   put,
   routeRows,
   truncate,
@@ -64,7 +71,15 @@ import {
   readPriceCard,
   totals,
 } from "./metrics-store.mjs";
-import { configPaths, loadMatrixConfig, mergeConfig, validateConfig } from "../extensions/pi-fusion-matrix/config.js";
+import {
+  THINKING_LEVELS,
+  configPaths,
+  loadMatrixConfig,
+  mergeConfig,
+  promptPath,
+  resolvePrompt,
+  validateConfig,
+} from "../extensions/pi-fusion-matrix/config.js";
 
 const args = process.argv.slice(2);
 const has = (flag) => args.includes(`--${flag}`);
@@ -120,18 +135,21 @@ export function buildState({
   layerFile = "",
   layerReadError = null,
   catalogue = [],
+  sources = {},
 } = {}) {
   const state = {
     tab: "aliases",
-    cursors: { aliases: 0, fusions: 0, routes: 0 },
+    cursors: { aliases: 0, fusions: 0, routes: 0, personas: 0 },
     expanded: {},
     rows: {
       aliases: [],
       fusions: fusionRows({ config, fusionStats, seatStats }),
       routes: routeRows({ config, seatStats }),
+      personas: [],
     },
     stats: { modelStats, fusionStats, seatStats },
     config,
+    sources,
     catalogue,
     baseConfig,
     layerConfig,
@@ -141,6 +159,8 @@ export function buildState({
     picker: null,
     input: null,
     builder: null,
+    editor: null,
+    textarea: null,
     help: false,
     rain: true,
     color: true,
@@ -148,6 +168,7 @@ export function buildState({
     layerReadError,
   };
   state.rows.aliases = aliasesView(state);
+  state.rows.personas = personasView(state);
   return state;
 }
 
@@ -170,6 +191,10 @@ export function displayConfig(state) {
 export const aliasesView = (state) =>
   aliasRows({ config: displayConfig(state), modelStats: state.stats.modelStats, expanded: state.expanded });
 
+/** The personas tab as its flat row list: parents in name order, each open one followed by its seats. */
+export const personasView = (state) =>
+  personaRows({ config: displayConfig(state), seatStats: state.stats.seatStats, sources: state.sources, expanded: state.expanded });
+
 /** The row the cursor is on, or undefined on an empty tab. */
 export const selected = (state) => state.rows[state.tab][state.cursors[state.tab]];
 
@@ -177,6 +202,7 @@ export const selected = (state) => state.rows[state.tab][state.cursors[state.tab
 const EDIT_HINT = "enter expands · K/J move · n add · d drop · s saves · esc discards";
 const LIST_KEYS = "K/J move · d drop need a route row — ⏎ expands an alias into its routes";
 const READ_ONLY = "the fusions tab is read-only for now";
+const PERSONA_KEYS = "n new · e edit · d drop · ⏎ open";
 
 /**
  * The builder's tree as its visible rows — every provider in catalogue order, and the models under
@@ -188,19 +214,153 @@ const treeRows = (tree, expanded) =>
     ...(expanded?.[entry.provider] ? (entry.models ?? []).map((model) => ({ kind: "model", provider: entry.provider, model })) : []),
   ]);
 
+/** The persona editor's field rows, in cursor order — one field editor behind each. */
+const EDITOR_FIELDS = ["prompt", "prompt file", "temperature", "thinking", "output"];
+
+/** A text's line count, the way summaries and field rows report it. */
+const lineCount = (text) => (text ? String(text).split("\n").length : 0);
+
+/**
+ * Which slot a modal state belongs to, read from its own shape rather than its origin: a prompt
+ * `submit`s its `value`, the route builder and the persona editor both `commit` (over `tree` and
+ * `draft` respectively), the text field `apply`s its text, and a picker answers with `pending`. The
+ * same reading routes `back` links, so a chain steps back into whatever opened it whatever that was.
+ */
+const modalKind = (modal) => {
+  if (typeof modal?.submit === "function" && "value" in modal) return "input";
+  if (typeof modal?.commit === "function" && "tree" in modal) return "builder";
+  if (typeof modal?.commit === "function" && "draft" in modal) return "editor";
+  if (typeof modal?.apply === "function") return "textarea";
+  if (typeof modal?.pending === "function" && "options" in modal) return "picker";
+  return null;
+};
+
+/** One persona-editor row's value: the prompt's kind and length, then the path and the knobs. */
+const editorValue = (editor, field) => {
+  const { draft } = editor;
+  if (field === "prompt") return `${draft.promptFile ? "file" : "inline"} · ${lineCount(draft.text)} lines`;
+  if (field === "prompt file") return draft.promptFile || "(inline)";
+  return draft[field] === undefined ? "—" : String(draft[field]);
+};
+
+/**
+ * The field editor behind one row of the persona editor, chained to it (`back` is the editor as it
+ * stands): the prompt is text to type, the prompt file and temperature are answers to type, and
+ * thinking and output are pickers. Each hands the draft back to the editor, changed or not.
+ */
+const fieldEditor = (editor) => {
+  const { draft } = editor;
+  const field = EDITOR_FIELDS[editor.cursor];
+  if (field === "prompt") {
+    return {
+      title: `${draft.name}: prompt`,
+      lines: draft.text.split("\n"),
+      row: 0,
+      col: 0,
+      apply: (text) => ({ modal: { ...editor, draft: { ...draft, text } } }),
+      back: editor,
+      hint: "type the text · esc done · s on the field list writes",
+    };
+  }
+  if (field === "prompt file") {
+    return {
+      title: "prompt file",
+      value: draft.promptFile,
+      hint: "type the prompt file path (blank keeps the prompt inline) · enter keeps · esc back",
+      back: editor,
+      submit: (value) => ({ modal: { ...editor, draft: { ...draft, promptFile: value.trim() } } }),
+    };
+  }
+  if (field === "temperature") {
+    return {
+      title: "temperature",
+      value: draft.temperature === undefined ? "" : String(draft.temperature),
+      hint: "type a number in 0..2 (blank inherits) · enter keeps · esc back",
+      back: editor,
+      submit: (value) => {
+        const typed = value.trim();
+        if (typed === "") return { modal: { ...editor, draft: { ...draft, temperature: undefined } } };
+        const n = Number(typed);
+        return Number.isFinite(n) && n >= 0 && n <= 2
+          ? { modal: { ...editor, draft: { ...draft, temperature: n } } }
+          : { error: "temperature must be a number in 0..2" };
+      },
+    };
+  }
+  // thinking and output: the level list and the output formats over an empty "" — "(inherit)" on
+  // screen, undefined in the draft.
+  const options = field === "thinking" ? ["", ...THINKING_LEVELS] : ["", "text", "json"];
+  return {
+    title: field,
+    options,
+    cursor: Math.max(0, options.indexOf(draft[field] ?? "")),
+    back: editor,
+    pending: (choice) => ({ modal: { ...editor, draft: { ...draft, [field]: choice || undefined } } }),
+  };
+};
+
+/** A persona's draft seeded from the persona as it stands — what `e` opens the editor over. */
+const personaDraft = (state, name) => {
+  const spec = displayConfig(state).personas?.[name] ?? {};
+  const prompt = typeof spec.prompt === "string" ? spec.prompt : "";
+  const text = resolvePrompt(prompt, state.sources?.personas?.[name]) ?? "";
+  return {
+    draft: {
+      name,
+      promptFile: prompt.includes("\n") ? "" : prompt,
+      text,
+      temperature: spec.temperature,
+      thinking: spec.thinking,
+      output: spec.output,
+    },
+    originalText: text,
+  };
+};
+
+/**
+ * The persona editor over one draft — where the `n` chain lands and what `e` opens: the prompt as
+ * text and/or its file plus the sampling knobs. `commit` hands the draft to `proposePersonaSave`, and
+ * `back` is the step before it (the create chain's name prompt, or nothing).
+ */
+const personaEditor = ({ state, name, title, draft, originalText = "", back }) => ({
+  title,
+  draft: draft ?? { name, promptFile: "", text: "", temperature: undefined, thinking: undefined, output: undefined },
+  originalText,
+  cursor: 0,
+  commit: (edited) => proposePersonaSave({ state, name, draft: edited, originalText }),
+  back,
+});
+
+/** The create chain's first step: the name prompt, chaining into the persona editor over an empty draft. */
+const personaNameStep = (state) => {
+  const step = {
+    title: "new persona",
+    value: "",
+    hint: "type the persona name · enter continues · esc back",
+    back: null,
+    submit: (name) => {
+      if (!name) return { error: "a persona needs a name" };
+      if (name in (displayConfig(state).personas ?? {})) return { error: `${name} already exists` };
+      return { modal: personaEditor({ state, name, title: "new persona", back: { ...step, value: name } }) };
+    },
+  };
+  return step;
+};
+
 /**
  * A key into a new state. No terminal, no I/O: the driver applies the effect, and the tests drive
  * this directly. Effects: `quit`, `reload`, `reingest`, `propose`, `save`, `none`.
  *
- * `1`/`2`/`3` are the only keys that switch tabs; `tab`/`shift-tab`, the arrows and `h`/`l` walk the
+ * `1`-`4` are the only keys that switch tabs; `tab`/`shift-tab`, the arrows and `h`/`l` walk the
  * rows *inside* one — a tree on the aliases tab, where `enter` expands an alias into its routes and
  * the arrows move between a route and its parent. `K`/`J`/`d` reshape the route list under the cursor
  * as staged proposals `s` writes, while `n` opens the route builder — a provider → models tree beside
  * the routes being built, where `enter` adds a pair and `s` writes the picked list whole. At alias
  * level that builder defines a new alias (one name prompt first; the alias's `model` is its first
- * route's picked model), at route level it edits the cursor's alias's whole list. `esc` is back (the
- * builder first, then a prompt step, then a pending change, then a route, then an expansion), and only
- * `q` ever quits.
+ * route's picked model), at route level it edits the cursor's alias's whole list. The personas tab
+ * edits through the persona editor: `n` names one and drops in, `e` edits, `⏎` opens a field and `s`
+ * writes the whole draft. `esc` is back (a field editor, then a draft, then a builder or prompt step,
+ * then a pending change, then a child row, then an expansion), and only `q` ever quits.
  */
 export function applyKey(state, key) {
   const next = { ...state, cursors: { ...state.cursors }, message: state.message };
@@ -210,18 +370,22 @@ export function applyKey(state, key) {
   const move = (delta) => {
     next.cursors[tab] = clamp(state.cursors[tab] + delta, 0, Math.max(0, rows.length - 1));
   };
-  // A change to `expanded` or `pending` changes which aliases-tab rows exist at all, so the view is
-  // rebuilt through the same function the tests read it through, and the cursor clamped into it.
+  // A change to `expanded` or `pending` changes which aliases-tab and personas-tab rows exist at all,
+  // so both views are rebuilt through the same functions the tests read them through, and the cursors
+  // clamped into what is actually there.
   const refresh = () => {
-    next.rows = { ...next.rows, aliases: aliasesView(next) };
+    next.rows = { ...next.rows, aliases: aliasesView(next), personas: personasView(next) };
     next.cursors.aliases = clamp(next.cursors.aliases ?? 0, 0, Math.max(0, next.rows.aliases.length - 1));
+    next.cursors.personas = clamp(next.cursors.personas ?? 0, 0, Math.max(0, next.rows.personas.length - 1));
   };
   const setExpanded = (alias, open) => {
     next.expanded = { ...state.expanded, [alias]: open };
     refresh();
   };
   const toParent = () => {
-    const at = rows.findIndex((entry) => entry.kind === "alias" && entry.alias === row.parent);
+    const at = rows.findIndex(
+      (entry) => (entry.kind === "alias" && entry.alias === row.parent) || (entry.kind === "persona" && entry.persona === row.parent),
+    );
     if (at >= 0) next.cursors[tab] = at;
   };
   const accept = (proposal) => {
@@ -232,6 +396,39 @@ export function applyKey(state, key) {
     if (proposal.saveable === false) next.message = proposal.summary;
     else next.message = proposal.errors?.length ? "" : "proposed — s saves, esc discards";
     refresh();
+  };
+  // One dispatcher for every modal's answer, whatever surface produced it: an error names the refusal
+  // and keeps that modal over its work, a proposal is staged through `accept` and submitted as a save
+  // — the modal is done the moment it hands one over — and a modal is the chain's next step, opened in
+  // the slot its own shape names. Anything else is inert.
+  const route = (out, from) => {
+    if (!out || typeof out !== "object") return { state: next, effect: "none" };
+    if (out.error !== undefined) {
+      next.message = out.error;
+      return { state: next, effect: "none" };
+    }
+    if (out.modal !== undefined) {
+      const kind = modalKind(out.modal);
+      if (kind) {
+        next[from] = null;
+        next[kind] = out.modal;
+      }
+      return { state: next, effect: "none" };
+    }
+    const proposal = out.patch !== undefined ? out : out.proposal;
+    if (proposal) {
+      next[from] = null;
+      accept(proposal);
+      return { state: next, effect: "save" };
+    }
+    return { state: next, effect: "none" };
+  };
+  // Back, to the modal that opened this one: whatever it is, its own shape names the slot it takes
+  // again — and no `back` just closes the one it is called for.
+  const stepBack = (from, back) => {
+    next[from] = null;
+    const kind = modalKind(back);
+    if (kind) next[kind] = back;
   };
 
   // The route builder, asked before every other surface while it is open: the providers-and-models
@@ -284,60 +481,92 @@ export function applyKey(state, key) {
       const routes = builder.routes.filter((_, at) => at !== builder.right);
       return edited({ routes, right: clamp(builder.right, 0, Math.max(0, routes.length - 1)) });
     }
-    if (key === "s") {
-      const out = builder.commit(builder.routes);
-      if (out.error !== undefined) {
-        next.message = out.error;
-        return { state: next, effect: "none" };
-      }
-      if (out.proposal !== undefined) {
-        next.builder = null;
-        accept(out.proposal);
-        return { state: next, effect: "save" };
-      }
-      return { state: next, effect: "none" };
-    }
+    if (key === "s") return route(builder.commit(builder.routes), "builder");
     if (key === "escape") {
-      // Back, to the modal that opened this one: an earlier builder takes the builder slot again, the
-      // alias chain's name step comes back over its typing, and a directly opened builder just closes.
-      const back = builder.back ?? null;
-      if (typeof back?.commit === "function") next.builder = back;
-      else {
-        next.builder = null;
-        next.input = back;
-      }
+      // Back, to the modal that opened this one: whatever it was, its own shape names the slot it
+      // takes again — an earlier builder, the name step over its typing, or nothing at all.
+      stepBack("builder", builder.back ?? null);
       return { state: next, effect: "none" };
     }
     return { state: next, effect: "none" };
   }
 
+  // The persona editor, over its five field rows: the draft as it stands beside each label, and only
+  // its own keys mean anything — `⏎` opens that field's own editor as the next step (chained, `back`
+  // to here), `s` submits the whole draft, `esc` steps back and drops it.
+  if (state.editor) {
+    const editor = state.editor;
+    if (key === "ctrl-c") return { state: next, effect: "quit" };
+    if (key === "j" || key === "down" || key === "k" || key === "up") {
+      const delta = key === "j" || key === "down" ? 1 : -1;
+      return {
+        state: { ...next, editor: { ...editor, cursor: clamp(editor.cursor + delta, 0, EDITOR_FIELDS.length - 1) } },
+        effect: "none",
+      };
+    }
+    if (key === "return" || key === "enter") return route({ modal: fieldEditor(editor) }, "editor");
+    if (key === "s") return route(editor.commit(editor.draft), "editor");
+    if (key === "escape") {
+      stepBack("editor", editor.back ?? null);
+      return { state: next, effect: "none" };
+    }
+    return { state: next, effect: "none" };
+  }
+
+  // The text field, the one surface where typing is the point: printable keys insert at the caret a
+  // whole run at a time (a paste arrives as one multi-character key), `return` splits the line and
+  // `backspace` joins it back — and `esc` is "done with this field": it hands the text back through
+  // `apply`, which returns it to the editor that seeded it. Nothing here is written to disk.
+  if (state.textarea) {
+    const area = state.textarea;
+    const edit = (patch) => ({ state: { ...next, textarea: { ...area, ...patch } }, effect: "none" });
+    if (key === "ctrl-c") return { state: next, effect: "quit" };
+    if (key === "escape") return route(area.apply(area.lines.join("\n")), "textarea");
+    if (key === "up" || key === "down") {
+      const row = clamp(area.row + (key === "down" ? 1 : -1), 0, area.lines.length - 1);
+      return edit({ row, col: clamp(area.col, 0, area.lines[row].length) });
+    }
+    if (key === "left" || key === "right")
+      return edit({ col: clamp(area.col + (key === "right" ? 1 : -1), 0, area.lines[area.row].length) });
+    if (key === "return" || key === "enter") {
+      const line = area.lines[area.row];
+      const lines = [...area.lines];
+      lines.splice(area.row, 1, line.slice(0, area.col), line.slice(area.col));
+      return edit({ lines, row: area.row + 1, col: 0 });
+    }
+    if (key === "backspace") {
+      const lines = [...area.lines];
+      if (area.col > 0) {
+        lines[area.row] = lines[area.row].slice(0, area.col - 1) + lines[area.row].slice(area.col);
+        return edit({ lines, col: area.col - 1 });
+      }
+      if (area.row === 0) return { state: next, effect: "none" };
+      const col = lines[area.row - 1].length;
+      lines[area.row - 1] += lines[area.row];
+      lines.splice(area.row, 1);
+      return edit({ lines, row: area.row - 1, col });
+    }
+    if (key === "tab" || key === "shift-tab") return { state: next, effect: "none" };
+    const typed = key.replace(/\p{Cc}/gu, "");
+    if (!typed) return { state: next, effect: "none" };
+    const lines = [...area.lines];
+    lines[area.row] = lines[area.row].slice(0, area.col) + typed + lines[area.row].slice(area.col);
+    return edit({ lines, col: area.col + typed.length });
+  }
+
   // The typing surface, asked next while it is open: an answer is going in, so every printable key
   // is text — `q` types a q rather than quitting — and only these named keys mean anything else. A
   // step's `submit` answers with one of three outcomes: an error names the refusal and keeps the
-  // prompt over its typing, an input is the chain's next step (another prompt, or the route builder
-  // that ends the alias chain), a proposal is the change itself.
+  // prompt over its typing, a modal is the chain's next step (another prompt, the route builder that
+  // ends the alias chain, the persona editor that ends the name chain), a proposal is the change.
   if (state.input) {
     const input = state.input;
     if (key === "backspace") next.input = { ...input, value: input.value.slice(0, -1) };
-    else if (key === "return" || key === "enter") {
-      const out = input.submit(input.value.trim());
-      if (out.error !== undefined) next.message = out.error;
-      else if (out.input !== undefined) {
-        // The chain's next step: another prompt, or — the end of the alias chain — the route builder,
-        // which takes the builder slot over the typing rather than the input one.
-        if (typeof out.input.commit === "function") {
-          next.input = null;
-          next.builder = out.input;
-        } else next.input = out.input;
-      } else if (out.proposal !== undefined) {
-        next.input = null;
-        accept(out.proposal);
-        // Submitting the prompt is create *and* save: the staged proposal goes through the same
-        // loader-validated write `s` runs, so what was just typed lands without a second key.
-        return { state: next, effect: "save" };
-      }
-    } else if (key === "escape") next.input = input.back ?? null;
-    else if (key === "ctrl-c") return { state: next, effect: "quit" };
+    else if (key === "return" || key === "enter") return route(input.submit(input.value.trim()), "input");
+    else if (key === "escape") {
+      stepBack("input", input.back ?? null);
+      return { state: next, effect: "none" };
+    } else if (key === "ctrl-c") return { state: next, effect: "quit" };
     else if (key === "tab" || key === "shift-tab" || key === "up" || key === "down" || key === "left" || key === "right") {
       // The row-walking keys stand still while a name is being typed.
     } else {
@@ -352,17 +581,14 @@ export function applyKey(state, key) {
   if (key === "ctrl-c") return { state: next, effect: "quit" };
 
   if (state.picker) {
-    if (key === "escape" || key === "q") return { state: { ...next, picker: null }, effect: "none" };
-    if (key === "j" || key === "down")
-      next.picker = { ...state.picker, cursor: clamp(state.picker.cursor + 1, 0, state.picker.options.length - 1) };
-    else if (key === "k" || key === "up")
-      next.picker = { ...state.picker, cursor: clamp(state.picker.cursor - 1, 0, state.picker.options.length - 1) };
-    else if (key === "return" || key === "enter") {
-      const chosen = state.picker.options[state.picker.cursor];
-      next.picker = null;
-      accept(state.picker.pending(chosen));
+    const picker = state.picker;
+    if (key === "escape" || key === "q") {
+      stepBack("picker", picker.back ?? null);
       return { state: next, effect: "none" };
     }
+    if (key === "j" || key === "down") next.picker = { ...picker, cursor: clamp(picker.cursor + 1, 0, picker.options.length - 1) };
+    else if (key === "k" || key === "up") next.picker = { ...picker, cursor: clamp(picker.cursor - 1, 0, picker.options.length - 1) };
+    else if (key === "return" || key === "enter") return route(picker.pending(picker.options[picker.cursor]), "picker");
     return { state: next, effect: "none" };
   }
 
@@ -370,20 +596,26 @@ export function applyKey(state, key) {
 
   if (key === "q") return { state: next, effect: "quit" };
   if (key === "escape") {
-    // Back, in the order that gets you out: a proposal first, then a route, then an expansion.
+    // Back, in the order that gets you out: a proposal first, then a child row, then an expansion.
     if (state.pending) {
       next.pending = null;
       next.message = "change discarded";
       refresh();
-    } else if (row?.kind === "route") toParent();
+    } else if (row?.kind === "route" || row?.kind === "seat") toParent();
     else if (row?.kind === "alias" && row.expanded) setExpanded(row.alias, false);
+    else if (row?.kind === "persona" && row.expanded) setExpanded(row.persona, false);
   } else if (key === "j" || key === "down") move(1);
   else if (key === "k" || key === "up") move(-1);
   else if (key === "g") next.cursors[tab] = 0;
   else if (key === "G") next.cursors[tab] = Math.max(0, rows.length - 1);
-  else if (key === "1" || key === "2" || key === "3") next.tab = TABS[Number(key) - 1];
+  else if (/^[1-9]$/.test(key) && Number(key) <= TABS.length) next.tab = TABS[Number(key) - 1];
   else if (key === "return" || key === "enter") {
-    if (row?.kind === "route") {
+    if (tab === "personas") {
+      // The personas split: `enter` opens — a parent into its seats, a seat into the alias dropdown
+      // it already gets on the routes tab — and only `e` edits.
+      if (row?.kind === "seat") return { state: next, effect: "propose" };
+      if (row?.kind === "persona") setExpanded(row.persona, !row.expanded);
+    } else if (row?.kind === "route") {
       toParent();
       setExpanded(row.parent, false);
     } else if (row?.kind === "alias" && row.childCount > 0) setExpanded(row.alias, !row.expanded);
@@ -400,7 +632,7 @@ export function applyKey(state, key) {
       if (sibling?.kind === "route" && sibling.parent === row.parent) move(1);
     }
   } else if (key === "K" || key === "J") {
-    if (row?.kind !== "route") next.message = LIST_KEYS;
+    if (row?.kind !== "route") next.message = tab === "personas" ? PERSONA_KEYS : LIST_KEYS;
     else {
       const delta = key === "K" ? -1 : 1;
       const proposal = proposeRouteMove({ state, row, delta });
@@ -410,10 +642,21 @@ export function applyKey(state, key) {
       accept(proposal);
     }
   } else if (key === "d") {
-    if (row?.kind !== "route") next.message = LIST_KEYS;
+    if (tab === "personas") {
+      // Dropping a persona is the same two-step as dropping a route — and a seat row is not the
+      // reader's to drop here: `e` is what points a seat at an alias.
+      if (row?.kind === "seat") next.message = "e points that seat at an alias";
+      else if (row?.kind === "persona") accept(proposePersonaDelete({ state, name: row.persona }));
+      else next.message = PERSONA_KEYS;
+    } else if (row?.kind !== "route") next.message = LIST_KEYS;
     else accept(proposeRouteDrop({ state, row }));
   } else if (key === "n") {
-    if (tab !== "aliases" || !row) next.message = LIST_KEYS;
+    if (tab === "personas") {
+      // A persona's sibling is a whole persona: the name prompt chains straight into the persona
+      // editor over an empty draft, `esc` steps back to the name with its typing, and `s` there is
+      // create *and* save through the same validated write every proposal takes.
+      next.input = personaNameStep(state);
+    } else if (tab !== "aliases" || !row) next.message = LIST_KEYS;
     else if (!state.catalogue?.length) next.message = "no provider/model list to choose from";
     else if (row.kind === "route") {
       // A route row's `n` edits its alias's WHOLE list in the route builder, seeded with the current
@@ -429,8 +672,7 @@ export function applyKey(state, key) {
         routes: (spec.providers ?? []).map((ref) => ({ id: refName(ref), model: effectiveModel(ref, spec) })),
         right: 0,
         focus: "tree",
-        commit: (routes) =>
-          routes.length ? { proposal: proposeRouteList({ state, row, routes }) } : { error: "a route list cannot be empty" },
+        commit: (routes) => (routes.length ? proposeRouteList({ state, row, routes }) : { error: "a route list cannot be empty" }),
         back: null,
       };
     } else {
@@ -445,7 +687,7 @@ export function applyKey(state, key) {
         submit: (name) => {
           if (!name) return { error: "an alias needs a name" };
           if (Object.keys(displayConfig(state).aliases ?? {}).includes(name)) return { error: `${name} already exists` };
-          return { input: builderStep(name) };
+          return { modal: builderStep(name) };
         },
       };
       const builderStep = (name) => ({
@@ -458,7 +700,7 @@ export function applyKey(state, key) {
         focus: "tree",
         commit: (routes) =>
           routes.length
-            ? { proposal: proposeAliasCreate({ state, name, model: routes[0].model, routes }) }
+            ? proposeAliasCreate({ state, name, model: routes[0].model, routes })
             : { error: "an alias needs at least one route" },
         // Back is the step before, as it was left — its typing comes back with it.
         back: { ...nameStep, value: name },
@@ -466,9 +708,17 @@ export function applyKey(state, key) {
       next.input = nameStep;
     }
   } else if (key === "e") {
-    // Only the aliases tab answers with a hint instead of a proposal: its list has its own keys.
+    // The aliases tab answers with a hint instead of a proposal: its list has its own keys. On the
+    // personas tab `e` edits the persona under the cursor — and a seat row opens the alias dropdown,
+    // the same `proposeFor` the routes tab uses.
     if (tab === "aliases") next.message = EDIT_HINT;
-    else return { state: next, effect: "propose" };
+    else if (tab === "personas") {
+      if (row?.kind === "seat") return { state: next, effect: "propose" };
+      if (row?.kind === "persona") {
+        const seeded = personaDraft(state, row.persona);
+        next.editor = personaEditor({ state, name: row.persona, title: row.persona, ...seeded, back: null });
+      } else next.message = PERSONA_KEYS;
+    } else return { state: next, effect: "propose" };
   } else if (key === "a") next.rain = !state.rain;
   else if (key === "c") next.color = !state.color;
   else if (key === "?") next.help = !state.help;
@@ -551,12 +801,12 @@ const pairLabel = (pair, model) => (pair.model === model ? pair.id : `${pair.id}
 const listOwner = (row) => (row.kind === "route" ? row.parent : row.alias);
 
 /**
- * The baseline a route-list proposal builds over: the pending one for the same alias when there is
- * one — a refusal's unchanged list as much as a move's net order, so `J` presses on either side of a
- * boundary are still one pending change — and the layer on disk otherwise, which stays the baseline
- * `commitProposal` re-checks against.
+ * The baseline a proposal builds over: the pending one for the same `listOf` when there is one — a
+ * refusal's unchanged list as much as a move's net order, so `J` presses on either side of a boundary
+ * are still one pending change — and the layer on disk otherwise, which stays the baseline
+ * `commitProposal` re-checks against. Route lists key it by alias, persona edits by `personas:<name>`.
  */
-const routeBaseline = (state, owner) =>
+const proposalBaseline = (state, owner) =>
   state.pending?.listOf === owner && state.pending.layerFile === state.layerFile
     ? deepClone(state.pending.patch)
     : deepClone(state.layerConfig);
@@ -564,7 +814,7 @@ const routeBaseline = (state, owner) =>
 /** The baseline with one alias's route list replaced: the patch every route-list change writes. */
 const routePatch = (state, row, providers) => {
   const owner = listOwner(row);
-  const patch = routeBaseline(state, owner);
+  const patch = proposalBaseline(state, owner);
   patch.aliases = patch.aliases ?? {};
   patch.aliases[owner] = patch.aliases[owner] ?? {};
   patch.aliases[owner].providers = providers;
@@ -587,7 +837,7 @@ export function proposeRouteMove({ state, row, delta }) {
     return {
       listOf: owner,
       layerFile: state.layerFile,
-      patch: routeBaseline(state, owner),
+      patch: proposalBaseline(state, owner),
       summary: `${owner}: that route is already ${to < 0 ? "first" : "last"}`,
       errors: [],
       saveable: false,
@@ -658,7 +908,7 @@ export function proposeRouteList({ state, row, routes }) {
  * disk, and the alias it names replaces whatever entry was there.
  */
 export function proposeAliasCreate({ state, name, model, routes }) {
-  const patch = routeBaseline(state, name);
+  const patch = proposalBaseline(state, name);
   patch.aliases = patch.aliases ?? {};
   patch.aliases[name] = { model, providers: normalizeRefs(routes, model) };
   return {
@@ -682,14 +932,99 @@ export function validateAgainst(state, patch) {
 }
 
 /**
- * The interactive `e`: a proposal for the selected row, through a picker where one is needed. The
- * aliases tab never comes here — its tree is edited with `K`/`J`/`n`/`d`, `n` opening the route
- * builder — and the fusions tab has nothing to propose yet.
+ * The change saving a persona proposes: the persona the editor's draft defines, restated wholesale in
+ * the layer — its prompt is the file's path where the draft names one and the text itself otherwise.
+ * Where a base layer declares the persona, the restatement overrides it field by field and the summary
+ * says which declaration it overrides; where the layer owns it, a cleared field is simply gone.
+ *
+ * A prompt file is written only when the text actually moved (`promptWrites`, the write path's first
+ * duty), and a path that cannot be written from here is a named refusal, not a half-save.
+ */
+export function proposePersonaSave({ state, name, draft, originalText }) {
+  const listOf = `personas:${name}`;
+  const prompt = draft.promptFile || draft.text;
+  const patch = proposalBaseline(state, listOf);
+  patch.personas = patch.personas ?? {};
+  patch.personas[name] = {
+    prompt,
+    ...(draft.temperature !== undefined && { temperature: draft.temperature }),
+    ...(draft.thinking && { thinking: draft.thinking }),
+    ...(draft.output && { output: draft.output }),
+  };
+  // What the text was, to compare the draft against: what the editor loaded, or — for a hand-built
+  // call that carries none — the prompt file's own content, the same `resolvePrompt` read.
+  const before = originalText ?? state.editor?.originalText ?? resolvePrompt(prompt, state.sources?.personas?.[name]) ?? "";
+  const promptWrites = [];
+  if (draft.promptFile && draft.text !== before) {
+    const file = promptPath(draft.promptFile, state.sources?.personas?.[name]);
+    if (!file) {
+      return {
+        listOf,
+        layerFile: state.layerFile,
+        patch: proposalBaseline(state, listOf),
+        summary: "that prompt path cannot be written from here",
+        errors: [],
+        saveable: false,
+      };
+    }
+    promptWrites.push({ file, text: draft.text });
+  }
+  const lines = lineCount(draft.text);
+  const what = draft.promptFile ? `prompt file ${draft.promptFile} · ${lines} lines` : `inline prompt · ${lines} lines`;
+  const base = name in (state.baseConfig?.personas ?? {});
+  const overrides = base ? ` · overrides the declaration in ${state.sources?.personas?.[name]?.file ?? "a base layer"}` : "";
+  return {
+    listOf,
+    layerFile: state.layerFile,
+    patch,
+    summary: `${name} saved (${what})${overrides}`,
+    errors: validateAgainst(state, patch),
+    ...(promptWrites.length > 0 ? { promptWrites } : {}),
+  };
+}
+
+/**
+ * The change dropping a persona proposes: its entry removed from the layer, which removes it wherever
+ * the loader merges — and while modes still name it, it is the loader's own verdict that travels in
+ * `errors`. A persona a base layer declares cannot be dropped from here at all: this layer is only
+ * ever an override of it, so the proposal is the named refusal rather than a silent no-op.
+ */
+export function proposePersonaDelete({ state, name }) {
+  const listOf = `personas:${name}`;
+  const patch = proposalBaseline(state, listOf);
+  if (name in (state.baseConfig?.personas ?? {})) {
+    return {
+      listOf,
+      layerFile: state.layerFile,
+      patch,
+      summary: `${name} is declared in ${state.sources?.personas?.[name]?.file ?? "a base layer"}; this layer can only override it`,
+      errors: [],
+      saveable: false,
+    };
+  }
+  patch.personas = patch.personas ?? {};
+  delete patch.personas[name];
+  return {
+    listOf,
+    layerFile: state.layerFile,
+    patch,
+    summary: `persona ${name} dropped`,
+    errors: validateAgainst(state, patch),
+  };
+}
+
+/**
+ * The interactive `e`: a proposal for the selected row, through a picker where one is needed. Any
+ * seat row is a seat to re-point — the routes tab's, or a persona's seat child — and both walk the
+ * same alias dropdown and the same `proposeSeatAlias`. Rows that are not seats answer with the keys
+ * they do have: the aliases list has its own, the personas list its own, the fusions tab none yet.
  */
 export function proposeFor(state) {
   const row = selected(state);
   if (!row) return { ...state, message: "nothing selected" };
-  if (state.tab !== "routes") return { ...state, message: state.tab === "aliases" ? EDIT_HINT : READ_ONLY };
+  if (!row.fusion || !row.seat) {
+    return { ...state, message: state.tab === "aliases" ? EDIT_HINT : state.tab === "personas" ? PERSONA_KEYS : READ_ONLY };
+  }
   const options = Object.keys(state.config.aliases ?? {}).sort();
   if (options.length === 0) return { ...state, message: "no aliases to point a seat at" };
   return {
@@ -756,12 +1091,12 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
   }
 
   // The key map, as much of it as fits. Even the short form names the tabs and the rain toggle — the
-  // two things a reader would otherwise never discover (`1`-`3`, and that `a` is a toggle at all).
+  // two things a reader would otherwise never discover (`1`-`4`, and that `a` is a toggle at all).
   const rainState = state.rain ? "rain:ON" : "rain:OFF";
   const keys =
-    "1/2/3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same · K/J move route · n route builder · " +
-    `d drop route · e edit (routes) · s save · esc back/discard · R reingest · r reload · a ${rainState} · c colour · ? help · q quit`;
-  const keysShort = `1-3 tabs · j/k rows · ⏎ open · K/J move · n builder · d drop · a ${rainState} · ? help · q quit`;
+    "1-4 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same · K/J move route · n route builder · " +
+    `d drop route · e edit · s save · esc back/discard · R reingest · r reload · a ${rainState} · c colour · ? help · q quit`;
+  const keysShort = `1-4 tabs · j/k rows · n new · e edit · d drop · ⏎ open · K/J move · a ${rainState} · ? help · q quit`;
   const hint = width > keys.length + 12 ? keys : keysShort;
   put(grid, height - 1, Math.max(1, width - hint.length - 1), truncate(hint, width - 2), palette.dim);
   put(grid, height - 1, 1, clock, palette.dim);
@@ -771,10 +1106,14 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
       "aliases — the alias, the model it names, its routes, and what the store saw it do",
       "fusions — mode and face, then runs, failures, degraded seats, cascades, verify, findings, cost",
       "routes  — per fusion and seat: the ordered candidates from config, which alias answered, what refused",
-      "keys — 1/2/3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same",
-      "       K/J move route · n route builder · d drop route · e edit (routes) · s save · esc back/discard · R reingest",
+      "personas — the prompt behind every face (its text or its file), the knobs, and the seats that walk it",
+      "keys — 1-4 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same",
+      "       K/J move route · n route builder · d drop route · e edit · s save · esc back/discard · R reingest",
       "       r reload · a rain · c colour · q quit",
-      "e re-points a seat (routes tab); ⏎ expands an alias into the routes K/J and d reshape",
+      "personas — n new · e edit · d drop · ⏎ open",
+      "the persona editor walks prompt, prompt file, temperature, thinking, output — ⏎ opens one as typed",
+      "text or a choice, esc steps back a draft at a time, and s writes the prompt file first, then the layer",
+      "e re-points a seat (the routes tab, and a persona's seats); ⏎ expands an alias into the routes K/J and d reshape",
       "K/J/d stage a proposal: the bar shows it and whether it still validates, s writes it to the",
       "layer named under it once the loader accepts it; n opens the route builder — a provider/model",
       "tree beside the routes being built, where ⏎ adds a pick and J/K/d move and drop the list;",
@@ -794,7 +1133,10 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
   }
 
   if (state.picker) {
-    const options = state.picker.options.map((option, i) => `${i === state.picker.cursor ? "▸" : " "} ${option}`);
+    // An empty option is the "(inherit)" choice the knobs offer — the value stays empty all the way
+    // into the draft, only the label is spelled out.
+    const label = (option) => (option === "" ? "(inherit)" : option);
+    const options = state.picker.options.map((option, i) => `${i === state.picker.cursor ? "▸" : " "} ${label(option)}`);
     const boxWidth = Math.min(width - 6, Math.max(24, ...options.map((line) => line.length + 4)));
     const boxHeight = Math.min(height - 4, options.length + 2);
     const top = Math.max(2, Math.floor((height - boxHeight) / 2));
@@ -834,6 +1176,50 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
     );
     put(grid, inner.row, inner.col, truncate(line, inner.width), palette.ink);
     put(grid, inner.row + 1, inner.col, truncate(hint, inner.width), palette.dim);
+  }
+
+  // The persona editor: the five field rows as a list — the label and the draft's value beside it —
+  // with the cursor's row highlighted and the keys that finish or step back under the list.
+  if (state.editor) {
+    const editor = state.editor;
+    const values = EDITOR_FIELDS.map((field) => editorValue(editor, field));
+    const hint = "j/k field · ⏎ edit · s writes · esc back";
+    const want = EDITOR_FIELDS.map((field, i) => field.length + 2 + values[i].length + 2);
+    const boxWidth = Math.min(width - 6, Math.max(24, hint.length + 4, ...want));
+    const boxHeight = EDITOR_FIELDS.length + 3;
+    const top = Math.max(2, Math.floor((height - boxHeight) / 2));
+    const inner = drawPanel(
+      grid,
+      { row: top, col: Math.floor((width - boxWidth) / 2), width: boxWidth, height: boxHeight, title: editor.title },
+      palette,
+    );
+    EDITOR_FIELDS.forEach((field, i) => {
+      put(grid, inner.row + i, inner.col, truncate(field, 13), i === editor.cursor ? palette.selected : palette.dim);
+      put(grid, inner.row + i, inner.col + 14, truncate(values[i], inner.width - 14), i === editor.cursor ? palette.selected : palette.ink);
+    });
+    put(grid, inner.row + EDITOR_FIELDS.length, inner.col, truncate(hint, inner.width), palette.dim);
+  }
+
+  // The text field, with the caret in it: `▌` where the next keystroke lands — after the character it
+  // follows, or on its own at the end of the line — over as much of the text as the box holds.
+  if (state.textarea) {
+    const area = state.textarea;
+    const lines = area.lines.map((line, i) => (i === area.row ? `${line.slice(0, area.col)}▌${line.slice(area.col)}` : line));
+    const hint = area.hint ?? "";
+    const boxWidth = Math.min(width - 6, Math.max(24, hint.length + 4, ...lines.map((line) => line.length + 2)));
+    const boxHeight = Math.min(height - 4, area.lines.length + 3);
+    const top = Math.max(2, Math.floor((height - boxHeight) / 2));
+    const inner = drawPanel(
+      grid,
+      { row: top, col: Math.floor((width - boxWidth) / 2), width: boxWidth, height: boxHeight, title: area.title },
+      palette,
+    );
+    const body = Math.max(1, inner.height - 1);
+    const first = clamp(area.row - body + 1, 0, Math.max(0, lines.length - body));
+    for (let i = 0; i < body && first + i < lines.length; i += 1) {
+      put(grid, inner.row + i, inner.col, truncate(lines[first + i], inner.width), palette.ink);
+    }
+    put(grid, inner.row + inner.height - 1, inner.col, truncate(hint, inner.width), palette.dim);
   }
 
   // The route builder, over everything else: a box that sizes itself to its content and fills most of
@@ -909,6 +1295,9 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
 /** The line under the table: the selected row's own detail, so a truncated cell stays readable. */
 export function detailFor(state, row) {
   if (!row) return "";
+  if (row.kind === "persona") {
+    return `persona ${row.persona} · ${row.promptKind} · temperature ${row.temperature} · thinking ${row.thinking} · output ${row.output} · runs ${row.runs} · seats ${row.seats} · degraded ${row.degraded} · tokens ${row.tokens} · last ${row.last}`;
+  }
   if (row.kind === "route") {
     return `${row.parent} · route ${row.index + 1}/${row.count}: ${row.provider} → ${row.model} · seats ${row.seats} · kept ${row.kept}/${row.raised} · located ${row.located}, unlocated ${row.unlocated}`;
   }
@@ -1069,8 +1458,12 @@ export async function loadWorld({
       stats.note = `the store could not be read: ${error?.message ?? String(error)}`;
     }
   }
+  // The config the reader sees carries the layer being edited too: `loadMatrixConfig` knows the
+  // packaged, machine and session layers, but a proposal's target file can be any overlay — and what
+  // is written there must become a row the moment it lands.
   const state = buildState({
-    config: loaded.config,
+    config: mergeConfig(loaded.config, layerConfig),
+    sources: loaded.sources,
     catalogue: catalogueFor({ registry, priceCard: readPriceCard(catalogue), config: loaded.config }),
     baseConfig,
     layerConfig,
@@ -1121,13 +1514,16 @@ export const adopt = (current, reloaded) => {
     picker: null,
     input: null,
     builder: null,
+    editor: null,
+    textarea: null,
     rain: current.rain,
     color: current.color,
     catalogue: current.catalogue ?? reloaded.state.catalogue,
   };
-  // Which aliases are open is view state too, so the aliases rows are rebuilt around it exactly as a
-  // key that changes it rebuilds them — before the cursors are clamped into what is actually there.
-  state.rows = { ...state.rows, aliases: aliasesView(state) };
+  // Which aliases and personas are open is view state too, so both row lists are rebuilt around it
+  // exactly as a key that changes them rebuilds them — before the cursors are clamped into what is
+  // actually there.
+  state.rows = { ...state.rows, aliases: aliasesView(state), personas: personasView(state) };
   for (const tab of TABS) state.cursors[tab] = clamp(state.cursors[tab] ?? 0, 0, Math.max(0, state.rows[tab].length - 1));
   return state;
 };
@@ -1174,6 +1570,22 @@ export async function commitProposal(state, { dbPath, cwd = process.cwd() } = {}
   );
   if (errors.length > 0) return { state: { ...state, message: `refused: ${errors[0]}` }, wrote: false };
 
+  // A proposal's prompt files are written before the layer — and a prompt file that will not write
+  // refuses the whole change, layer untouched: a layer naming a prompt that never arrived is worse
+  // than no change at all.
+  const promptWrites = pending.promptWrites ?? [];
+  for (const write of promptWrites) {
+    try {
+      fs.mkdirSync(path.dirname(write.file), { recursive: true });
+      fs.writeFileSync(write.file, write.text);
+    } catch (error) {
+      return {
+        state: { ...state, message: `refused: the prompt file could not be written: ${error?.message ?? String(error)}` },
+        wrote: false,
+      };
+    }
+  }
+
   try {
     fs.mkdirSync(path.dirname(pending.layerFile), { recursive: true });
     fs.writeFileSync(pending.layerFile, `${JSON.stringify(pending.patch, null, 2)}\n`);
@@ -1183,7 +1595,8 @@ export async function commitProposal(state, { dbPath, cwd = process.cwd() } = {}
 
   try {
     const reloaded = await loadWorld({ dbPath, layerFile: pending.layerFile, cwd });
-    return { state: { ...adopt(state, reloaded), pending: null, message: `saved: ${pending.summary}` }, wrote: true };
+    const written = promptWrites.length ? ` · wrote ${promptWrites.map((write) => write.file).join(", ")}` : "";
+    return { state: { ...adopt(state, reloaded), pending: null, message: `saved: ${pending.summary}${written}` }, wrote: true };
   } catch (error) {
     return {
       state: { ...state, pending: null, message: `saved, but the view could not be reloaded: ${error?.message ?? String(error)}` },

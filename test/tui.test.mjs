@@ -31,6 +31,7 @@ import {
   pad,
   paintTable,
   paletteFor,
+  personaRows,
   put,
   routeRows,
   fusionRows,
@@ -50,6 +51,9 @@ import {
   keyName,
   paint,
   proposeAliasCreate,
+  proposeFor,
+  proposePersonaDelete,
+  proposePersonaSave,
   proposeRouteDrop,
   proposeRouteList,
   proposeRouteMove,
@@ -57,7 +61,7 @@ import {
   selected,
   validateAgainst,
 } from "../scripts/matrix-tui.mjs";
-import { loadMatrixConfig } from "../extensions/pi-fusion-matrix/config.js";
+import { THINKING_LEVELS, loadMatrixConfig } from "../extensions/pi-fusion-matrix/config.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -69,6 +73,14 @@ const config = {
     kimi: { model: "kimi-k3", providers: ["opencode-go", "kimi-code"] },
     muse: { model: "muse-spark-1.3-contributor", providers: ["opencode-go", { id: "cline-pass", modelOverride: "cline-free/muse" }] },
     kimiAlias: { model: "kimi-k3", providers: ["cline-pass"] },
+  },
+  personas: {
+    // Every prompt kind the editor walks: a path in the declaring layer's directory, and inline text —
+    // the single line reads as a path and the multi-line one as text, which is the loader's own rule.
+    // The JSON knob sits on a parallel seat: a writing seat that answers in JSON is a different rule.
+    technical: { prompt: "prompts/technical.md", temperature: 0.2 },
+    skeptic: { prompt: "find the flaw in it\nand name it plainly", thinking: "high", output: "json" },
+    judge: { prompt: "pick the better answer\nand say why" },
   },
   modes: {
     single: { stages: [{ single: "technical", input: "prompt" }] },
@@ -270,6 +282,102 @@ const builderOn = (world, over = {}) => ({
     ...over,
   },
 });
+
+/**
+ * The persona-editing world: the base layers name one persona and the layer file the other two — so
+ * both ownership rules have a subject — with every prompt kind and knob the editor walks, over the
+ * fixture's modes and fusions so a persona's seats are the routes tab's own rows. `sources` is where
+ * each persona's winning declaration lives, which is what a prompt path resolves against.
+ */
+const personaLayerFile = "/tmp/persona-layer/pi-fusion-matrix.json";
+const personaConfig = {
+  ...editConfig,
+  personas: {
+    technical: { prompt: "prompts/technical.md", temperature: 0.2 },
+    skeptic: { prompt: "find the flaw in it\nand name it plainly", thinking: "high", output: "json" },
+    judge: { prompt: "pick the better answer\nand say why" },
+  },
+};
+const personaLayer = { personas: { technical: personaConfig.personas.technical, skeptic: personaConfig.personas.skeptic } };
+const personaBase = { ...personaConfig, personas: { judge: personaConfig.personas.judge } };
+const personaSources = {
+  personas: {
+    technical: { dir: "/tmp/persona-layer", kind: "machine", file: personaLayerFile, trusted: true },
+    skeptic: { dir: "/tmp/persona-layer", kind: "machine", file: personaLayerFile, trusted: true },
+    judge: { dir: "/base", kind: "packaged", file: "/base/pi-fusion-matrix.json", trusted: true },
+  },
+};
+
+const personaState = (over = {}) =>
+  buildState({
+    config: personaConfig,
+    baseConfig: personaBase,
+    layerConfig: personaLayer,
+    layerFile: personaLayerFile,
+    sources: personaSources,
+    modelStats,
+    fusionStats,
+    seatStats,
+    catalogue,
+    ...over,
+  });
+
+/** A persona editor's draft as the field keys read it: no knobs set, an inline prompt of two lines. */
+const draftFor = (name, over = {}) => ({
+  name,
+  promptFile: "",
+  text: "one\ntwo",
+  temperature: undefined,
+  thinking: undefined,
+  output: undefined,
+  ...over,
+});
+
+/** An editor over the fixture's skeptic, its commit standing in — the shape the field keys read. */
+const editorOn = (world, over = {}) => ({
+  ...world,
+  editor: {
+    title: "skeptic",
+    draft: draftFor("skeptic"),
+    originalText: "one\ntwo",
+    cursor: 0,
+    commit: () => ({ error: "never reached" }),
+    back: null,
+    ...over,
+  },
+});
+
+/** A textarea over two short lines, its caret at the end of the first — the shape the text keys read. */
+const textareaOn = (world, over = {}) => ({
+  ...world,
+  textarea: {
+    title: "prompt",
+    lines: ["one", "two"],
+    row: 0,
+    col: 3,
+    apply: () => ({ error: "never reached" }),
+    back: null,
+    hint: "",
+    ...over,
+  },
+});
+
+/** The cursor onto one exact row of the personas list. */
+const personaCursorOn = (world, row) => ({ ...world, cursors: { ...world.cursors, personas: world.rows.personas.indexOf(row) } });
+
+/** A persona's parent row by name, and the seat row under it for one fusion. */
+const personaParent = (world, name) => world.rows.personas.find((row) => row.kind === "persona" && row.persona === name);
+const personaSeat = (world, name, fusion) =>
+  world.rows.personas.find((row) => row.kind === "seat" && row.parent === name && row.fusion === fusion);
+
+/** Walk a picker to one exact option and choose it: wherever it opened, `k` holds at the top first. */
+const pick = (world, option) => {
+  let next = world;
+  for (let i = 0; i < 30; i += 1) next = applyKey(next, "k").state;
+  const index = next.picker.options.indexOf(option);
+  for (let i = 0; i < index; i += 1) next = applyKey(next, "j").state;
+  return applyKey(next, "return");
+};
 
 /* --------------------------------------------------------------------- rain */
 
@@ -554,6 +662,167 @@ test("the routes table shows what the config offers beside what the store saw", 
   assert.equal(judge.refusals, "");
 });
 
+test("the persona table joins each persona to its prompt, its knobs and the store — and opens into the seats it runs", () => {
+  // Parents in name order, each prompt read the loader's way: one line is a path in its declaring
+  // layer's directory, a run of lines is the text itself.
+  const rows = personaRows({ config, seatStats, sources: {} });
+  assert.deepEqual(
+    rows.map((row) => row.persona),
+    ["judge", "skeptic", "technical"],
+    "parents in name order, and nothing open means no rows under them",
+  );
+  const [judge, skeptic, technical] = rows;
+  assert.equal(judge.kind, "persona");
+  assert.equal(judge.promptKind, "inline · 2 lines");
+  assert.equal(judge.temperature, "—", "an unset knob is a dash on the row, never a missing field");
+  assert.equal(judge.thinking, "—");
+  assert.equal(judge.output, "—");
+  assert.equal(judge.childCount, 1);
+  assert.equal(judge.expanded, false);
+  assert.equal(skeptic.promptKind, "inline · 2 lines");
+  assert.equal(skeptic.thinking, "high");
+  assert.equal(skeptic.temperature, "—");
+  assert.equal(skeptic.output, "json");
+  assert.equal(technical.promptKind, "file prompts/technical.md");
+  assert.equal(technical.temperature, 0.2);
+  assert.equal(technical.childCount, 2, "both fusions run this persona");
+
+  // The store's numbers land on the persona as the sum over exactly the rows named for it.
+  assert.equal(skeptic.runs, 1, "one store row ran this persona");
+  assert.equal(skeptic.seats, 1);
+  assert.equal(skeptic.degraded, 0);
+  assert.equal(skeptic.tokens, 60, "raw on the row — compacting is the column's job");
+  assert.equal(skeptic.last, "—", "a store row with no stamp reports none");
+  assert.equal(judge.runs, 0);
+  assert.equal(judge.seats, 0);
+  assert.equal(judge.tokens, 0);
+  assert.equal(judge.last, "—");
+
+  // An empty prompt is empty text, not a file called nothing.
+  assert.equal(personaRows({ config: { personas: { blank: { prompt: "" } } }, seatStats: [] })[0].promptKind, "inline · 0 lines");
+
+  // Open one and its seats are rows under it: one per fusion that places the persona or names it.
+  const open = personaRows({ config, seatStats, sources: {}, expanded: { technical: true, skeptic: true } });
+  assert.deepEqual(
+    open.map((row) => row.persona),
+    ["judge", "skeptic", "  └ review", "technical", "  ├ quick", "  └ review"],
+    "children follow their parent in fusion order, and the last one closes the tree",
+  );
+  const quick = open.find((row) => row.kind === "seat" && row.fusion === "quick");
+  assert.equal(quick.kind, "seat");
+  assert.equal(quick.parent, "technical");
+  assert.equal(quick.seat, "technical", "the seat name is the persona — the alias picker's identity");
+  assert.equal(quick.candidates, "kimi");
+  assert.equal(quick.promptKind, "kimi", "a child's prompt column is what the seat walks");
+  assert.equal(quick.walks, 1, "and the count beside the list");
+  assert.equal(quick.refusals, "");
+  for (const knob of ["temperature", "thinking", "output"]) assert.equal(quick[knob], "—", `a seat row claims no ${knob}`);
+  assert.equal(quick.runs, 0, "no store row ran this seat");
+  assert.equal(quick.seats, 0);
+  assert.equal(quick.tokens, 0);
+  assert.equal(quick.last, "—");
+
+  const skepticSeat = open.find((row) => row.kind === "seat" && row.seat === "skeptic");
+  assert.equal(skepticSeat.persona, "  └ review", "the first column carries the tree mark");
+  assert.equal(skepticSeat.candidates, "muse");
+  assert.equal(skepticSeat.promptKind, "muse");
+  assert.equal(skepticSeat.walks, 1);
+  assert.equal(skepticSeat.refusals, "opencode-go:quota×1 zai:transient×1");
+  assert.equal(skepticSeat.runs, 1);
+  assert.equal(skepticSeat.seats, 1);
+  assert.equal(skepticSeat.degraded, 0);
+  assert.equal(skepticSeat.tokens, 60);
+
+  // A seat that walks several aliases reads the walk whole — the ordered list, arrowed — because
+  // these are the routes tab's own rows seen from the persona.
+  const twoWalk = personaRows({
+    config: {
+      ...config,
+      fusions: {
+        ...config.fusions,
+        review: { ...config.fusions.review, candidates: { ...config.fusions.review.candidates, skeptic: ["kimi", "muse"] } },
+      },
+    },
+    seatStats,
+    sources: {},
+    expanded: { skeptic: true },
+  }).find((row) => row.kind === "seat");
+  assert.equal(twoWalk.candidates, "kimi → muse");
+  assert.equal(twoWalk.walks, 2);
+
+  // Every column draws from every row, parents and children alike.
+  for (const row of open) {
+    for (const column of columnsFor("personas")) {
+      const value = column.format ? column.format(row) : row[column.key];
+      assert.notEqual(value, undefined, `${row.persona} carries ${column.key}`);
+    }
+  }
+  assert.deepEqual(
+    columnsFor("personas").map((column) => column.label),
+    ["persona", "prompt", "temperature", "thinking", "output", "runs", "seats", "degraded", "tokens"],
+  );
+  assert.deepEqual(
+    columnsFor("personas").map((column) => column.key),
+    ["persona", "promptKind", "temperature", "thinking", "output", "runs", "seats", "degraded", "tokens"],
+  );
+  assert.equal(
+    columnsFor("personas")
+      .find((column) => column.key === "tokens")
+      .format({ tokens: 2500 }),
+    "2.5k",
+    "the column compacts what the row keeps raw",
+  );
+
+  // A persona in two fusions: the parent is the sum of the store rows its children each hold a slice
+  // of, and the stamp it carries is the newest of them.
+  const stamp = [
+    {
+      fusion: "quick",
+      persona: "technical",
+      seats: 2,
+      degraded: 1,
+      tokens: 60,
+      seatMs: 100,
+      reportedUsd: 0,
+      unpricedSeats: 0,
+      answered: {},
+      refusals: {},
+      lastSeatAt: "2026-09-21T03:05:41.427Z",
+    },
+    {
+      fusion: "review",
+      persona: "technical",
+      seats: 3,
+      degraded: 0,
+      tokens: 40,
+      seatMs: 100,
+      reportedUsd: 0,
+      unpricedSeats: 0,
+      answered: {},
+      refusals: {},
+      lastSeatAt: "2026-09-20T19:31:00.000Z",
+    },
+  ];
+  const summed = personaRows({ config, seatStats: stamp, sources: {}, expanded: { technical: true } });
+  const parent = summed.find((row) => row.kind === "persona" && row.persona === "technical");
+  assert.equal(parent.runs, 2);
+  assert.equal(parent.seats, 5);
+  assert.equal(parent.degraded, 1);
+  assert.equal(parent.tokens, 100);
+  assert.equal(parent.last, "2026-09-21 03:05", "the newest stamp, cut to the minute");
+  const [quickSlice, reviewSlice] = summed.filter((row) => row.kind === "seat");
+  assert.equal(quickSlice.fusion, "quick");
+  assert.equal(quickSlice.seats, 2, "a child is its own slice, never the parent's totals again");
+  assert.equal(quickSlice.degraded, 1);
+  assert.equal(quickSlice.tokens, 60);
+  assert.equal(quickSlice.runs, 1);
+  assert.equal(quickSlice.last, "2026-09-21 03:05");
+  assert.deepEqual(
+    [reviewSlice.fusion, reviewSlice.seats, reviewSlice.degraded, reviewSlice.tokens, reviewSlice.last],
+    ["review", 3, 0, 40, "2026-09-20 19:31"],
+  );
+});
+
 test("every column of every tab reads a field the rows actually carry", () => {
   const world = state();
   for (const tab of TABS) {
@@ -697,6 +966,23 @@ test("numbers switch tabs; arrows, h/l and the tab key walk one tab's rows", () 
   }
 });
 
+test("the numbers 1-4 name the four tabs, and the row keys never hop between them", () => {
+  assert.deepEqual(TABS, ["aliases", "fusions", "routes", "personas"]);
+  const world = editState();
+  for (const [index, tab] of TABS.entries()) {
+    assert.equal(applyKey(world, String(index + 1)).state.tab, tab, `${index + 1} opens ${tab}`);
+  }
+  assert.equal(applyKey(applyKey(world, "4").state, "1").state.tab, "aliases", "and back to the first");
+
+  // The personas tab takes its own row keys and nothing that walks between tabs.
+  const personas = { ...world, tab: "personas" };
+  assert.equal(applyKey(personas, "j").state.cursors.personas, 1, "j walks the persona rows");
+  assert.equal(applyKey(personas, "5").state.tab, "personas", "there is no fifth tab");
+  for (const key of ["tab", "shift-tab", "h", "l", "left", "right"]) {
+    assert.equal(applyKey(personas, key).state.tab, "personas", `${key} walks the rows, not the tabs`);
+  }
+});
+
 test("a terminal chunk becomes one key name", () => {
   // The control bytes under test, built at runtime rather than spelled as source escapes.
   const esc = String.fromCharCode(27);
@@ -832,13 +1118,15 @@ test("the picker proposes, and escape or q steps back out of it", () => {
   let world = { ...state(), tab: "routes" };
   world = applyKey(world, "e").state;
   assert.equal(world.picker, null, "applyKey only reports the intent; the driver opens the picker");
-  const opened = { ...world, picker: { title: "t", options: ["a", "b"], cursor: 0, pending: (alias) => ({ summary: alias }) } };
+  const opened = { ...world, picker: { title: "t", options: ["a", "b"], cursor: 0, pending: (alias) => ({ summary: alias, patch: {} }) } };
   const moved = applyKey(opened, "j").state;
   assert.equal(moved.picker.cursor, 1);
-  const chosen = applyKey(moved, "return").state;
-  assert.equal(chosen.picker, null);
-  assert.equal(chosen.pending.summary, "b", "the highlighted option is the proposal");
+  const chosen = applyKey(moved, "return");
+  assert.equal(chosen.state.picker, null);
+  assert.equal(chosen.state.pending.summary, "b", "the highlighted option is the proposal");
+  assert.equal(chosen.effect, "save", "choosing is the modal's submit: it stages and asks for the write");
   assert.equal(applyKey(opened, "escape").state.picker, null, "escape closes the picker and nothing more");
+  assert.equal(applyKey(opened, "escape").state.pending, null, "…with nothing staged");
   const backedOut = applyKey(opened, "q");
   assert.equal(backedOut.state.picker, null, "q is a way back while a picker is open");
   assert.notEqual(backedOut.effect, "quit", "…not a quit");
@@ -1519,19 +1807,18 @@ test("the name prompt takes text: letters one key at a time, a paste whole, back
 
 test("the staging keeps the verdict it is handed: a refusal's summary, a complaint's silence", () => {
   // The builder's `commit` is its own to build, so the two verdicts the real commits never hand back —
-  // a refusal and a loader complaint — are walked the way the picker fixtures walk their choices.
+  // a refusal and a loader complaint — are walked the way the picker fixtures walk their choices, each
+  // commit handing back the proposal itself (an outcome is a proposal when it has its patch).
   const building = (commit) => builderOn(editState(), { routes: [{ id: "zai", model: "glm-5" }], commit });
 
   const refused = applyKey(
     building(() => ({
-      proposal: {
-        listOf: "kimi",
-        layerFile: "/tmp/nowhere/x.json",
-        patch: {},
-        summary: "kimi changes nothing",
-        errors: [],
-        saveable: false,
-      },
+      listOf: "kimi",
+      layerFile: "/tmp/nowhere/x.json",
+      patch: {},
+      summary: "kimi changes nothing",
+      errors: [],
+      saveable: false,
     })),
     "s",
   );
@@ -1541,9 +1828,7 @@ test("the staging keeps the verdict it is handed: a refusal's summary, a complai
   assert.equal(refused.state.message, "kimi changes nothing", "and its summary is the message");
 
   const complained = applyKey(
-    building(() => ({
-      proposal: { listOf: "kimi", layerFile: "/tmp/nowhere/x.json", patch: {}, summary: "kimi now tries zai", errors: ["boom"] },
-    })),
+    building(() => ({ listOf: "kimi", layerFile: "/tmp/nowhere/x.json", patch: {}, summary: "kimi now tries zai", errors: ["boom"] })),
     "s",
   );
   assert.deepEqual(complained.state.pending.errors, ["boom"]);
@@ -1584,6 +1869,587 @@ test("escape backs out of the name prompt and changes nothing else; ctrl-c quits
   assert.equal(applyKey(open, "ctrl-c").effect, "quit");
 });
 
+/* ---------------------------------------------------------------- personas */
+
+test("n names a new persona: the prompt refuses a blank and a collision, and a fresh name opens the editor", () => {
+  const world = personaState();
+  const asked = applyKey({ ...world, tab: "personas" }, "n");
+  assert.equal(asked.effect, "none");
+  assert.ok(asked.state.input, "the chain starts with a name prompt");
+  assert.equal(asked.state.input.title, "new persona");
+  assert.equal(asked.state.input.value, "");
+  assert.equal(asked.state.input.hint, "type the persona name · enter continues · esc back");
+  assert.equal(asked.state.input.back, null, "the first step has nowhere to go back to");
+  assert.equal(asked.state.editor, null);
+  assert.equal(asked.state.pending, null, "asking is not yet proposing");
+
+  // A blank name is refused, and a name that exists is never clobbered — both times the prompt stays
+  // open over its typing with the refusal for a message.
+  const blank = applyKey(asked.state, "return");
+  assert.equal(blank.effect, "none", "a blank name writes nothing");
+  assert.ok(blank.state.input, "the prompt stays open");
+  assert.equal(blank.state.message, "a persona needs a name");
+  assert.equal(blank.state.pending, null, "a refusal stages nothing");
+  const collide = applyKey(applyKey(asked.state, "technical").state, "return");
+  assert.equal(collide.effect, "none");
+  assert.ok(collide.state.input, "the prompt stays open");
+  assert.equal(collide.state.message, "technical already exists");
+  assert.equal(collide.state.input.value, "technical", "the typing survives the refusal");
+  assert.equal(collide.state.pending, null);
+
+  // A fresh name walks into the editor — and lands in the editor's slot, never another modal's.
+  const named = applyKey(applyKey(asked.state, "nova").state, "return");
+  assert.equal(named.effect, "none");
+  assert.equal(named.state.input, null, "the name step is done");
+  assert.equal(named.state.builder, null, "an editor is not a builder whatever functions it carries");
+  assert.equal(named.state.textarea, null);
+  const editor = named.state.editor;
+  assert.ok(editor, "the chain continues into the editor");
+  assert.equal(editor.title, "new persona", "the create chain's editor carries the name step's own title");
+  assert.equal(editor.draft.name, "nova");
+  assert.equal(editor.draft.promptFile, "", "a fresh persona starts as inline text");
+  assert.equal(editor.draft.text, "");
+  assert.equal(editor.draft.temperature, undefined);
+  assert.equal(editor.draft.thinking, undefined);
+  assert.equal(editor.draft.output, undefined);
+  assert.equal(editor.originalText, "");
+  assert.equal(editor.cursor, 0);
+  assert.equal(typeof editor.commit, "function", "`s` knows what to submit");
+
+  // `s` on the editor is the write: the draft becomes the proposal and is saved in the same breath.
+  const saved = applyKey(named.state, "s");
+  assert.equal(saved.effect, "save", "submit-saves");
+  assert.equal(saved.state.editor, null);
+  assert.equal(saved.state.pending.listOf, "personas:nova");
+  assert.deepEqual(saved.state.pending.patch.personas.nova, { prompt: "" }, "the inline text is the prompt; unset knobs stay unset");
+  assert.equal(saved.state.pending.summary, "nova saved (inline prompt · 0 lines)");
+
+  // Esc from the editor is back to the step that opened it, its typing intact — the draft is simply
+  // gone, because nothing was written.
+  const back = applyKey(named.state, "escape");
+  assert.equal(back.effect, "none", "escape is back, never a way out");
+  assert.equal(back.state.editor, null);
+  assert.equal(back.state.input.title, "new persona", "back is the name step it opened over");
+  assert.equal(back.state.input.value, "nova", "typed and all");
+  assert.equal(back.state.pending, null, "stepping back stages nothing");
+});
+
+test("the editor walks its five field rows and paints them, and every other key in it is inert", () => {
+  const world = editorOn(personaState());
+  // j/k and the arrows walk the field rows and hold at either end.
+  assert.equal(world.editor.cursor, 0);
+  assert.equal(applyKey(world, "j").state.editor.cursor, 1);
+  assert.equal(applyKey(world, "down").state.editor.cursor, 1, "`down` walks with `j`");
+  const walked = ["j", "j", "j", "j"].reduce((next, key) => applyKey(next, key).state, world);
+  assert.equal(walked.editor.cursor, 4, "five fields, and the bottom holds");
+  assert.equal(applyKey(applyKey(world, "j").state, "k").state.editor.cursor, 0, "and so does the top");
+  assert.equal(applyKey(world, "up").state.editor.cursor, 0);
+
+  // `s` hands over the draft exactly as it stands, and an error outcome is the refusal: the editor
+  // stays open over its draft with the refusal for a message.
+  let submitted = null;
+  const refusing = editorOn(personaState(), {
+    commit: (draft) => {
+      submitted = draft;
+      return { error: "not today" };
+    },
+  });
+  const refused = applyKey(refusing, "s");
+  assert.equal(refused.effect, "none");
+  assert.equal(refused.state.editor.title, "skeptic", "the editor stays open");
+  assert.equal(refused.state.message, "not today");
+  assert.equal(submitted.text, "one\ntwo", "`s` submits the draft as it stands");
+  assert.equal(submitted.name, "skeptic");
+
+  // Esc is back — a directly opened editor has nowhere to step back to — and ctrl-c is the way out.
+  const back = applyKey(world, "escape");
+  assert.equal(back.effect, "none", "escape is back, never a way out");
+  assert.equal(back.state.editor, null);
+  assert.equal(back.state.input, null, "a directly opened editor has nowhere to step back to");
+  assert.equal(applyKey(world, "ctrl-c").effect, "quit");
+
+  // Every other key is the outside world trying to leak in — `q` included, and the tab numbers too.
+  for (const key of ["q", "1", "2", "3", "4", "n", "e", "d", "J", "K", "g", "G", "?", "a", "c", "r", "R"]) {
+    const same = applyKey(world, key);
+    assert.equal(same.effect, "none", `${key} leaks nothing into the editor`);
+    assert.deepEqual({ ...same.state, message: "" }, { ...world, message: "" }, `${key} changes nothing`);
+  }
+
+  // And the frame names the five fields and what the draft holds on each.
+  const frame = frameFor({ width: 120, height: 24, state: world, palette: paletteFor({ color: false }), clock: "" });
+  const text = Array.from({ length: 24 }, (_, row) => gridLine(frame, row)).join("\n");
+  assert.match(text, /prompt file/, "the five fields name themselves");
+  assert.match(text, /inline · 2 lines/, "the prompt row reads its draft");
+  assert.match(text, /\(inline\)/, "and the file row says there is no file");
+  assert.match(text, /temperature/);
+  assert.match(text, /thinking/);
+  assert.match(text, /output/);
+});
+
+test("the prompt field opens the textarea, and esc applies its text back into the draft", () => {
+  const world = editorOn(personaState());
+  const opened = applyKey(world, "return"); // the cursor is on "prompt"
+  assert.equal(opened.effect, "none");
+  assert.ok(opened.state.textarea, "the prompt is edited as text");
+  assert.equal(opened.state.editor, null, "the editor waits in the textarea's back");
+  assert.deepEqual(opened.state.textarea.lines, ["one", "two"], "seeded from the draft text");
+  assert.equal(opened.state.textarea.back.draft.text, "one\ntwo", "back is the editor state it opened over");
+
+  // The caret walks to the front deterministically — up holds at row 0, left at column 0 — and the
+  // typing lands there. Esc is "done with this field": the lines join back into the draft.
+  const at = ["up", "up", "left", "left", "left", "left"].reduce((next, key) => applyKey(next, key).state, opened.state);
+  assert.deepEqual([at.textarea.row, at.textarea.col], [0, 0]);
+  const applied = applyKey(applyKey(at, "zai").state, "escape");
+  assert.equal(applied.effect, "none");
+  assert.equal(applied.state.textarea, null);
+  const editor = applied.state.editor;
+  assert.equal(editor.draft.text, "zaione\ntwo", "the run was inserted at the caret and the lines joined back");
+  assert.equal(editor.originalText, "one\ntwo", "change detection keeps what was loaded");
+  assert.equal(editor.cursor, 0, "the editor is back on the field it opened");
+  assert.equal(typeof editor.commit, "function", "…with its commit intact");
+  assert.equal(editor.title, "skeptic");
+});
+
+test("the textarea types runs, splits and joins its lines, clamps its caret — and esc is done", () => {
+  const world = personaState();
+  const base = () => textareaOn(world);
+
+  // Typing inserts at the caret; a paste arrives as one chunk and lands as one run.
+  const typed = applyKey(base(), "zai").state.textarea;
+  assert.deepEqual(typed.lines, ["onezai", "two"]);
+  assert.deepEqual([typed.row, typed.col], [0, 6]);
+  assert.deepEqual(applyKey(base(), "cline-pass").state.textarea.lines, ["onecline-pass", "two"], "a paste arrives whole and lands whole");
+  assert.deepEqual(applyKey(base(), "q").state.textarea.lines, ["oneq", "two"], "`q` is text in here, like every other printable");
+
+  // Return splits the line at the caret, and the caret goes to the start of what it left behind.
+  const split = applyKey(base(), "return").state.textarea;
+  assert.deepEqual(split.lines, ["one", "", "two"]);
+  assert.deepEqual([split.row, split.col], [1, 0]);
+  const midSplit = applyKey(textareaOn(world, { row: 0, col: 1 }), "return").state.textarea;
+  assert.deepEqual(midSplit.lines, ["o", "ne", "two"]);
+  assert.deepEqual([midSplit.row, midSplit.col], [1, 0]);
+
+  // Backspace deletes left, and at column 0 it joins the line to the one above it.
+  const deleted = applyKey(base(), "backspace").state.textarea;
+  assert.deepEqual(deleted.lines, ["on", "two"]);
+  assert.deepEqual([deleted.row, deleted.col], [0, 2]);
+  const joined = applyKey(textareaOn(world, { row: 1, col: 0 }), "backspace").state.textarea;
+  assert.deepEqual(joined.lines, ["onetwo"], "the join is the newline's deletion");
+  assert.deepEqual([joined.row, joined.col], [0, 3], "the caret sits where the two lines met");
+  const nothing = applyKey(textareaOn(world, { row: 0, col: 0 }), "backspace").state.textarea;
+  assert.deepEqual(nothing.lines, ["one", "two"], "a caret at the very start has nothing to take");
+  assert.deepEqual([nothing.row, nothing.col], [0, 0]);
+
+  // The caret moves and clamps: never off a line, never off the text.
+  const up = applyKey(textareaOn(world, { lines: ["a", "longer"], row: 1, col: 7 }), "up").state.textarea;
+  assert.deepEqual([up.row, up.col], [0, 1], "a longer column clamps to the shorter line");
+  const down = applyKey(textareaOn(world, { lines: ["ab", "xy"], row: 0, col: 1 }), "down").state.textarea;
+  assert.deepEqual([down.row, down.col], [1, 1]);
+  assert.deepEqual(
+    [applyKey(base(), "down").state.textarea.row, applyKey(base(), "down").state.textarea.col],
+    [1, 3],
+    "the column clamps to the line below",
+  );
+  assert.deepEqual(
+    [applyKey(base(), "down").state.textarea.row, applyKey(textareaOn(world, { row: 1 }), "down").state.textarea.row],
+    [1, 1],
+    "the bottom holds",
+  );
+  assert.deepEqual(
+    [applyKey(base(), "right").state.textarea.row, applyKey(base(), "right").state.textarea.col],
+    [0, 3],
+    "the end of a line holds",
+  );
+  assert.deepEqual([applyKey(textareaOn(world, { row: 0, col: 0 }), "left").state.textarea.col], [0], "and the start");
+
+  // Tab stands still while text is being typed.
+  for (const key of ["tab", "shift-tab"]) {
+    const same = applyKey(base(), key).state.textarea;
+    assert.deepEqual(same.lines, ["one", "two"], `${key} types nothing`);
+    assert.deepEqual([same.row, same.col], [0, 3], `${key} moves nothing`);
+  }
+
+  // Esc is "done with this field": it applies the lines joined back through the usual outcome
+  // routing — and ctrl-c is still the one way out of everything.
+  let appliedText = null;
+  const done = textareaOn(world, {
+    apply: (text) => {
+      appliedText = text;
+      return { error: "stop there" };
+    },
+  });
+  const escaped = applyKey(applyKey(done, "zai").state, "escape");
+  assert.equal(appliedText, "onezai\ntwo", "what the lines hold, joined");
+  assert.equal(escaped.state.message, "stop there", "and its outcome travels the usual routing");
+  assert.ok(escaped.state.textarea, "an error outcome keeps the field open");
+  assert.equal(applyKey(base(), "ctrl-c").effect, "quit");
+});
+
+test("the temperature field takes a number in 0..2, refuses the rest, and an empty answer clears it", () => {
+  // Open the field's input, empty whatever it was seeded with, then type the answer whole.
+  const answer = (world, text) => {
+    const opened = applyKey(world, "return");
+    assert.ok(opened.state.input, "the number is typed, not picked");
+    assert.equal(opened.state.editor, null);
+    let next = opened.state;
+    for (let i = 0; i < 8; i += 1) next = applyKey(next, "backspace").state;
+    return text === "" ? applyKey(next, "return") : applyKey(applyKey(next, text).state, "return");
+  };
+  const at = () => editorOn(personaState(), { cursor: 2 });
+
+  for (const text of ["3", "-1", "2.5", "many"]) {
+    const refused = answer(at(), text);
+    assert.equal(refused.effect, "none");
+    assert.equal(refused.state.message, "temperature must be a number in 0..2", `${text} is not in 0..2`);
+    assert.ok(refused.state.input, "the prompt stays open over its typing");
+    assert.equal(refused.state.editor, null, "and nothing lands in the draft");
+  }
+  for (const [text, value] of [
+    ["0.7", 0.7],
+    ["0", 0],
+    ["2", 2],
+  ]) {
+    const set = answer(at(), text);
+    assert.equal(set.state.input, null);
+    assert.equal(set.state.editor.draft.temperature, value, `${text} is in 0..2`);
+    assert.equal(set.state.editor.cursor, 2, "the editor is back on the field it opened");
+    assert.equal(set.state.editor.draft.name, "skeptic", "and it is the same editor");
+  }
+
+  // An empty answer is not a zero — it is "no temperature", and the knob leaves the draft.
+  const cleared = answer(editorOn(personaState(), { cursor: 2, draft: draftFor("skeptic", { temperature: 0.7 }) }), "");
+  assert.equal(cleared.state.input, null);
+  assert.equal(cleared.state.editor.draft.temperature, undefined, "an empty answer clears the knob back out");
+});
+
+test("the thinking and output fields pick from a dropdown that sets the draft and clears it back", () => {
+  // The thinking levels are the loader's own under an empty first option labelled `(inherit)`, and
+  // output is the same dropdown over its two values: choosing sets the knob, choosing the first
+  // option clears it.
+  const opened = applyKey(editorOn(personaState(), { cursor: 3 }), "return");
+  assert.ok(opened.state.picker, "thinking is picked, never typed");
+  assert.equal(opened.state.editor, null);
+  assert.deepEqual(opened.state.picker.options, ["", ...THINKING_LEVELS]);
+
+  const set = pick(opened.state, "high");
+  assert.equal(set.state.picker, null);
+  assert.equal(set.state.editor.draft.thinking, "high");
+  assert.equal(set.state.editor.cursor, 3, "the editor is back on the field it opened");
+  assert.equal(set.state.editor.draft.name, "skeptic");
+  const seeded = applyKey(editorOn(personaState(), { cursor: 3, draft: draftFor("skeptic", { thinking: "high" }) }), "return");
+  const cleared = pick(seeded.state, "");
+  assert.equal(cleared.state.picker, null);
+  assert.equal(cleared.state.editor.draft.thinking, undefined, "the first option is (inherit): it clears");
+
+  const output = applyKey(editorOn(personaState(), { cursor: 4 }), "return");
+  assert.ok(output.state.picker);
+  assert.deepEqual(output.state.picker.options, ["", "text", "json"]);
+  assert.equal(pick(output.state, "json").state.editor.draft.output, "json");
+  assert.equal(pick(output.state, "").state.editor.draft.output, undefined, "and clears the same way");
+});
+
+test("a chained outcome lands in the slot its shape names — an editor is an editor, never a builder", () => {
+  // The chain outcome says `{ modal: … }` now (it used to say `{ input: … }`, and anything carrying
+  // a `commit` fell into the builder's slot): each modal is routed by its own shape.
+  const world = personaState();
+  const through = (modal) =>
+    applyKey({ ...world, input: { title: "new persona", value: "nova", hint: "", back: null, submit: () => ({ modal }) } }, "return");
+  const routed = through(editorOn(world).editor);
+  assert.equal(routed.effect, "none", "a chained step is not a save");
+  assert.equal(routed.state.input, null, "the typing step is done");
+  assert.equal(routed.state.editor.title, "skeptic", "an editor outcome is routed to the editor");
+  assert.equal(routed.state.builder, null, "its commit does not make it a builder any more");
+  assert.equal(routed.state.textarea, null);
+
+  const builderModal = through(builderOn(world).builder).state;
+  assert.ok(builderModal.builder, "commit and a tree is a builder");
+  assert.equal(builderModal.editor, null);
+  const inputModal = through({ title: "second", value: "x", hint: "", back: null, submit: () => ({ error: "never reached" }) }).state;
+  assert.equal(inputModal.input.title, "second", "submit and a value is another input");
+  assert.equal(inputModal.editor, null);
+
+  // The refusal outcome keeps the modal open over its typing with the refusal for a message.
+  const refused = applyKey(
+    { ...world, input: { title: "new persona", value: "nova", hint: "", back: null, submit: () => ({ error: "not this name" }) } },
+    "return",
+  );
+  assert.equal(refused.effect, "none");
+  assert.equal(refused.state.message, "not this name");
+  assert.equal(refused.state.input.title, "new persona", "the prompt stays open");
+  assert.equal(refused.state.input.value, "nova", "over its typing");
+});
+
+test("on the personas tab enter opens a persona's seats, e edits it, and a seat re-points through the routes picker", () => {
+  const world = { ...personaState(), tab: "personas" };
+  const labels = (result) => result.state.rows.personas.map((row) => row.persona);
+
+  // Enter toggles the seats open under the cursor's persona, and the cursor stays on the parent.
+  const parent = personaParent(world, "technical");
+  assert.equal(parent.childCount, 2);
+  const opened = applyKey(personaCursorOn(world, parent), "return");
+  assert.equal(opened.effect, "none");
+  assert.deepEqual(labels(opened), ["judge", "skeptic", "technical", "  ├ quick", "  └ review"]);
+  assert.equal(selected(opened.state).persona, "technical", "the cursor stays on the parent it opened");
+  assert.equal(selected(opened.state).expanded, true);
+  const closed = applyKey(opened.state, "return");
+  assert.deepEqual(labels(closed), ["judge", "skeptic", "technical"], "and enter shuts it again");
+  assert.equal(selected(closed.state).persona, "technical");
+
+  // `e` on a parent is the edit: the editor seeded from the persona — its prompt file where the
+  // prompt is a path, its text what that file holds.
+  const edited = applyKey(personaCursorOn(world, parent), "e");
+  assert.equal(edited.effect, "none", "the editor opens over the table, proposing nothing yet");
+  assert.equal(edited.state.pending, null);
+  const seeded = edited.state.editor;
+  assert.equal(seeded.title, "technical");
+  assert.equal(seeded.draft.promptFile, "prompts/technical.md", "a path prompt is its file");
+  assert.equal(seeded.draft.text, "", "and its text is what the file holds — nothing, here");
+  assert.equal(seeded.originalText, "");
+  assert.equal(seeded.draft.temperature, 0.2);
+  assert.equal(seeded.draft.thinking, undefined);
+
+  // An inline prompt seeds its text whole and knows it has no file.
+  const inline = applyKey(personaCursorOn(world, personaParent(world, "skeptic")), "e");
+  assert.equal(inline.state.editor.draft.promptFile, "");
+  assert.equal(inline.state.editor.draft.text, "find the flaw in it\nand name it plainly");
+  assert.equal(inline.state.editor.originalText, inline.state.editor.draft.text);
+  assert.equal(inline.state.editor.draft.thinking, "high");
+
+  // A seat row's `e` (and its enter) re-points it through the routes tab's own picker and proposer —
+  // never a second one — and choosing is the modal's submit.
+  const seat = personaSeat(opened.state, "technical", "quick");
+  for (const key of ["e", "enter"]) {
+    const asked = applyKey(personaCursorOn(opened.state, seat), key);
+    assert.equal(asked.effect, "propose", "the driver opens the picker, as on the routes tab");
+    assert.equal(asked.state.pending, null, "asking is not yet proposing");
+  }
+  const viaChild = proposeFor(applyKey(personaCursorOn(opened.state, seat), "e").state);
+  assert.equal(viaChild.picker.title, "quick.technical: point at");
+  assert.deepEqual(viaChild.picker.options, ["kimi", "kimiAlias", "muse", "trio"], "the alias dropdown, and only that");
+  const chosen = pick(viaChild, "muse");
+  assert.equal(chosen.effect, "save", "choosing is the modal's submit");
+  assert.deepEqual(chosen.state.pending.patch, {
+    personas: personaLayer.personas,
+    fusions: { quick: { candidates: { technical: ["muse"] } } },
+  });
+  assert.match(chosen.state.pending.summary, /quick\.technical walks muse \(was kimi\)/);
+
+  // …and it is exactly the proposal the routes tab stages for the same seat.
+  const routesWorld = { ...personaState(), tab: "routes" };
+  const route = routesWorld.rows.routes.find((row) => row.fusion === "quick" && row.seat === "technical");
+  const onRoute = { ...routesWorld, cursors: { ...routesWorld.cursors, routes: routesWorld.rows.routes.indexOf(route) } };
+  const viaRoutes = pick(proposeFor(applyKey(onRoute, "e").state), "muse");
+  assert.deepEqual(chosen.state.pending, viaRoutes.state.pending, "the same proposal — the seats re-use the routes picker whole");
+
+  // `d` on a parent stages its removal — the two-step, gated by the loader's verdict — and on a seat
+  // row it names `e` instead.
+  const dropped = applyKey(personaCursorOn(world, personaParent(world, "technical")), "d");
+  assert.equal(dropped.state.pending.listOf, "personas:technical");
+  assert.equal(dropped.state.pending.summary, "persona technical dropped");
+  assert.equal(applyKey(dropped.state, "s").effect, "none", "the modes still name the persona, so the loader refuses the write");
+  assert.match(applyKey(dropped.state, "s").state.message, /refused: .*unknown persona "technical"/);
+  const refused = applyKey(personaCursorOn(world, personaParent(world, "judge")), "d");
+  assert.equal(refused.state.pending.saveable, false, "a base persona is a named refusal, never a silent no-op");
+  assert.equal(refused.state.message, refused.state.pending.summary);
+  const onSeat = applyKey(personaCursorOn(opened.state, seat), "d");
+  assert.equal(onSeat.effect, "none");
+  assert.equal(onSeat.state.pending, null, "a seat is not a thing to drop");
+  assert.match(onSeat.state.message, /\be\b/);
+  assert.match(onSeat.state.message, /alias/, "the message names the key that does something here");
+
+  // A removal the loader does accept is staged by `d` and written by `s`.
+  const withScratch = {
+    ...personaState({
+      config: { ...personaConfig, personas: { ...personaConfig.personas, scratch: { prompt: "an itch\nand its scratch" } } },
+    }),
+    tab: "personas",
+  };
+  const staged = applyKey(personaCursorOn(withScratch, personaParent(withScratch, "scratch")), "d");
+  assert.equal(staged.state.pending.summary, "persona scratch dropped");
+  assert.deepEqual(staged.state.pending.errors, [], "nothing names it, so the loader has nothing to say");
+  assert.equal(applyKey(staged.state, "s").effect, "save", "s writes the staged removal");
+});
+
+test("proposePersonaSave restates the persona in its layer, and names a prompt file only when its text moved", () => {
+  const world = personaState();
+
+  // CREATE: a name the display config does not hold yet — the inline text is the prompt, and unset
+  // knobs stay unset rather than being written as anything.
+  const created = proposePersonaSave({ state: world, name: "nova", draft: draftFor("nova"), originalText: "" });
+  assert.equal(created.listOf, "personas:nova");
+  assert.equal(created.layerFile, personaLayerFile);
+  assert.deepEqual(created.patch.personas.nova, { prompt: "one\ntwo" });
+  assert.deepEqual(created.patch.personas.technical, personaLayer.personas.technical, "the layer's other personas travel with the patch");
+  assert.deepEqual(created.errors, [], "the loader accepts it");
+  assert.equal(created.summary, "nova saved (inline prompt · 2 lines)");
+  assert.equal(created.promptWrites, undefined, "an inline prompt has no file to write");
+
+  const knobs = proposePersonaSave({
+    state: world,
+    name: "nova",
+    draft: draftFor("nova", { text: "x", temperature: 0.7, thinking: "high", output: "json" }),
+    originalText: "",
+  });
+  assert.deepEqual(knobs.patch.personas.nova, { prompt: "x", temperature: 0.7, thinking: "high", output: "json" });
+
+  // UPDATE: a layer persona is restated whole — a knob the draft dropped is gone, not left behind.
+  const updated = proposePersonaSave({
+    state: world,
+    name: "technical",
+    draft: draftFor("technical", { promptFile: "prompts/technical.md", text: "line one\nline two" }),
+    originalText: "as loaded",
+  });
+  assert.deepEqual(
+    updated.patch.personas.technical,
+    { prompt: "prompts/technical.md" },
+    "the cleared temperature does not survive the restatement",
+  );
+  assert.equal(updated.summary, "technical saved (prompt file prompts/technical.md · 2 lines)");
+  assert.deepEqual(
+    updated.promptWrites,
+    [{ file: "/tmp/persona-layer/prompts/technical.md", text: "line one\nline two" }],
+    "the path-backed text moved, so the file is written",
+  );
+
+  // …and a base persona is an override, with the declaration it overrides named in the summary.
+  const based = proposePersonaSave({
+    state: world,
+    name: "judge",
+    draft: draftFor("judge", { text: "pick\nbetter" }),
+    originalText: "pick\nbetter",
+  });
+  assert.equal(based.summary, "judge saved (inline prompt · 2 lines) · overrides the declaration in /base/pi-fusion-matrix.json");
+  assert.equal(based.promptWrites, undefined, "text that did not move writes no file");
+
+  // The change-detection baseline is the editor's when one is open — the argument is its shortcut.
+  const fromEditor = proposePersonaSave({
+    state: { ...world, editor: { originalText: "line one\nline two" } },
+    name: "technical",
+    draft: draftFor("technical", { promptFile: "prompts/technical.md", text: "line one\nline two" }),
+  });
+  assert.equal(fromEditor.promptWrites, undefined, "an unchanged prompt file is not rewritten");
+
+  // A prompt path this layer may not write is a named refusal — never a write plan.
+  const refused = proposePersonaSave({
+    state: personaState({ sources: { personas: { technical: { dir: "/tmp/persona-layer", trusted: false, file: personaLayerFile } } } }),
+    name: "technical",
+    draft: draftFor("technical", { promptFile: "../escape.md", text: "x" }),
+    originalText: "as loaded",
+  });
+  assert.equal(refused.saveable, false);
+  assert.match(refused.summary, /prompt path cannot be written/);
+  assert.equal(refused.promptWrites, undefined, "and plans no write");
+
+  // A pending for the same persona in the same layer is the baseline the new patch is drawn over —
+  // persona edits accumulate like route lists — and any other pending is not this name's baseline.
+  const carried = {
+    listOf: "personas:technical",
+    layerFile: personaLayerFile,
+    patch: { personas: { technical: { prompt: "old" }, kept: { prompt: "kept\nhere" }, skeptic: personaConfig.personas.skeptic }, note: 1 },
+    summary: "technical saved (inline prompt · 1 line)",
+    errors: [],
+  };
+  const again = proposePersonaSave({
+    state: { ...world, pending: carried },
+    name: "technical",
+    draft: draftFor("technical"),
+    originalText: "old",
+  });
+  assert.deepEqual(
+    again.patch,
+    { personas: { technical: { prompt: "one\ntwo" }, kept: { prompt: "kept\nhere" }, skeptic: personaConfig.personas.skeptic }, note: 1 },
+    "the pending it builds over is kept",
+  );
+  assert.deepEqual(again.errors, [], "and the accumulated patch still loads");
+  const fresh = proposePersonaSave({
+    state: { ...world, pending: { ...carried, listOf: "personas:other" } },
+    name: "technical",
+    draft: draftFor("technical"),
+    originalText: "old",
+  });
+  assert.deepEqual(
+    fresh.patch,
+    { personas: { technical: { prompt: "one\ntwo" }, skeptic: personaConfig.personas.skeptic } },
+    "another name's pending is not carried — the baseline is the layer again",
+  );
+});
+
+test("proposePersonaDelete drops a layer persona and names the base file it cannot drop one from", () => {
+  const world = personaState();
+
+  // Layer-owned: the removal is expressible — the layer simply stops declaring the persona.
+  const dropped = proposePersonaDelete({ state: world, name: "technical" });
+  assert.equal(dropped.listOf, "personas:technical");
+  assert.equal(dropped.layerFile, personaLayerFile);
+  assert.deepEqual(
+    dropped.patch,
+    { personas: { skeptic: personaConfig.personas.skeptic } },
+    "the layer as it would stand without the persona",
+  );
+  assert.equal(dropped.summary, "persona technical dropped");
+  assert.notEqual(dropped.saveable, false, "no self-authored refusal stands in for the loader's");
+  assert.ok(dropped.errors.length > 0, "the loader refuses a mode whose persona just went away");
+  assert.match(dropped.errors.join("\n"), /unknown persona "technical"/);
+
+  // Base-owned: the layer may only override, and the refusal names the declaring file.
+  const refused = proposePersonaDelete({ state: world, name: "judge" });
+  assert.equal(refused.listOf, "personas:judge");
+  assert.equal(refused.saveable, false);
+  assert.equal(refused.summary, "judge is declared in /base/pi-fusion-matrix.json; this layer can only override it");
+
+  // …or the base layer it has no file for.
+  const anonymous = proposePersonaDelete({ state: personaState({ sources: {} }), name: "judge" });
+  assert.equal(anonymous.summary, "judge is declared in a base layer; this layer can only override it");
+});
+
+test("a persona save writes its prompt file before the layer, and a prompt file it cannot write stops both", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tui-persona-"));
+  const layerFile = path.join(dir, "pi-fusion-matrix.json");
+  const opts = { dbPath: path.join(dir, "no-store.db") };
+  const sources = { personas: { technical: { dir, kind: "machine", file: layerFile, trusted: true } } };
+  // The base layers hold the whole roster here and the layer file starts empty: what lands in the
+  // layer is exactly the restatement being saved.
+  const world = personaState({ layerFile, layerConfig: {}, sources, baseConfig: personaConfig });
+  fs.mkdirSync(path.join(dir, "prompts"));
+  fs.writeFileSync(path.join(dir, "prompts", "technical.md"), "line one\nline two\n");
+
+  // A path-backed edit whose text moved writes the file — and the layer after it.
+  const pending = proposePersonaSave({
+    state: { ...world, editor: { originalText: "line one\nline two" } },
+    name: "technical",
+    draft: draftFor("technical", { promptFile: "prompts/technical.md", text: "line one\nline two\nline three" }),
+  });
+  assert.deepEqual(pending.promptWrites, [{ file: path.join(dir, "prompts", "technical.md"), text: "line one\nline two\nline three" }]);
+  const saved = await commitProposal({ ...world, pending }, opts);
+  assert.equal(saved.wrote, true, `a clean proposal is written — or names why not: ${saved.state.message}`);
+  assert.equal(
+    fs.readFileSync(path.join(dir, "prompts", "technical.md"), "utf8"),
+    "line one\nline two\nline three",
+    "the prompt file holds the new text",
+  );
+  assert.deepEqual(JSON.parse(fs.readFileSync(layerFile, "utf8")), pending.patch, "and the layer holds the patch");
+  assert.match(saved.state.message, /^saved: technical saved \(prompt file prompts\/technical\.md · 3 lines\)/);
+  assert.match(saved.state.message, /wrote/, "the success message names both halves of the write");
+
+  // A prompt file this write cannot create stops the whole save — so the layer never appears behind
+  // a prompt file that failed, which is what makes the file-first order observable.
+  fs.writeFileSync(path.join(dir, "blocked"), "a file where a directory must go");
+  const blocked = proposePersonaSave({
+    state: { ...world, editor: { originalText: "as loaded" } },
+    name: "technical",
+    draft: draftFor("technical", { promptFile: "blocked/technical.md", text: "line one\nline two" }),
+  });
+  assert.deepEqual(blocked.promptWrites, [{ file: path.join(dir, "blocked", "technical.md"), text: "line one\nline two" }]);
+  fs.rmSync(layerFile, { force: true });
+  const refused = await commitProposal({ ...world, pending: blocked }, opts);
+  assert.equal(refused.wrote, false);
+  assert.match(refused.state.message, /^refused: the prompt file could not be written/);
+  assert.equal(fs.existsSync(layerFile), false, "no layer is written after a prompt file that could not be");
+  assert.equal(fs.existsSync(path.join(dir, "blocked", "technical.md")), false);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 /* ------------------------------------------------------------ frame and diff */
 
 test("a frame keeps the table inside its panel and the detail under it", () => {
@@ -1617,7 +2483,7 @@ test("the keys hint shows the rain state and that the numbers pick the tabs", ()
   const on = hint(state());
   assert.match(on, /rain:ON/);
   assert.match(hint({ ...state(), rain: false }), /rain:OFF/, "and says so when it is off");
-  for (const digit of ["1", "3"]) assert.ok(on.includes(digit), `the hint names tab key ${digit}`);
+  for (const digit of ["1", "4"]) assert.ok(on.includes(digit), `the hint names tab key ${digit}`);
   assert.ok(on.includes("tab"), "the numbers are named as tabs");
 });
 
@@ -1695,7 +2561,7 @@ test("a reload keeps your place: the tab, the cursors and the toggles survive it
   const routes = after.rows.routes.length;
   assert.deepEqual(
     after.cursors,
-    { aliases: 0, fusions: 1, routes: Math.min(4, routes - 1) },
+    { aliases: 0, fusions: 1, routes: Math.min(4, routes - 1), personas: 0 },
     "a cursor past the reloaded rows is clamped onto the last one",
   );
   assert.equal(selected(after) !== undefined, true, "so the selection still points at a row");

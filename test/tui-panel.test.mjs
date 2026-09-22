@@ -405,3 +405,110 @@ test("the clock asks the host for frames through its scheduler", async (t) => {
   await until(() => frames > 0, "the host to be asked for a frame", 1000);
   assert.ok(frames >= 1, "requestRender is what wakes the renderer — a cache flush does not");
 });
+
+test("the personas tab makes, retunes and drops one end to end — and a seat's e points it at an alias", async (t) => {
+  const { panel, calls, layerFile } = await mountPanel(t);
+  panel.handleInput("4");
+  assert.equal(panel.state.tab, "personas", "the number keys reach the personas tab");
+
+  // Walk the personas rows to a target parent and leave the cursor on it. Nothing here names a
+  // persona, a fusion or an alias — the rows are whatever this repo's own config holds — so the walk
+  // means the same thing wherever the suite runs.
+  const findPersona = (predicate) => {
+    panel.handleInput("g");
+    for (let i = 0; i < panel.state.rows.personas.length; i += 1) {
+      const row = panel.state.rows.personas[panel.state.cursors.personas];
+      if (predicate(row)) return row;
+      panel.handleInput("j");
+    }
+    return null;
+  };
+
+  const name = "aether"; // the name the reader types: it names no model and no alias, only this one new persona
+
+  // Make: the name chains into the editor, the prompt field opens a textarea, esc applies the text
+  // back, and the editor's `s` is make *and* write both — there is no second key to land it.
+  panel.handleInput("n");
+  assert.ok(panel.state.input, "n opens the name ask");
+  panel.handleInput(name);
+  panel.handleInput("\r"); // the name is answered and the editor opens over an empty draft
+  assert.ok(panel.state.editor, "the name chains into the persona editor");
+  panel.handleInput("\r"); // the prompt field, first in the list, opens the textarea
+  assert.ok(panel.state.textarea, "the prompt is edited in a textarea");
+  panel.handleInput("alpha"); // a chunk types as one run — a paste arrives whole
+  panel.handleInput("\r"); // return splits the line
+  panel.handleInput("beta");
+  panel.handleInput(ESC); // esc is 'done with this field': it applies the text and steps back
+  assert.equal(panel.state.textarea ?? null, null, "esc closes the textarea");
+  const promptText = panel.state.editor.draft.text;
+  assert.ok(promptText.includes("alpha") && promptText.includes("beta"), "esc applied the typed lines");
+  assert.ok(promptText.includes("\n"), "…as an inline (multi-line) prompt, not a path");
+  panel.handleInput("s");
+  assert.equal(panel.state.editor ?? null, null, "the commit closes the editor");
+  await until(() => panel.state.pending === null, "the create to be written through");
+  const created = JSON.parse(fs.readFileSync(layerFile, "utf8"));
+  assert.equal(created.personas?.[name]?.prompt, promptText, "the layer carries the inline prompt text");
+  assert.ok(shows(panel.render(100), name), "and the frame lists the new persona");
+
+  // Retune: `e` reopens the editor seeded from the persona, and the thinking row opens a level
+  // dropdown. A picker choice is a field edit stepping back to the editor (whose `s` is the write) —
+  // or, where the choice is itself the change, the write already happened on the spot. Land whichever
+  // this is, and read the level back off disk so the assertion holds under either.
+  assert.ok(
+    findPersona((row) => row.kind === "persona" && row.persona === name),
+    "the new persona is a row to sit the cursor on",
+  );
+  panel.handleInput("e");
+  assert.ok(panel.state.editor, "e on a persona opens the editor seeded with it");
+  assert.ok(String(panel.state.editor.draft.text ?? "").includes("alpha"), "…seeded from its current prompt");
+  for (let i = 0; i < 3; i += 1) panel.handleInput("j"); // down to the thinking row: prompt · prompt file · temperature · thinking
+  panel.handleInput("\r");
+  assert.ok(panel.state.picker, "the thinking field opens a level dropdown");
+  const concrete = panel.state.picker.options.findIndex((option) => option && option !== "(inherit)");
+  assert.ok(concrete > 0, "the dropdown offers concrete thinking levels beyond inherit");
+  const level = panel.state.picker.options[concrete];
+  while (panel.state.picker.cursor < concrete) panel.handleInput("j");
+  while (panel.state.picker.cursor > concrete) panel.handleInput("k");
+  panel.handleInput("\r"); // choose that level
+  assert.equal(panel.state.picker ?? null, null, "choosing closes the dropdown");
+  if (panel.state.editor) {
+    assert.equal(panel.state.editor.draft.thinking, level, "choosing sets the draft's thinking level");
+    panel.handleInput("s"); // the editor's submit is the write
+  }
+  await until(() => panel.state.pending === null, "the retune to be written through");
+  const retuned = JSON.parse(fs.readFileSync(layerFile, "utf8"));
+  assert.equal(retuned.personas?.[name]?.thinking, level, "the layer carries the picked thinking level");
+  assert.equal(retuned.personas?.[name]?.prompt, promptText, "…and the prompt it already had");
+
+  // Drop: `d` stages the removal and `s` writes it — the persona is gone again.
+  assert.ok(
+    findPersona((row) => row.kind === "persona" && row.persona === name),
+    "the persona is still a row to drop",
+  );
+  panel.handleInput("d");
+  assert.ok(panel.state.pending, "d stages the drop as a proposal");
+  panel.handleInput("s");
+  await until(() => panel.state.pending === null, "the drop to be written through");
+  const dropped = JSON.parse(fs.readFileSync(layerFile, "utf8"));
+  assert.equal(dropped.personas?.[name], undefined, "the layer no longer carries the persona");
+
+  // A seat child reuses the routes tab's alias dropdown: `e` opens it over that fusion and seat, and
+  // esc closes it with nothing staged — none of the whole walk closes the matrix.
+  const host = findPersona((row) => row.kind === "persona" && (row.childCount ?? 0) > 0);
+  assert.ok(host, "some persona has a seat to point at an alias");
+  panel.handleInput("\r"); // expand it into its seat rows
+  panel.handleInput("j"); // …and step onto the first one
+  const seat = panel.state.rows.personas[panel.state.cursors.personas];
+  assert.equal(seat.kind, "seat", "the cursor is on a seat child");
+  panel.handleInput("e");
+  assert.ok(panel.state.picker, "e on a seat opens the alias dropdown");
+  assert.ok(
+    panel.state.picker.title.includes(seat.fusion) && panel.state.picker.title.includes(seat.seat),
+    "titled with the fusion and seat",
+  );
+  panel.handleInput(ESC);
+  assert.equal(panel.state.picker ?? null, null, "esc closes the dropdown");
+  assert.equal(panel.state.pending ?? null, null, "…and stages nothing");
+  assert.equal(calls.done, 0, "…and the whole walk never closed the matrix");
+  panel.dispose();
+});

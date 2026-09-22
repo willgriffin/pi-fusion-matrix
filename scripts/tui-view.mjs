@@ -14,8 +14,10 @@
  * statistic, so each tab's columns carry a number from the store.
  */
 
+import { promptPath } from "../extensions/pi-fusion-matrix/config.js";
+
 /** The closed tab list, in display order. */
-export const TABS = ["aliases", "fusions", "routes"];
+export const TABS = ["aliases", "fusions", "routes", "personas"];
 
 const BOX = { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│", tee: "├", teeR: "┤" };
 
@@ -417,6 +419,92 @@ export function routeRows({ config, seatStats }) {
   return rows.sort((a, b) => a.fusion.localeCompare(b.fusion) || a.seat.localeCompare(b.seat));
 }
 
+/**
+ * The latest `lastSeatAt` a set of seat rows holds, stamped and trimmed the way `statFields` reads `last` — a
+ * parent's "when did this last sit" over however many rows its aggregates summed.
+ */
+const lastStamp = (rows) => {
+  let at = null;
+  for (const row of rows) {
+    if (row.lastSeatAt && (!at || row.lastSeatAt > at)) at = row.lastSeatAt;
+  }
+  return at ? String(at).slice(0, 16).replace("T", " ") : "—";
+};
+
+/**
+ * How the prompt column reads a persona's prompt: the loader's own rule (`promptPath` says path) names the file,
+ * and inline text reports its line count — empty text is 0 lines, the count the editor's rows use.
+ */
+const promptKindFor = (prompt, source) => {
+  if (prompt && promptPath(prompt, source)) return `file ${prompt}`;
+  return `inline · ${prompt ? prompt.split("\n").length : 0} lines`;
+};
+
+/**
+ * The personas tab: what each persona is prompted to be beside what the store saw its seats do. Under an open
+ * persona sit the fusions that place it — the same (fusion, seat) rows the routes tab draws, `e` pointing one at
+ * an alias exactly as it does there — in the route rows' own order, the tree closing at the last. Parents sort by
+ * name: this list is edited (n/e/d), not ranked by traffic.
+ *
+ * A child's first column is its tree label (as an alias's routes are) and its `promptKind` holds the walk string
+ * beside the parent's prompt; its numbers are the one matching store row's own, never the parent's totals again.
+ */
+export function personaRows({ config, seatStats = [], sources = {}, expanded = {} }) {
+  const rows = [];
+  const seats = routeRows({ config, seatStats });
+  for (const name of Object.keys(config.personas ?? {}).sort((a, b) => a.localeCompare(b))) {
+    const persona = config.personas[name] ?? {};
+    const prompt = typeof persona.prompt === "string" ? persona.prompt : "";
+    const mine = seatStats.filter((stat) => stat.persona === name);
+    const under = seats.filter((row) => row.seat === name && !row.unconfigured);
+    // Like an alias with no providers, a persona no fusion places cannot be opened, whatever the map says.
+    const open = under.length > 0 && Boolean(expanded[name]);
+    const children = open
+      ? under.map((row, index) => {
+          const slice = seatStats.filter((stat) => stat.fusion === row.fusion && stat.persona === name);
+          return {
+            kind: "seat",
+            persona: `  ${index === under.length - 1 ? "└" : "├"} ${row.fusion}`,
+            parent: name,
+            fusion: row.fusion,
+            seat: name,
+            candidates: row.candidates,
+            promptKind: row.candidates,
+            walks: (config.fusions?.[row.fusion]?.candidates?.[name] ?? []).length,
+            refusals: row.refusals,
+            temperature: "—",
+            thinking: "—",
+            output: "—",
+            runs: slice.length,
+            seats: row.seats,
+            degraded: row.degraded,
+            tokens: row.tokens,
+            last: lastStamp(slice),
+          };
+        })
+      : [];
+    rows.push(
+      {
+        kind: "persona",
+        persona: name,
+        promptKind: promptKindFor(prompt, sources.personas?.[name]),
+        temperature: persona.temperature ?? "—",
+        thinking: persona.thinking ?? "—",
+        output: persona.output ?? "—",
+        runs: mine.length,
+        seats: mine.reduce((n, stat) => n + stat.seats, 0),
+        degraded: mine.reduce((n, stat) => n + stat.degraded, 0),
+        tokens: mine.reduce((n, stat) => n + stat.tokens, 0),
+        last: lastStamp(mine),
+        expanded: open,
+        childCount: under.length,
+      },
+      ...children,
+    );
+  }
+  return rows;
+}
+
 /** The columns each tab shows. Every one carries a number the store answered. */
 export function columnsFor(tab) {
   if (tab === "aliases")
@@ -452,6 +540,18 @@ export function columnsFor(tab) {
       { key: "estimatedUsd", label: "$est", align: "right", min: 7, format: (row) => (row.estimatedUsd ? money(row.estimatedUsd) : "—") },
       { key: "listUsd", label: "$list", align: "right", min: 8, format: (row) => (row.listUsd ? money(row.listUsd) : "—") },
       { key: "last", label: "last run", min: 10, max: 16 },
+    ];
+  if (tab === "personas")
+    return [
+      { key: "persona", label: "persona", min: 10, max: 20 },
+      { key: "promptKind", label: "prompt", min: 12, max: 34 },
+      { key: "temperature", label: "temperature", align: "right", min: 5 },
+      { key: "thinking", label: "thinking", min: 4 },
+      { key: "output", label: "output", min: 4 },
+      { key: "runs", label: "runs", align: "right", min: 4 },
+      { key: "seats", label: "seats", align: "right", min: 5 },
+      { key: "degraded", label: "degraded", align: "right", min: 4 },
+      { key: "tokens", label: "tokens", align: "right", min: 6, format: (row) => (row.tokens ? compact(row.tokens) : "—") },
     ];
   return [
     { key: "fusion", label: "fusion", min: 10, max: 16 },

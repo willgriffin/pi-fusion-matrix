@@ -765,7 +765,8 @@ degraded run is a wrong answer and must be visible. `seats[].model` is the vendo
 answered, so a provider-level substitution stays auditable after the fact, and `stages[].calls` is what
 makes a shape's cost contract checkable.
 
-`/matrix` with no arguments — or with exactly one that names a tab (`aliases`, `fusions`, `routes`) —
+`/matrix` with no arguments — or with exactly one that names a tab (`aliases`, `fusions`, `routes`,
+`personas`) —
 opens the interface as a mounted component (`scripts/tui-panel.mjs`) and runs nothing. Otherwise the
 first whitespace-delimited token is a fusion id when it matches a key in `fusions`, and when it does
 not, the whole argument string is the prompt and `defaultFusion` is used. Unknown id →
