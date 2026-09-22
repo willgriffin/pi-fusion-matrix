@@ -229,6 +229,32 @@ test("esc is back: it closes a modal, never the matrix", async (t) => {
   panel.dispose();
 });
 
+test("n asks for the route's name — typing is visible, enter stages it, esc backs out", async (t) => {
+  const { panel, calls, layerFile } = await mountPanel(t, "aliases");
+  const found = findRow(panel, (providers) => providers.length > 0);
+  assert.ok(found, "the config carries a parent alias to add a route to");
+  panel.handleInput("n"); // from a parent row: the ask happens there too, and an addition lands at the end of the list
+  assert.ok(panel.state.input, "n asks for the route's name");
+  assert.ok(shows(panel.render(100), "add route"), "and the ask is on screen — the reader sees something happen");
+  panel.handleInput("za"); // keys arrive as chunks: a multi-key chunk — a paste — appends whole
+  panel.handleInput("i"); // …and a single key appends its one character
+  assert.ok(shows(panel.render(100), "zai"), "the typed name is visible in the frame as it is typed");
+  panel.handleInput(ESC);
+  assert.equal(panel.state.input, null, "esc backs out of the ask");
+  assert.equal(calls.done, 0, "…and the matrix lives");
+  panel.handleInput("n");
+  panel.handleInput("zai");
+  panel.handleInput("\r");
+  assert.ok(panel.state.pending, "enter turns the typed name into a proposal");
+  assert.equal(panel.state.pending.listOf, found.row.alias, "…on the alias the cursor sits on");
+  panel.handleInput("s");
+  await until(() => panel.state.pending === null, "the proposal to be spent");
+  const written = JSON.parse(fs.readFileSync(layerFile, "utf8"));
+  const providers = written.aliases?.[found.row.alias]?.providers ?? [];
+  assert.deepEqual(providers, [...found.providers, "zai"], "the typed name is the alias's last route on disk");
+  panel.dispose();
+});
+
 test("the rain moves on a clock: renders apart in time differ with nothing driving them", async (t) => {
   const { panel } = await mountPanel(t);
   panel.render(80); // settle the field's dimensions

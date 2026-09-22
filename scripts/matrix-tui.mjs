@@ -15,7 +15,7 @@
  *   node scripts/matrix-tui.mjs --no-rain --no-color # quiet, and readable on a mono terminal
  *
  * Editing is deliberate and two-step. `⏎` expands an alias into the routes it walks, where `K`/`J`
- * reorder them, `n` adds one and `d` drops one; `e` re-points a seat on the routes tab. Each change is
+ * reorder them, `n` has you type a name to add one and `d` drops one; `e` re-points a seat on the routes tab. Each change is
  * a *proposal*: the status bar shows it, the layer it would be written to, *and whether the config
  * still validates*; `s` writes it, `esc` goes back (discarding a proposal, then leaving a route, then
  * collapsing an alias) and only `q` quits. A change that would not load is refused with the loader's
@@ -94,6 +94,7 @@ export function buildState({
     storeTotals,
     pending: null,
     picker: null,
+    input: null,
     help: false,
     rain: true,
     color: true,
@@ -128,7 +129,7 @@ export const selected = (state) => state.rows[state.tab][state.cursors[state.tab
 
 /** The hints `e` answers with where it proposes nothing itself — the aliases list has its own keys. */
 const EDIT_HINT = "enter expands · K/J move · n add · d drop · s saves · esc discards";
-const LIST_KEYS = "K/J move · n add · d drop need a route row — ⏎ expands an alias into its routes";
+const LIST_KEYS = "K/J move · d drop need a route row — ⏎ expands an alias into its routes";
 const READ_ONLY = "the fusions tab is read-only for now";
 
 /**
@@ -172,6 +173,33 @@ export function applyKey(state, key) {
     else next.message = proposal.errors?.length ? "" : "proposed — s saves, esc discards";
     refresh();
   };
+
+  // The typing surface, asked first while it is open: a name is going in, so every printable key is
+  // text — `q` types a q rather than quitting — and only these named keys mean anything else.
+  if (state.input) {
+    const input = state.input;
+    if (key === "backspace") next.input = { ...input, value: input.value.slice(0, -1) };
+    else if (key === "return" || key === "enter") {
+      const name = input.value.trim();
+      if (!name) next.message = "a route needs a name";
+      else {
+        next.input = null;
+        accept(input.pending(name));
+      }
+    } else if (key === "escape") next.input = null;
+    else if (key === "ctrl-c") return { state: next, effect: "quit" };
+    else if (key === "tab" || key === "shift-tab" || key === "up" || key === "down" || key === "left" || key === "right") {
+      // The row-walking keys stand still while a name is being typed.
+    } else {
+      // Anything else is typed text — a paste arrives as one multi-character key and appends whole.
+      const typed = key.replace(/\p{Cc}/gu, "");
+      if (typed) next.input = { ...input, value: input.value + typed };
+    }
+    return { state: next, effect: "none" };
+  }
+
+  // And ctrl-c quits from outside the typing surface too — the safety valve in every modal.
+  if (key === "ctrl-c") return { state: next, effect: "quit" };
 
   if (state.picker) {
     if (key === "escape" || key === "q") return { state: { ...next, picker: null }, effect: "none" };
@@ -235,15 +263,8 @@ export function applyKey(state, key) {
     if (row?.kind !== "route") next.message = LIST_KEYS;
     else accept(proposeRouteDrop({ state, row }));
   } else if (key === "n") {
-    if (row?.kind !== "route") next.message = LIST_KEYS;
-    else {
-      const display = displayConfig(state);
-      const own = new Set((display.aliases?.[row.parent]?.providers ?? []).map(refName));
-      const every = new Set(Object.values(display.aliases ?? {}).flatMap((spec) => (spec.providers ?? []).map(refName)));
-      const options = [...every].filter((id) => !own.has(id)).sort();
-      if (options.length === 0) next.message = `no other alias offers a route ${row.parent} could try`;
-      else next.picker = { title: `${row.parent}: add route`, options, cursor: 0, pending: (ref) => proposeRouteAdd({ state, row, ref }) };
-    }
+    if (tab !== "aliases" || !row) next.message = LIST_KEYS;
+    else next.input = { title: `${listOwner(row)}: add route`, value: "", pending: (name) => proposeRouteAdd({ state, row, ref: name }) };
   } else if (key === "e") {
     // Only the aliases tab answers with a hint instead of a proposal: its list has its own keys.
     if (tab === "aliases") next.message = EDIT_HINT;
@@ -266,7 +287,8 @@ export function applyKey(state, key) {
 export function keyName(chunk) {
   if (chunk === "\t") return "tab";
   if (chunk === "\r" || chunk === "\n") return "return";
-  if (chunk === "\u0003") return "q";
+  if (chunk === "\u007f" || chunk === "\b") return "backspace";
+  if (chunk === "\u0003") return "ctrl-c";
   if (chunk === "\u001b") return "escape";
   if (chunk.startsWith("\u001b[")) {
     const code = chunk.slice(2);
@@ -543,6 +565,23 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
     }
   }
 
+  // The name being typed, over the same centre the picker uses: the value with its caret, and the
+  // keys that finish or abandon it.
+  if (state.input) {
+    const line = `${state.input.value}▌`;
+    const hint = "type the route's provider id · enter adds · esc discards";
+    const boxWidth = Math.min(width - 6, Math.max(24, line.length + 4, hint.length + 4));
+    const boxHeight = 4;
+    const top = Math.max(2, Math.floor((height - boxHeight) / 2));
+    const inner = drawPanel(
+      grid,
+      { row: top, col: Math.floor((width - boxWidth) / 2), width: boxWidth, height: boxHeight, title: state.input.title },
+      palette,
+    );
+    put(grid, inner.row, inner.col, truncate(line, inner.width), palette.ink);
+    put(grid, inner.row + 1, inner.col, truncate(hint, inner.width), palette.dim);
+  }
+
   return grid;
 }
 
@@ -746,6 +785,7 @@ export const adopt = (current, reloaded) => {
     expanded: current.expanded ?? {},
     help: current.help,
     picker: null,
+    input: null,
     rain: current.rain,
     color: current.color,
   };

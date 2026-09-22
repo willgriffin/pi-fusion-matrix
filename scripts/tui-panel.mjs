@@ -136,7 +136,7 @@ export class MatrixPanel {
     if (this.closed) return;
     // No `app.interrupt` shortcut to the exit: the host binds it to Esc, and Esc is *back* — it
     // closes the modal the reader is in (see `applyKey`) and never the matrix. `q` (and Ctrl-C,
-    // which `keyName` reads as `q`) is the way out.
+    // which `keyName` names `ctrl-c`) is the way out.
     if (!this.state) return;
     const { state, effect } = applyKey(this.state, keyName(data));
     this.state = state;
