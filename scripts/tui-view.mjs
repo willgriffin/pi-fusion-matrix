@@ -42,9 +42,9 @@ export function paletteFor({ color = true } = {}) {
     };
   }
   return {
-    head: fg(205, 255, 205),
-    body: fg(0, 255, 120),
-    tail: fg(0, 120, 55),
+    head: fg(140, 235, 150),
+    body: fg(0, 150, 70),
+    tail: fg(0, 70, 32),
     ink: fg(180, 255, 190),
     dim: fg(110, 165, 115),
     box: fg(0, 190, 80),

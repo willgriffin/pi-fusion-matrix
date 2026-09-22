@@ -48,7 +48,10 @@ function drop(rng, height, { start = false } = {}) {
   };
 }
 
-/** A field of `width` columns, each running a drop with probability `density`. */
+/**
+ * A field of `width` columns, of which a `density` share run drops from the start. A still column
+ * joins the rain now and then; a column that rains never stops.
+ */
 export function createRain({ width, height, seed = 1, density = 0.5 } = {}) {
   const rng = makeRng(seed);
   const columns = [];
@@ -73,7 +76,10 @@ export function stepRain(field, { mutate = 0.08 } = {}) {
     }
     d.head += d.speed;
     if (d.head - d.length > field.height) {
-      field.columns[x] = rng() < field.density ? drop(rng, field.height) : null;
+      // A raining column keeps raining: the drop that left is respawned above it. The coin flip
+      // that sometimes retired a column emptied the whole field within a minute — the rain
+      // scrolled once and then went quiet, which is not rain.
+      field.columns[x] = drop(rng, field.height);
       continue;
     }
     // A glyph mutates with the given probability per tick: read once per column, so a fast terminal

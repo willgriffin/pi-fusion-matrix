@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { MatrixPanel, styledLine } from "../scripts/tui-panel.mjs";
+import { createRain } from "../scripts/tui-rain.mjs";
 
 const ESC = String.fromCharCode(27);
 /** SGR sequences carry style and zero width. Stripped by scan rather than regex: the repo guard bans
@@ -100,7 +101,10 @@ test("a render is width-safe, cursor-move-free, and names a missing store", asyn
     assert.ok(text.length <= 100, `line is width-safe (${text.length})`);
     assert.ok(!text.includes(ESC), "a component line carries style and nothing else — never a cursor move");
   }
-  assert.ok(shows(lines, "FUSION MATRIX"), `the header renders — row 0: ${JSON.stringify(visible(lines[0]))}`);
+  assert.ok(
+    visible(lines[0]).includes("FUSION") && visible(lines[0]).includes("MATRIX"),
+    `the header renders — row 0: ${JSON.stringify(visible(lines[0]))}`,
+  ); // rain may sit in the space between the words: it shows through every blank cell, by design
   assert.ok(
     shows(lines, "absent.db"),
     `a missing store is a named state, not an empty table — notes: ${JSON.stringify(lines.map(visible).filter((row) => row.includes("store")))}`,
@@ -113,7 +117,7 @@ test("keys move the reader and the toggles; unknown keys are inert", async (t) =
   const before = JSON.stringify([panel.state.tab, panel.state.cursors, panel.state.rain, panel.state.color]);
   panel.handleInput("\t");
   assert.equal(panel.state.tab, "fusions", "tab cycles forward");
-  assert.ok(shows(panel.render(100), "fusions —"), "the tab is visible in the frame");
+  assert.ok(shows(panel.render(100), "fusions*"), "the tab is visible in the frame");
   panel.handleInput("\u001b[Z");
   assert.equal(panel.state.tab, "aliases", "shift-tab cycles back");
   panel.handleInput("3");
@@ -186,4 +190,16 @@ test("a named tab opens there, and both close paths close exactly once", async (
   second.panel.handleInput("q");
   assert.equal(second.calls.done, 1, "q closes the panel once");
   second.panel.dispose();
+});
+
+test("the rain moves on a clock: renders apart in time differ with nothing driving them", async (t) => {
+  const { panel } = await mountPanel(t);
+  panel.render(80); // settle the field's dimensions
+  // Its own seeded field: the motion must be observable no matter when the check runs.
+  panel.rainField = createRain({ width: 80, height: panel.height, seed: 7, density: 0.8 });
+  panel.dispose(); // the repaint driver is gone — any motion now owes to time alone
+  const frame = () => panel.render(80).slice(1, -1).join("\n"); // header and clock are not the rain
+  const before = frame();
+  await new Promise((resolve) => setTimeout(resolve, 140));
+  assert.notEqual(frame(), before, "the field fell between two renders with no input and no timer");
 });

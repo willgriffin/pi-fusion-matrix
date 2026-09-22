@@ -241,6 +241,32 @@ test("a frame's grid, and the text put into it, are clipped to the grid", () => 
   assert.equal(money(0), "$0");
 });
 
+test("the rain keeps falling: a raining column never goes quiet", () => {
+  const field = createRain({ width: 30, height: 20, seed: 42, density: 0.5 });
+  const raining = field.columns.map(Boolean);
+  assert.ok(raining.some(Boolean), "the fixture rains somewhere");
+  for (let tick = 0; tick < 2000; tick += 1) stepRain(field);
+  const after = field.columns.map(Boolean);
+  assert.ok(
+    raining.every((rains, x) => !rains || after[x]),
+    "a column that rains keeps raining — the field must not empty out",
+  );
+  assert.ok(
+    [...cells(field).levels].some((level) => level > 0),
+    "and the field is still lit",
+  );
+});
+
+test("the trail fades, and the rain reads darker than the interface behind it", () => {
+  const colour = paletteFor({ color: true });
+  const lum = (style) => {
+    const m = style.match(/38;2;(\d+);(\d+);(\d+)/);
+    return m ? 0.2126 * Number(m[1]) + 0.7152 * Number(m[2]) + 0.0722 * Number(m[3]) : -1;
+  };
+  assert.ok(lum(colour.head) > lum(colour.body) && lum(colour.body) > lum(colour.tail), "head outshines body outshines tail");
+  assert.ok(lum(colour.body) < lum(colour.dim), "even the rain's body is darker than the dimmest interface ink");
+});
+
 test("the palette drops escapes without dropping the selection", () => {
   const colour = paletteFor({ color: true });
   assert.ok(colour.head.includes("\u001b[38;2;"), "a coloured palette paints truecolour");

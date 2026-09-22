@@ -46,7 +46,7 @@ export const TAB_NAMES = ["aliases", "fusions", "routes"];
  * host key chunks, `dispose()` stops the rain clock (twice if it has to be).
  */
 export class MatrixPanel {
-  constructor({ tui, keybindings, done, dbPath = DEFAULT_DB, cwd = process.cwd(), layerFile, tab } = {}) {
+  constructor({ tui, keybindings, done, ctx = null, dbPath = DEFAULT_DB, cwd = process.cwd(), layerFile, tab } = {}) {
     this.tui = tui;
     this.keybindings = keybindings;
     this.done = done;
@@ -62,12 +62,16 @@ export class MatrixPanel {
     // A tab named by the caller is an opening position, not a leash: applied once on the first load,
     // then the reader moves freely.
     this.tab = TAB_NAMES.includes(tab) ? tab : undefined;
-    // The rain is the only reason to repaint on a clock. A raw timer is safe here because it cannot
-    // throw out of the callback and it is cleared on dispose, twice if it has to be.
-    this.timer = setInterval(() => {
+    // The clock's only job is to ask for repaints — through the host's own managed interval when it
+    // offers one (it isolates the callback and clears it on shutdown). The *falling* is time-based
+    // inside `render`, so the motion is right at any repaint cadence: an animation stepped by
+    // whatever happens to repaint reads as "one step per keypress", which is what it read as.
+    this.lastStep = Date.now();
+    const schedule = ctx?.setInterval ?? setInterval;
+    this.unschedule = ctx ? (handle) => ctx.clearTimer(handle) : (handle) => clearInterval(handle);
+    this.timer = schedule(() => {
       if (this.closed) return;
       try {
-        if (this.state?.rain && this.rainField) stepRain(this.rainField);
         this.tui.invalidate();
       } catch {
         /* a missed frame is not a torn-down session */
@@ -95,6 +99,15 @@ export class MatrixPanel {
       this.rainField = this.rainField
         ? resizeRain(this.rainField, { width, height })
         : createRain({ width, height, seed: Date.now() % 100000, density: 0.5 });
+    }
+    // Time-based falling: however often anyone repaints, the field advances by the wall clock it
+    // owes — bounded, so a long tab-out cannot fast-forward the rain across the screen.
+    const now = Date.now();
+    if (this.lastStep === undefined) this.lastStep = now;
+    const steps = Math.min(4, Math.floor((now - this.lastStep) / 50));
+    if (steps > 0) {
+      this.lastStep += steps * 50;
+      if (this.state?.rain && this.rainField) for (let i = 0; i < steps; i += 1) stepRain(this.rainField);
     }
     if (!this.state) return ["  loading the matrix…"];
     this.palette = paletteFor({ color: this.state.color });
@@ -160,6 +173,6 @@ export class MatrixPanel {
   dispose() {
     if (this.closed) return;
     this.closed = true;
-    clearInterval(this.timer);
+    this.unschedule(this.timer);
   }
 }

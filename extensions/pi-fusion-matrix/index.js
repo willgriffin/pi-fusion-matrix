@@ -194,7 +194,7 @@ export default async function (pi) {
           return;
         }
         await ctx.ui.custom(
-          (tui, _theme, keybindings, done) => new MatrixPanel({ tui, keybindings, done, cwd: ctx.cwd, tab: text || undefined }),
+          (tui, _theme, keybindings, done) => new MatrixPanel({ tui, keybindings, done, ctx, cwd: ctx.cwd, tab: text || undefined }),
           { overlay: true },
         );
         return;
