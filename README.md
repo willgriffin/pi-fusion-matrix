@@ -133,7 +133,7 @@ A fusion is reachable three ways:
 |---|---|
 | model id | `--model fusion-matrix/<id>` or `/model` — one registered model per fusion |
 | tool | the `matrix` tool (fusion + prompt), for an agent that should deliberate mid-task |
-| command | `/matrix <id> <prompt>`, with `/matrix` alone using `defaultFusion` |
+| command | `/matrix <id> <prompt>`, with a no-id `/matrix <prompt>` using `defaultFusion`; bare `/matrix` opens the interface |
 
 `pi --list-models fusion` lists all eight, and `/matrix-info` prints the resolvable aliases with
 their routes, the modes, the fusions with their rosters and their execute faces, and the config layers
@@ -762,11 +762,15 @@ fusion or this repository:
 ```
 
 Top-level knobs: `providerId` (default `fusion-matrix`), `providerName`, `defaultFusion` for the tool
-and the bare `/matrix`.
+and a no-id `/matrix <prompt>`.
 
 ## Commands, the tool, and the doctor
 
-- `/matrix <id> <prompt>` — run a named fusion; `/matrix` alone uses `defaultFusion`.
+- `/matrix` — open the interface (the aliases / fusions / routes tabs over the metrics store, rain
+  included) as a mounted panel: the harness keeps its terminal, which is why it is a component and not
+  the standalone driver run underneath a full-screen host. `/matrix aliases|fusions|routes` opens on
+  that tab.
+- `/matrix <id> <prompt>` — run a named fusion; a `/matrix <prompt>` with no id uses `defaultFusion`.
 - `/matrix-info` — resolvable aliases with their routes, modes, fusions with rosters and execute faces, backends, layers.
 - `/matrix-label <work-item> <landed|review|findings|ci-red|blocked|abandoned> [evidence]` — record what this
   session's runs were for and how they ended. Append-only, latest wins; the report joins the label to the
@@ -818,7 +822,9 @@ candidate alias, or an alias's route order — and the status bar shows it, the 
 to, and whether the config still validates; `s` writes it and `esc` discards it. The rain is a real
 field (`scripts/tui-rain.mjs`, seeded and stepped by frame), drawn under the panels, and `a` turns it
 off; `c` drops the colour entirely, and `NO_COLOR` does the same on start. Every unit of the interface
-is pure and tested; only the driver needs a terminal.
+is pure and tested; only the driver needs a terminal. In a session, `/matrix` mounts that same
+interface as a panel (`/matrix aliases|fusions|routes` opens on a tab), so the interface opens inside
+a full-screen host without the standalone driver ever competing with it for the terminal.
 
 ## Verifying the package itself
 

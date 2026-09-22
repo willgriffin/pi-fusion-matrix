@@ -736,7 +736,7 @@ pi.registerTool({
   execute: async (_toolCallId, params) => { /* content: synthesis text,
     details: { fusion, models, substitutions, slotErrors, panelResponses, judgeAnalysis, usage } */ },
 });
-pi.registerCommand("matrix", { description: "Run a named fusion: /matrix <id> <prompt>", handler: async (args, ctx) => {} });
+pi.registerCommand("matrix", { description: "Launch the interface with /matrix, or run a named fusion: /matrix <id> <prompt>", handler: async (args, ctx) => {} });
 pi.registerCommand("matrix-info", { description: "List modes, fusions, seats, and provider routes", handler: async (_args, ctx) => {} });
 pi.registerCommand("matrix-doctor", { description: "Validate the config, check connectivity, report drift", handler: async (args, ctx) => {} });
 ```
@@ -765,8 +765,10 @@ degraded run is a wrong answer and must be visible. `seats[].model` is the vendo
 answered, so a provider-level substitution stays auditable after the fact, and `stages[].calls` is what
 makes a shape's cost contract checkable.
 
-`/matrix` parses the first whitespace-delimited token as a fusion id when it matches a key in
-`fusions`; otherwise the whole argument string is the prompt and `defaultFusion` is used. Unknown id →
+`/matrix` with no arguments — or with exactly one that names a tab (`aliases`, `fusions`, `routes`) —
+opens the interface as a mounted component (`scripts/tui-panel.mjs`) and runs nothing. Otherwise the
+first whitespace-delimited token is a fusion id when it matches a key in `fusions`, and when it does
+not, the whole argument string is the prompt and `defaultFusion` is used. Unknown id →
 `ctx.ui.notify('unknown fusion "x"; known: cheap, quick, ...', "error")` and no run.
 A decision entry reports as before; a `gate` entry runs a command and records its exit status.
 
