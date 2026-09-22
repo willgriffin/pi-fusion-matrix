@@ -229,21 +229,28 @@ test("esc is back: it closes a modal, never the matrix", async (t) => {
   panel.dispose();
 });
 
-test("n asks for the route's name — submitting creates it and it shows up", async (t) => {
+test("n adds a sibling at the cursor's level — an alias at alias level, a route at route level", async (t) => {
   const { panel, calls, layerFile } = await mountPanel(t, "aliases");
   const found = findRow(panel, (providers) => providers.length > 0);
-  assert.ok(found, "the config carries a parent alias to add a route to");
-  panel.handleInput("n"); // from a parent row: the ask happens there too, and an addition lands at the end of the list
-  assert.ok(panel.state.input, "n asks for the route's name");
-  assert.ok(shows(panel.render(100), "add route"), "and the ask is on screen — the reader sees something happen");
+  assert.ok(found, "the config carries a parent alias row to sit the cursor on");
+  // Alias level: the sibling is a whole new alias, so `n` runs a three-ask chain — name, model, first route.
+  panel.handleInput("n");
+  assert.ok(panel.state.input, "n on an alias row starts the chain");
+  assert.ok(shows(panel.render(100), "new alias"), "and the ask is on screen — the reader sees something happen");
   panel.handleInput("za"); // keys arrive as chunks: a multi-key chunk — a paste — appends whole
-  panel.handleInput("i"); // …and a single key appends its one character
-  assert.ok(shows(panel.render(100), "zai"), "the typed name is visible in the frame as it is typed");
+  panel.handleInput("x"); // …and a single key appends its one character
+  assert.ok(shows(panel.render(100), "zax"), "the typed name is visible in the frame as it is typed");
+  panel.handleInput("\r"); // the name is answered; the model is asked
+  assert.ok(shows(panel.render(100), "zax: model"), "enter continues to the model ask");
+  panel.handleInput(ESC); // esc in a chain is one step back, not out of it
+  assert.ok(panel.state.input, "esc at the model ask steps back — the chain is not lost");
+  assert.ok(shows(panel.render(100), "new alias"), "the name ask is the one on screen again");
+  assert.ok(shows(panel.render(100), "zax"), "…and the typed name it kept is still in the frame");
   panel.handleInput(ESC);
-  assert.equal(panel.state.input, null, "esc backs out of the ask");
+  assert.equal(panel.state.input, null, "esc at the name ask closes the chain — there is nowhere back");
   assert.equal(calls.done, 0, "…and the matrix lives");
   panel.handleInput("n");
-  panel.handleInput("zai");
+  panel.handleInput("zax");
   const sequence = String.fromCharCode(27) + "[27~"; // the reader's esc arrives as an escape-sequence chunk, not a name
   panel.handleInput(sequence);
   assert.equal(panel.state.input, null, "an escape sequence backs out too — it is never text to type into the field");
@@ -251,14 +258,36 @@ test("n asks for the route's name — submitting creates it and it shows up", as
   const tail = "[27~";
   assert.ok(!JSON.stringify(panel.state).includes(tail), "the sequence's tail is nowhere in the state");
   assert.ok(!panel.render(100).some((line) => line.includes(tail)), "…nor anywhere in the frame");
+  // The chain walked to its end: the third enter is create *and* save both — no separate "s" to land it.
   panel.handleInput("n");
-  panel.handleInput("zai");
-  panel.handleInput("\r"); // submitting is create and save both — no separate "s" to land it
+  panel.handleInput("zax");
+  panel.handleInput("\r");
+  panel.handleInput("zmx");
+  panel.handleInput("\r");
+  assert.ok(shows(panel.render(100), "zax: first route"), "enter continues to the first-route ask");
+  panel.handleInput("zrp");
+  panel.handleInput("\r");
   await until(() => panel.state.pending === null, "the submit to be written through");
   const written = JSON.parse(fs.readFileSync(layerFile, "utf8"));
-  const providers = written.aliases?.[found.row.alias]?.providers ?? [];
-  assert.deepEqual(providers, [...found.providers, "zai"], "the typed name is the alias's last route on disk");
-  assert.ok(shows(panel.render(100), "zai"), "…and it is on screen among the row's expanded children");
+  assert.deepEqual(written.aliases?.zax, { model: "zmx", providers: ["zrp"] }, "the new alias is on disk with its model and first route");
+  assert.ok(shows(panel.render(100), "zax"), "…and it shows up on screen — the new alias row is in the table");
+  // Route level: the sibling is one more route of the parent, inserted after the cursor's own.
+  const added = findRow(panel, (providers) => providers.length >= 2);
+  assert.ok(added, "the config carries an alias with two routes to insert between");
+  panel.handleInput("\r"); // expand it
+  panel.handleInput("j");
+  const route = panel.state.rows.aliases[panel.state.cursors.aliases];
+  assert.equal(route.parent, added.row.alias, "the cursor is on the alias's first route");
+  panel.handleInput("n");
+  assert.ok(panel.state.input, "n on a route row is one ask for the route's name");
+  assert.ok(shows(panel.render(100), `${added.row.alias}: add route`), "and the ask names the list it adds to");
+  panel.handleInput("zro");
+  panel.handleInput("\r"); // one ask, one enter: the route is added and saved
+  await until(() => panel.state.pending === null, "the add to be written through");
+  const withRoute = JSON.parse(fs.readFileSync(layerFile, "utf8"));
+  const providers = withRoute.aliases?.[added.row.alias]?.providers ?? [];
+  const afterCursor = [added.providers[0], "zro", ...added.providers.slice(1)];
+  assert.deepEqual(providers, afterCursor, "the new route lands after the cursor's route on disk");
   panel.dispose();
 });
 

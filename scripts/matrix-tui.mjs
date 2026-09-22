@@ -16,12 +16,14 @@
  *
  * Editing is deliberate. `⏎` expands an alias into the routes it walks, where `K`/`J` reorder them and
  * `d` drops one — each staged as a two-step *proposal*: the status bar shows it, the layer it would be
- * written to, *and whether the config still validates*; `s` writes it. `n` has you type a name to add
- * one and submits it straight through that same validated write — the prompt's submit creates and
- * saves, no second `s` — while `e` re-points a seat on the routes tab. `esc` goes back (discarding a
- * proposal, then leaving a route, then collapsing an alias) and only `q` quits. A change that would
- * not load is refused with the loader's own message before the file is touched — the same rule the
- * loader enforces, not a second opinion about it.
+ * written to, *and whether the config still validates*; `s` writes it. `n` adds a *sibling* to whatever
+ * the cursor sits on — at alias level a whole new alias (its name, the vendor model it names, and the
+ * first route it walks, one prompt each), at route level one more route after the cursor's — and the
+ * last answer submits it straight through that same validated write: the prompt's submit creates and
+ * saves, no second `s`. `e` re-points a seat on the routes tab. `esc` goes back (a prompt step, then
+ * discarding a proposal, then leaving a route, then collapsing an alias) and only `q` quits. A change
+ * that would not load is refused with the loader's own message before the file is touched — the same
+ * rule the loader enforces, not a second opinion about it.
  *
  * The driver is the only part that needs a terminal: the rain (`tui-rain.mjs`), the layout, the
  * tables and the key handling (`tui-view.mjs`) are pure, so a test drives the interface without a TTY
@@ -140,8 +142,10 @@ const READ_ONLY = "the fusions tab is read-only for now";
  * `1`/`2`/`3` are the only keys that switch tabs; `tab`/`shift-tab`, the arrows and `h`/`l` walk the
  * rows *inside* one — a tree on the aliases tab, where `enter` expands an alias into its routes and
  * the arrows move between a route and its parent. `K`/`J`/`d` reshape the route list under the cursor
- * as staged proposals `s` writes while `n`'s prompt saves what it adds as it submits, `esc` is back
- * (a pending change first, then a route, then an expansion), and only `q` ever quits.
+ * as staged proposals `s` writes, while `n` adds a sibling — a new alias at alias level (its name, its
+ * model and its first route, one prompt each), a route after the cursor's at route level — its prompt
+ * saving what it adds as it submits. `esc` is back (a prompt step first, then a pending change, then a
+ * route, then an expansion), and only `q` ever quits.
  */
 export function applyKey(state, key) {
   const next = { ...state, cursors: { ...state.cursors }, message: state.message };
@@ -175,22 +179,25 @@ export function applyKey(state, key) {
     refresh();
   };
 
-  // The typing surface, asked first while it is open: a name is going in, so every printable key is
-  // text — `q` types a q rather than quitting — and only these named keys mean anything else.
+  // The typing surface, asked first while it is open: an answer is going in, so every printable key
+  // is text — `q` types a q rather than quitting — and only these named keys mean anything else. A
+  // step's `submit` answers with one of three outcomes: an error names the refusal and keeps the
+  // prompt over its typing, an input is the chain's next step, a proposal is the change itself.
   if (state.input) {
     const input = state.input;
     if (key === "backspace") next.input = { ...input, value: input.value.slice(0, -1) };
     else if (key === "return" || key === "enter") {
-      const name = input.value.trim();
-      if (!name) next.message = "a route needs a name";
-      else {
+      const out = input.submit(input.value.trim());
+      if (out.error !== undefined) next.message = out.error;
+      else if (out.input !== undefined) next.input = out.input;
+      else if (out.proposal !== undefined) {
         next.input = null;
-        accept(input.pending(name));
+        accept(out.proposal);
         // Submitting the prompt is create *and* save: the staged proposal goes through the same
-        // loader-validated write `s` runs, so the name just typed lands without a second key.
+        // loader-validated write `s` runs, so what was just typed lands without a second key.
         return { state: next, effect: "save" };
       }
-    } else if (key === "escape") next.input = null;
+    } else if (key === "escape") next.input = input.back ?? null;
     else if (key === "ctrl-c") return { state: next, effect: "quit" };
     else if (key === "tab" || key === "shift-tab" || key === "up" || key === "down" || key === "left" || key === "right") {
       // The row-walking keys stand still while a name is being typed.
@@ -268,11 +275,48 @@ export function applyKey(state, key) {
     else accept(proposeRouteDrop({ state, row }));
   } else if (key === "n") {
     if (tab !== "aliases" || !row) next.message = LIST_KEYS;
-    else {
-      // The list being named is on screen while the name is typed: the row it belongs to — a route's
-      // parent, or the parent itself — expands, and its children follow it so the cursor stays put.
-      setExpanded(listOwner(row), true);
-      next.input = { title: `${listOwner(row)}: add route`, value: "", pending: (name) => proposeRouteAdd({ state, row, ref: name }) };
+    else if (row.kind === "route") {
+      // A route's sibling is one more route of its parent: the single prompt, inserting after the
+      // cursor's route, over the list that stays on screen while the name is typed.
+      setExpanded(row.parent, true);
+      next.input = {
+        title: `${row.parent}: add route`,
+        value: "",
+        hint: "type the route's provider id · enter adds · esc discards",
+        back: null,
+        submit: (ref) => (ref ? { proposal: proposeRouteAdd({ state, row, ref }) } : { error: "a route needs a name" }),
+      };
+    } else {
+      // An alias's sibling is a whole alias — a name, the vendor model it names, and the first route
+      // it walks — so the ask is a chain: each answer opens the next step over the one before it,
+      // `esc` steps back to it with its typing, and nothing is staged until the last answer saves.
+      const nameStep = {
+        title: "new alias",
+        value: "",
+        hint: "type the alias name · enter continues · esc back",
+        back: null,
+        submit: (name) => {
+          if (!name) return { error: "an alias needs a name" };
+          if (Object.keys(displayConfig(state).aliases ?? {}).includes(name)) return { error: `${name} already exists` };
+          return { input: modelStep(name) };
+        },
+      };
+      const modelStep = (name) => ({
+        title: `${name}: model`,
+        value: "",
+        hint: "type the vendor model id · enter continues · esc back",
+        // Back is the step before, as it was left — its typing comes back with it.
+        back: { ...nameStep, value: name },
+        submit: (model) => (model ? { input: routeStep(name, model) } : { error: "a model id is required" }),
+      });
+      const routeStep = (name, model) => ({
+        title: `${name}: first route`,
+        value: "",
+        hint: "type the route's provider id · enter adds · esc discards",
+        back: { ...modelStep(name), value: model },
+        submit: (ref) => (ref ? { proposal: proposeAliasCreate({ state, name, model, ref }) } : { error: "a route needs a name" }),
+      });
+      next.input = nameStep;
     }
   } else if (key === "e") {
     // Only the aliases tab answers with a hint instead of a proposal: its list has its own keys.
@@ -437,6 +481,25 @@ export function proposeRouteAdd({ state, row, ref }) {
   };
 }
 
+/**
+ * The change creating an alias proposes: a new alias naming `model` and walking `ref` first — the end
+ * of the new-alias prompt chain (name, model, first route). It builds over the same baseline the
+ * route-list changes do, so it accumulates into a pending change for the same name rather than
+ * starting again from the layer on disk, and the alias it names replaces whatever entry was there.
+ */
+export function proposeAliasCreate({ state, name, model, ref }) {
+  const patch = routeBaseline(state, name);
+  patch.aliases = patch.aliases ?? {};
+  patch.aliases[name] = { model, providers: [ref] };
+  return {
+    listOf: name,
+    layerFile: state.layerFile,
+    patch,
+    summary: `${name} → ${model} walking ${ref}`,
+    errors: validateAgainst(state, patch),
+  };
+}
+
 /** What the loader says about the config this patch would produce — the loader's own answer, not ours. */
 export function validateAgainst(state, patch) {
   try {
@@ -450,8 +513,8 @@ export function validateAgainst(state, patch) {
 
 /**
  * The interactive `e`: a proposal for the selected row, through a picker where one is needed. The
- * aliases tab never comes here — its route list is edited with `K`/`J`/`n`/`d` — and the fusions tab
- * has nothing to propose yet.
+ * aliases tab never comes here — its tree is edited with `K`/`J`/`n`/`d`, `n` naming a sibling — and
+ * the fusions tab has nothing to propose yet.
  */
 export function proposeFor(state) {
   const row = selected(state);
@@ -526,7 +589,7 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
   // two things a reader would otherwise never discover (`1`-`3`, and that `a` is a toggle at all).
   const rainState = state.rain ? "rain:ON" : "rain:OFF";
   const keys =
-    "1/2/3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same · K/J move route · n add route · " +
+    "1/2/3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same · K/J move route · n add sibling · " +
     `d drop route · e edit (routes) · s save · esc back/discard · R reingest · r reload · a ${rainState} · c colour · ? help · q quit`;
   const keysShort = `1-3 tabs · j/k rows · ⏎ open · K/J move · n add · d drop · a ${rainState} · ? help · q quit`;
   const hint = width > keys.length + 12 ? keys : keysShort;
@@ -539,12 +602,13 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
       "fusions — mode and face, then runs, failures, degraded seats, cascades, verify, findings, cost",
       "routes  — per fusion and seat: the ordered candidates from config, which alias answered, what refused",
       "keys — 1/2/3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same",
-      "       K/J move route · n add route · d drop route · e edit (routes) · s save · esc back/discard · R reingest",
+      "       K/J move route · n add sibling · d drop route · e edit (routes) · s save · esc back/discard · R reingest",
       "       r reload · a rain · c colour · q quit",
-      "e re-points a seat (routes tab); ⏎ expands an alias into the routes K/J, n and d reshape",
+      "e re-points a seat (routes tab); ⏎ expands an alias into the routes K/J and d reshape",
       "K/J/d stage a proposal: the bar shows it and whether it still validates, s writes it to the",
-      "layer named under it once the loader accepts it; n writes the name you type through that same",
-      "validated write the moment the prompt is submitted, and esc goes back and discards",
+      "layer named under it once the loader accepts it; n adds a sibling — at alias level a new alias",
+      "(its name, model and first route, one prompt each), at route level a route after the cursor's —",
+      "submitted through that same validated write, and esc goes back and discards",
       "$report is what providers priced (with the seats it covers), $est is their own rate card applied to",
       "unpriced seats, $list is the same tokens at list price — one basis per column, never folded together",
     ];
@@ -585,11 +649,11 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
     }
   }
 
-  // The name being typed, over the same centre the picker uses: the value with its caret, and the
-  // keys that finish or abandon it.
+  // The answer being typed, over the same centre the picker uses: the value with its caret, and the
+  // step's own second line — what it asks for, and the keys that continue or step back.
   if (state.input) {
     const line = `${state.input.value}▌`;
-    const hint = "type the route's provider id · enter adds · esc discards";
+    const hint = state.input.hint ?? "";
     const boxWidth = Math.min(width - 6, Math.max(24, line.length + 4, hint.length + 4));
     const boxHeight = 4;
     const top = Math.max(2, Math.floor((height - boxHeight) / 2));

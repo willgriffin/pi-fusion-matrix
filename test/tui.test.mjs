@@ -48,6 +48,7 @@ import {
   frameFor,
   keyName,
   paint,
+  proposeAliasCreate,
   proposeRouteAdd,
   proposeRouteDrop,
   proposeRouteMove,
@@ -208,8 +209,9 @@ const editState = () =>
   });
 
 /**
- * The editing world plus one alias that walks no providers at all: `n` names its first route with
- * no route row to insert after.
+ * The editing world plus one alias that walks no providers at all: it sits at the alias level with
+ * no route row under it, so the sibling `n` names there is another alias — and only `proposeRouteAdd`
+ * gives it its first route.
  */
 const soloConfig = { ...editConfig, aliases: { ...editConfig.aliases, solo: { model: "kimi-k3", providers: [] } } };
 
@@ -709,7 +711,7 @@ test("a terminal chunk becomes one key name", () => {
   assert.equal(applyKey(editState(), "ctrl-c").effect, "quit");
   const picker = { ...editState(), picker: { title: "t", options: ["a"], cursor: 0, pending: () => ({}) } };
   assert.equal(applyKey(picker, "ctrl-c").effect, "quit");
-  const typing = { ...editState(), input: { title: "t", value: "x", pending: () => ({}) } };
+  const typing = { ...editState(), input: { title: "t", value: "x", hint: "", back: null, submit: () => ({ error: "never reached" }) } };
   assert.equal(applyKey(typing, "ctrl-c").effect, "quit");
 });
 
@@ -856,8 +858,9 @@ test("K and J walk a route through its alias's list, and the presses add up to o
 });
 
 test("the route keys name themselves and do nothing when the cursor is not on a route", () => {
-  // `n` left this company: anywhere on the aliases tab it opens the name prompt (its own tests are
-  // below). K, J and d still need a route row — and name themselves when the cursor is not on one.
+  // `n` left this company: on the aliases tab it opens the prompt for a sibling at the cursor's own
+  // level (its own tests are below). K, J and d still need a route row — and name themselves when the
+  // cursor is not on one.
   for (const world of [expandedOn(editState(), "trio"), { ...editState(), tab: "routes" }]) {
     for (const key of ["K", "J", "d"]) {
       const result = applyKey(world, key);
@@ -910,56 +913,52 @@ test("d drops the cursor's route, and the loader refuses the alias it would empt
   assert.equal(emptied.message, "", "an invalid change leaves the status line to the verdict bar");
 });
 
-test("n asks for the route's name from any row of the aliases list", () => {
-  // The reader's report: `n` on an alias row answered with a shrug. Asking is what should happen —
-  // and asking is visible: the state carries the prompt, wherever on this tab the cursor sits.
-  const closed = applyKey(editState(), "n"); // kimi's parent, its route list shut — no route row in sight
+test("n names a sibling at the cursor's level: an alias on an alias row, a route on a route row", () => {
+  // The reader's report: `n` under an alias grew that alias's list. It names a *sibling* instead —
+  // at the alias level another alias, at the route level one more route of the row's parent.
+  const closed = applyKey(editState(), "n"); // kimi's parent — the alias level
   assert.equal(closed.effect, "none");
-  assert.ok(closed.state.input, "a parent row answers with the prompt, not a hint");
-  assert.equal(closed.state.input.title, "kimi: add route");
+  assert.ok(closed.state.input, "an alias row answers with the prompt, not a hint");
+  assert.equal(closed.state.input.title, "new alias");
   assert.equal(closed.state.input.value, "", "it starts empty");
+  assert.equal(closed.state.input.hint, "type the alias name · enter continues · esc back");
+  assert.equal(closed.state.input.back, null, "the first step has nowhere to go back to");
   assert.equal(closed.state.pending, null, "asking is not yet proposing");
 
+  // A route-less alias is still on the alias level: its sibling is another alias.
+  const solo = soloState();
+  const parent = solo.rows.aliases.find((row) => row.kind === "alias" && row.alias === "solo");
+  assert.equal(parent.childCount, 0, "the fixture stands: there is no route row at that level");
+  assert.equal(applyKey(cursorOn(solo, parent), "n").state.input.title, "new alias");
+
+  // On a route row `n` names one more route of the row's parent — the one prompt, insert-after.
   const open = expandedOn(editState(), "kimi");
   const onRoute = applyKey(cursorOn(open, routeRow(open, "kimi", "opencode-go")), "n");
   assert.equal(onRoute.state.input.title, "kimi: add route");
-
-  // An alias that walks no providers at all has no route row to sit after — adding the first route
-  // has to ask the same question.
-  const solo = soloState();
-  const parent = solo.rows.aliases.find((row) => row.kind === "alias" && row.alias === "solo");
-  assert.equal(parent.childCount, 0, "the fixture stands: there is no route to insert after");
-  assert.equal(applyKey(cursorOn(solo, parent), "n").state.input.title, "solo: add route");
+  assert.equal(onRoute.state.input.hint, "type the route's provider id · enter adds · esc discards");
+  assert.equal(onRoute.state.input.back, null, "a single-step prompt has nowhere to go back to");
+  assert.equal(onRoute.state.pending, null, "asking is not yet proposing");
 });
 
-test("n expands the row's list as it asks: the route being named is on screen", () => {
-  // The reader's report: the added entry never showed up — its list stayed shut while the name was
-  // asked for and after it landed. `n` opens the list it edits, so the row is in sight before,
-  // during and after the prompt, the cursor staying on the row `n` was pressed on.
+test("n adds a sibling, not a child: a new alias grows no rows, a route row keeps its list on screen", () => {
+  // The reader's report: the added entry never showed up — because it is not an entry of the row `n`
+  // was pressed on. On an alias row the result is a new ROW beside it, so nothing under the cursor
+  // changes while the chain runs.
   const closed = editState();
   const parent = closed.rows.aliases.find((row) => row.kind === "alias" && row.alias === "kimi");
   assert.equal(parent.expanded, false, "the fixture stands: the list is shut");
   const before = closed.rows.aliases.length;
 
   const asked = applyKey(cursorOn(closed, parent), "n").state;
-  assert.ok(asked.input, "the prompt opens over the visible list");
-  assert.equal(asked.expanded.kimi, true, "the list it will edit is open");
-  assert.equal(asked.rows.aliases.length, before + parent.childCount, "its routes are the rows the list grew by");
-  assert.deepEqual(
-    asked.rows.aliases.filter((row) => row.kind === "route" && row.parent === "kimi").map((row) => row.provider),
-    ["opencode-go", "kimi-code"],
-  );
+  assert.ok(asked.input, "the chain starts over the table as it is");
+  assert.equal(asked.input.title, "new alias");
+  assert.equal(asked.rows.aliases.length, before, "no rows grow — a new alias is a sibling row, when it lands");
+  assert.deepEqual(asked.expanded, closed.expanded, "and the cursor's row is not opened as a side effect");
   assert.equal(asked.cursors.aliases, closed.cursors.aliases, "the cursor stays on the row `n` was pressed on");
   assert.equal(asked.rows.aliases[asked.cursors.aliases].alias, "kimi", "which is still the parent");
 
-  const named = applyKey(applyKey(asked, "zai").state, "return").state;
-  assert.deepEqual(
-    named.rows.aliases.filter((row) => row.kind === "route" && row.parent === "kimi").map((row) => row.provider),
-    ["opencode-go", "kimi-code", "zai"],
-    "and what it names lands in the list that is still open",
-  );
-
-  // On a route row the list is already open — `n` asks its parent's question and leaves it open.
+  // On a route row the list is already open and stays on screen — and the named route is a sibling
+  // of the cursor's, landing right after it.
   const open = expandedOn(editState(), "kimi");
   const onRoute = applyKey(cursorOn(open, routeRow(open, "kimi", "opencode-go")), "n").state;
   assert.ok(onRoute.input);
@@ -967,8 +966,166 @@ test("n expands the row's list as it asks: the route being named is on screen", 
   assert.deepEqual(
     onRoute.rows.aliases.filter((row) => row.kind === "route" && row.parent === "kimi").map((row) => row.provider),
     ["opencode-go", "kimi-code"],
-    "and the routes stay on screen under it",
+    "the routes stay on screen under it",
   );
+  const named = applyKey(applyKey(onRoute, "zai").state, "return").state;
+  assert.deepEqual(
+    named.rows.aliases.filter((row) => row.kind === "route" && row.parent === "kimi").map((row) => row.provider),
+    ["opencode-go", "zai", "kimi-code"],
+    "and the named route lands after the cursor's",
+  );
+});
+
+test("the new-alias chain asks name, model and first route — and its last enter saves the alias", () => {
+  const step1 = applyKey(editState(), "n").state;
+  assert.equal(step1.input.title, "new alias");
+  assert.equal(step1.input.hint, "type the alias name · enter continues · esc back");
+  assert.equal(step1.input.value, "");
+  assert.equal(step1.input.back, null);
+
+  // A name moves the chain on: nothing staged, nothing saved, and the next question wears the name.
+  const named = applyKey(applyKey(step1, "nova").state, "return");
+  assert.equal(named.effect, "none", "the chain continues");
+  assert.equal(named.state.input.title, "nova: model");
+  assert.equal(named.state.input.hint, "type the vendor model id · enter continues · esc back");
+  assert.equal(named.state.input.value, "", "each step starts empty");
+  assert.ok(named.state.input.back, "the chain can step back");
+  assert.equal(named.state.pending, null, "still just asking");
+
+  const modelled = applyKey(applyKey(named.state, "kimi-k3").state, "return");
+  assert.equal(modelled.effect, "none", "the chain continues");
+  assert.equal(modelled.state.input.title, "nova: first route");
+  assert.equal(modelled.state.input.hint, "type the route's provider id · enter adds · esc discards");
+  assert.ok(modelled.state.input.back, "the chain can step back");
+  assert.equal(modelled.state.pending, null, "still just asking");
+
+  // The first route is the last question: enter proposes the whole alias and saves it — no `s`.
+  const done = applyKey(applyKey(modelled.state, "opencode-go").state, "return");
+  assert.equal(done.effect, "save", "submitting the chain is create and save both");
+  assert.equal(done.state.input, null, "the chain is done");
+  assert.equal(done.state.pending.listOf, "nova");
+  assert.deepEqual(done.state.pending.patch, { aliases: { nova: { model: "kimi-k3", providers: ["opencode-go"] } } });
+  assert.deepEqual(done.state.pending.errors, [], "the loader's verdict travels with the proposal");
+  assert.match(done.state.pending.summary, /nova → kimi-k3 walking opencode-go/);
+});
+
+test("escape steps back through the chain and out at its first step — never a quit", () => {
+  const walk = (...keys) => keys.reduce((world, key) => applyKey(world, key).state, editState());
+  const typed = applyKey(walk("n", "nova", "return"), "kimi-k3").state;
+  assert.equal(typed.input.value, "kimi-k3", "the fixture stands: there is typing to leave alone");
+
+  // Back is the name, what was typed for it still in the box.
+  const toName = applyKey(typed, "escape");
+  assert.equal(toName.effect, "none", "escape is back — never a way out");
+  assert.equal(toName.state.input.title, "new alias");
+  assert.equal(toName.state.input.value, "nova", "the typed name is intact");
+  assert.equal(toName.state.pending, null, "stepping back stages nothing");
+
+  // At the first step back is out of the chain entirely.
+  const out = applyKey(toName.state, "escape");
+  assert.equal(out.state.input, null, "the first step is the way out");
+  assert.equal(out.effect, "none");
+  assert.equal(out.state.pending, null);
+
+  // And the third step's escape is back to the model, its typing intact too.
+  const typedRef = applyKey(walk("n", "nova", "return", "kimi-k3", "return"), "zai").state;
+  const toModel = applyKey(typedRef, "escape");
+  assert.equal(toModel.effect, "none");
+  assert.equal(toModel.state.input.title, "nova: model");
+  assert.equal(toModel.state.input.value, "kimi-k3", "the typed model is intact");
+});
+
+test("each chain step refuses what it cannot take: the prompt stays open, the typing stays in it", () => {
+  const step1 = applyKey(editState(), "n").state;
+
+  // A blank name is not a name.
+  const blank = applyKey(step1, "return");
+  assert.equal(blank.effect, "none", "a blank name writes nothing");
+  assert.ok(blank.state.input, "the prompt stays open");
+  assert.equal(blank.state.input.title, "new alias");
+  assert.equal(blank.state.message, "an alias needs a name");
+  assert.equal(blank.state.pending, null, "a refusal stages nothing");
+
+  // Whitespace is not a name either, and what was typed stays to be fixed.
+  const spaces = [" ", " ", " "].reduce((world, key) => applyKey(world, key).state, step1);
+  assert.equal(spaces.input.value, "   ");
+  const refusedSpaces = applyKey(spaces, "return");
+  assert.equal(refusedSpaces.effect, "none");
+  assert.ok(refusedSpaces.state.input);
+  assert.equal(refusedSpaces.state.message, "an alias needs a name");
+  assert.equal(refusedSpaces.state.input.value, "   ", "and what was typed is still there to fix");
+  assert.equal(refusedSpaces.state.pending, null);
+
+  // A name that exists is never clobbered — and there is no patch staged to clobber it with.
+  const typed = applyKey(step1, "kimi").state;
+  const collide = applyKey(typed, "return");
+  assert.equal(collide.effect, "none");
+  assert.ok(collide.state.input, "the prompt stays open");
+  assert.equal(collide.state.message, "kimi already exists");
+  assert.equal(collide.state.input.value, "kimi", "the typing survives the refusal");
+  assert.equal(collide.state.pending, null, "the patch carries nothing");
+
+  // A model id is required.
+  const step2 = applyKey(applyKey(step1, "nova").state, "return").state;
+  const blankModel = applyKey(step2, "return");
+  assert.equal(blankModel.effect, "none");
+  assert.ok(blankModel.state.input);
+  assert.equal(blankModel.state.input.title, "nova: model");
+  assert.equal(blankModel.state.message, "a model id is required");
+  assert.equal(blankModel.state.input.value, "", "the typing is intact");
+  assert.equal(blankModel.state.pending, null);
+
+  // And the first route needs a name of its own.
+  const step3 = applyKey(applyKey(step2, "kimi-k3").state, "return").state;
+  const blankRef = applyKey(step3, "return");
+  assert.equal(blankRef.effect, "none");
+  assert.ok(blankRef.state.input);
+  assert.equal(blankRef.state.input.title, "nova: first route");
+  assert.equal(blankRef.state.message, "a route needs a name");
+  assert.equal(blankRef.state.input.value, "", "the typing is intact");
+  assert.equal(blankRef.state.pending, null);
+});
+
+test("proposeAliasCreate builds over the same-name pending, and starts clean over any other", () => {
+  const world = editState();
+  // The route proposers' own rule, alias-side: a pending for the same name in the same layer file is
+  // the baseline the new patch is drawn over — whatever else it staged travels with it.
+  const carried = {
+    listOf: "nova",
+    layerFile: world.layerFile,
+    patch: { aliases: { nova: { model: "kimi-k3", providers: ["a"] }, kept: { model: "kimi-k3", providers: ["b"] } } },
+    summary: "nova → kimi-k3 walking a",
+    errors: [],
+  };
+  const again = proposeAliasCreate({
+    state: { ...world, pending: carried },
+    name: "nova",
+    model: "muse-spark-1.3-contributor",
+    ref: "clo",
+  });
+  assert.equal(again.listOf, "nova");
+  assert.equal(again.layerFile, world.layerFile);
+  assert.deepEqual(again.patch.aliases.nova, { model: "muse-spark-1.3-contributor", providers: ["clo"] });
+  assert.deepEqual(again.patch.aliases.kept, { model: "kimi-k3", providers: ["b"] }, "the pending it builds over is kept");
+  assert.deepEqual(again.errors, [], "the loader accepts the accumulated patch");
+  assert.match(again.summary, /nova/);
+
+  // Any other pending is not this name's baseline: the patch is just the alias being made.
+  const clean = { aliases: { nova: { model: "kimi-k3", providers: ["clo"] } } };
+  const other = proposeAliasCreate({
+    state: { ...world, pending: { ...carried, listOf: "elsewhere" } },
+    name: "nova",
+    model: "kimi-k3",
+    ref: "clo",
+  });
+  assert.deepEqual(other.patch, clean, "another name's pending is not carried");
+  const moved = proposeAliasCreate({
+    state: { ...world, pending: { ...carried, layerFile: "/tmp/elsewhere/x.json" } },
+    name: "nova",
+    model: "kimi-k3",
+    ref: "clo",
+  });
+  assert.deepEqual(moved.patch, clean, "and neither is another layer's");
 });
 
 test("the name prompt takes text: letters one key at a time, a paste whole, backspace takes it back", () => {
@@ -1003,11 +1160,11 @@ test("the name prompt takes text: letters one key at a time, a paste whole, back
   assert.equal(applyKey(open, String.fromCharCode(1) + "z").state.input.value, "z");
 });
 
-test("entering a name creates and saves the route after the cursor's, or at the end of its alias's list", () => {
+test("entering a route's name creates and saves it after the cursor's route", () => {
   const open = expandedOn(editState(), "kimi");
   const type = (world, text) => applyKey(applyKey(world, "n").state, text).state;
 
-  // On a route row the name lands right after it — what the table shows is the proposal, and the
+  // The name lands right after the cursor's route — what the table shows is the proposal, and the
   // submit is the save: one Enter is create and write both, with no second `s` to ask for.
   const staged = applyKey(type(cursorOn(open, routeRow(open, "kimi", "opencode-go")), "zai"), "return");
   assert.equal(staged.effect, "save", "submitting the name asks for the write");
@@ -1021,21 +1178,6 @@ test("entering a name creates and saves the route after the cursor's, or at the 
     ["opencode-go", "zai", "kimi-code"],
   );
 
-  // On the parent row there is no route to sit after, so the name goes to the end of the list.
-  const appended = applyKey(type(open, "zai"), "return");
-  assert.equal(appended.effect, "save", "…and the submit saves it there");
-  assert.equal(appended.state.pending.listOf, "kimi");
-  assert.deepEqual(appended.state.pending.patch.aliases.kimi.providers, ["opencode-go", "kimi-code", "zai"]);
-  assert.deepEqual(appended.state.pending.errors, []);
-
-  // An alias walking no providers gets its first route the same way.
-  const solo = soloState();
-  const parent = solo.rows.aliases.find((row) => row.kind === "alias" && row.alias === "solo");
-  const first = applyKey(type(cursorOn(solo, parent), "zai"), "return");
-  assert.equal(first.effect, "save");
-  assert.deepEqual(first.state.pending.patch.aliases.solo.providers, ["zai"], "the first route is the whole list");
-  assert.deepEqual(first.state.pending.errors, []);
-
   // Two names typed in a row against one alias add up to one pending change holding the net list —
   // and each submit is a save over the one pending it accumulates into.
   const net = applyKey(type(cursorOn(staged.state, routeRow(staged.state, "kimi", "zai")), "cleo"), "return");
@@ -1045,8 +1187,30 @@ test("entering a name creates and saves the route after the cursor's, or at the 
   assert.deepEqual(net.state.pending.errors, []);
 });
 
+test("proposeRouteAdd puts the route after the cursor's, and at the end for a parent or a bare alias", () => {
+  const open = expandedOn(editState(), "kimi");
+
+  // A parent row has no route to sit after, so its new route goes to the end of its list.
+  const parent = open.rows.aliases.find((row) => row.kind === "alias" && row.alias === "kimi");
+  const appended = proposeRouteAdd({ state: open, row: parent, ref: "zai" });
+  assert.equal(appended.listOf, "kimi");
+  assert.deepEqual(appended.patch.aliases.kimi.providers, ["opencode-go", "kimi-code", "zai"]);
+  assert.deepEqual(appended.errors, [], "the loader's verdict travels with the proposal");
+  assert.match(appended.summary, /opencode-go → kimi-code → zai/);
+
+  // An alias walking no providers gets its first route as the whole list.
+  const solo = soloState();
+  const bare = solo.rows.aliases.find((row) => row.kind === "alias" && row.alias === "solo");
+  assert.equal(bare.childCount, 0, "the fixture stands: there is no route to insert after");
+  const first = proposeRouteAdd({ state: solo, row: bare, ref: "zai" });
+  assert.equal(first.listOf, "solo");
+  assert.deepEqual(first.patch.aliases.solo.providers, ["zai"], "the first route is the whole list");
+  assert.deepEqual(first.errors, []);
+});
+
 test("a blank name is refused with the prompt still open and the typing intact", () => {
-  const open = applyKey(expandedOn(editState(), "kimi"), "n").state;
+  const expanded = expandedOn(editState(), "kimi");
+  const open = applyKey(cursorOn(expanded, routeRow(expanded, "kimi", "opencode-go")), "n").state;
   const blank = applyKey(open, "return");
   assert.equal(blank.effect, "none", "a blank name writes nothing");
   assert.ok(blank.state.input, "the prompt stays open");
@@ -1064,32 +1228,40 @@ test("a blank name is refused with the prompt still open and the typing intact",
 });
 
 test("the staging keeps the verdict it is handed: a refusal's summary, a complaint's silence", () => {
-  // The prompt's `pending` is its own to build, so the two verdicts a route list never hands back —
+  // The prompt's `submit` is its own to build, so the two verdicts a route list never hands back —
   // a refusal and a loader complaint — are walked the way the picker fixtures walk their choices.
-  const prompt = (pending) => ({ ...expandedOn(editState(), "kimi"), input: { title: "kimi: add route", value: "zai", pending } });
+  const prompt = (submit) => ({
+    ...expandedOn(editState(), "kimi"),
+    input: { title: "kimi: add route", value: "zai", hint: "type the route's provider id · enter adds · esc discards", back: null, submit },
+  });
 
   const refused = applyKey(
     prompt((name) => ({
-      listOf: "kimi",
-      layerFile: "/tmp/nowhere/x.json",
-      patch: {},
-      summary: `${name} changes nothing`,
-      errors: [],
-      saveable: false,
+      proposal: {
+        listOf: "kimi",
+        layerFile: "/tmp/nowhere/x.json",
+        patch: {},
+        summary: `${name} changes nothing`,
+        errors: [],
+        saveable: false,
+      },
     })),
     "return",
   );
+  assert.equal(refused.effect, "save", "a submitted proposal is a save request whatever its verdict");
   assert.equal(refused.state.pending.saveable, false, "even a refusal is kept pending");
   assert.equal(refused.state.input, null);
   assert.equal(refused.state.message, "zai changes nothing", "and its summary is the message");
 
   const complained = applyKey(
     prompt((name) => ({
-      listOf: "kimi",
-      layerFile: "/tmp/nowhere/x.json",
-      patch: {},
-      summary: `${name} now tries zai`,
-      errors: ["boom"],
+      proposal: {
+        listOf: "kimi",
+        layerFile: "/tmp/nowhere/x.json",
+        patch: {},
+        summary: `${name} now tries zai`,
+        errors: ["boom"],
+      },
     })),
     "return",
   );
@@ -1233,7 +1405,7 @@ test("a reload keeps your place: the tab, the cursors and the toggles survive it
     rain: false,
     color: false,
     picker: { title: "open", options: [] },
-    input: { title: "kimi: add route", value: "zai", pending: () => ({}) },
+    input: { title: "kimi: add route", value: "zai", hint: "", back: null, submit: () => ({ error: "never reached" }) },
   };
   const after = adopt(before, { state: state() });
   assert.equal(after.tab, "routes", "the tab is the view's, not the world's");
@@ -1320,10 +1492,11 @@ test("the picker scrolls to keep the option it will choose on screen", () => {
   assert.doesNotMatch(text, /alias-0$|▸ alias-0\b/, "and the window moved with it");
 });
 
-test("the frame paints the name prompt: its title, the typed name and the caret", () => {
+test("the frame paints the prompt: its title, its own hint, the typed name and the caret", () => {
   // The reader's report as a frame: with the prompt open the screen has to say so — the title it
   // opened under and the name typed so far, the caret sitting after it.
-  const typed = applyKey(applyKey(expandedOn(editState(), "kimi"), "n").state, "zai").state;
+  const expanded = expandedOn(editState(), "kimi");
+  const typed = applyKey(applyKey(cursorOn(expanded, routeRow(expanded, "kimi", "opencode-go")), "n").state, "zai").state;
   const lines = (world) => {
     const frame = frameFor({ width: 60, height: 14, state: world, palette: paletteFor({ color: false }), clock: "" });
     return Array.from({ length: 14 }, (_, row) => gridLine(frame, row)).join("\n");
@@ -1331,6 +1504,10 @@ test("the frame paints the name prompt: its title, the typed name and the caret"
   const text = lines(typed);
   assert.match(text, /kimi: add route/);
   assert.match(text, /zai▌/);
+  assert.match(text, /type the route's provider id/, "the second line is the prompt's own hint");
+
+  // The chain's first step wears its own hint rather than a fixed string.
+  assert.match(lines(applyKey(editState(), "n").state), /type the alias name/);
 
   // A name longer than the box is cut to the box rather than running past the panel.
   const long = { ...typed, input: { ...typed.input, value: "cline-".repeat(20) } };
