@@ -14,11 +14,13 @@
  *   node scripts/matrix-tui.mjs --plain              # one frame as text, for a pipe or a test
  *   node scripts/matrix-tui.mjs --no-rain --no-color # quiet, and readable on a mono terminal
  *
- * Editing is deliberate and two-step. `e` proposes a change (a seat's candidate alias, or an alias's
- * route order), the status bar shows the change, the layer it would be written to, *and whether the
- * config still validates*; `s` writes it, `esc` discards it. A change that would not load is refused
- * with the loader's own message before the file is touched — the same rule the loader enforces, not a
- * second opinion about it.
+ * Editing is deliberate and two-step. `⏎` expands an alias into the routes it walks, where `K`/`J`
+ * reorder them, `n` adds one and `d` drops one; `e` re-points a seat on the routes tab. Each change is
+ * a *proposal*: the status bar shows it, the layer it would be written to, *and whether the config
+ * still validates*; `s` writes it, `esc` goes back (discarding a proposal, then leaving a route, then
+ * collapsing an alias) and only `q` quits. A change that would not load is refused with the loader's
+ * own message before the file is touched — the same rule the loader enforces, not a second opinion
+ * about it.
  *
  * The driver is the only part that needs a terminal: the rain (`tui-rain.mjs`), the layout, the
  * tables and the key handling (`tui-view.mjs`) are pure, so a test drives the interface without a TTY
@@ -59,8 +61,9 @@ const value = (name, fallback) => {
 
 /**
  * The whole interface state, built from the config and the store. `rows` is rebuilt on every reload;
- * `cursors` remembers where each tab was, so switching tabs does not lose your place. The layer paths
- * ride along because a proposal has to say which file it would write.
+ * `cursors` remembers where each tab was and `expanded` which aliases are open, so switching tabs or
+ * reloading does not lose your place. The layer paths ride along because a proposal has to say which
+ * file it would write.
  */
 export function buildState({
   config,
@@ -74,11 +77,12 @@ export function buildState({
   layerFile = "",
   layerReadError = null,
 } = {}) {
-  return {
+  const state = {
     tab: "aliases",
     cursors: { aliases: 0, fusions: 0, routes: 0 },
+    expanded: {},
     rows: {
-      aliases: aliasRows({ config, modelStats }),
+      aliases: [],
       fusions: fusionRows({ config, fusionStats, seatStats }),
       routes: routeRows({ config, seatStats }),
     },
@@ -96,20 +100,77 @@ export function buildState({
     message: source,
     layerReadError,
   };
+  state.rows.aliases = aliasesView(state);
+  return state;
 }
+
+/**
+ * The config as the reader currently sees it: while a proposal names an alias's routes, that alias
+ * shows the *proposed* list — what you see while editing is the proposal, not the disk.
+ */
+export function displayConfig(state) {
+  const patch = state.pending?.patch?.aliases;
+  if (!patch) return state.config;
+  const aliases = {};
+  for (const [alias, spec] of Object.entries(state.config.aliases ?? {})) {
+    const providers = patch[alias]?.providers;
+    aliases[alias] = Array.isArray(providers) ? { ...spec, providers } : spec;
+  }
+  return { ...state.config, aliases };
+}
+
+/** The aliases tab as its flat row list: parents in view order, each open one followed by its routes. */
+export const aliasesView = (state) =>
+  aliasRows({ config: displayConfig(state), modelStats: state.stats.modelStats, expanded: state.expanded });
 
 /** The row the cursor is on, or undefined on an empty tab. */
 export const selected = (state) => state.rows[state.tab][state.cursors[state.tab]];
 
+/** The hints `e` answers with where it proposes nothing itself — the aliases list has its own keys. */
+const EDIT_HINT = "enter expands · K/J move · n add · d drop · s saves · esc discards";
+const LIST_KEYS = "K/J move · n add · d drop need a route row — ⏎ expands an alias into its routes";
+const READ_ONLY = "the fusions tab is read-only for now";
+
 /**
  * A key into a new state. No terminal, no I/O: the driver applies the effect, and the tests drive
  * this directly. Effects: `quit`, `reload`, `reingest`, `propose`, `save`, `none`.
+ *
+ * `1`/`2`/`3` are the only keys that switch tabs; `tab`/`shift-tab`, the arrows and `h`/`l` walk the
+ * rows *inside* one — a tree on the aliases tab, where `enter` expands an alias into its routes and
+ * the arrows move between a route and its parent. `K`/`J`/`n`/`d` reshape the route list under the
+ * cursor as proposals, `esc` is back (a pending change first, then a route, then an expansion), and
+ * only `q` ever quits.
  */
 export function applyKey(state, key) {
   const next = { ...state, cursors: { ...state.cursors }, message: state.message };
+  const tab = state.tab;
+  const rows = state.rows[tab];
+  const row = rows[state.cursors[tab]];
   const move = (delta) => {
-    const rows = state.rows[state.tab];
-    next.cursors[state.tab] = clamp(state.cursors[state.tab] + delta, 0, Math.max(0, rows.length - 1));
+    next.cursors[tab] = clamp(state.cursors[tab] + delta, 0, Math.max(0, rows.length - 1));
+  };
+  // A change to `expanded` or `pending` changes which aliases-tab rows exist at all, so the view is
+  // rebuilt through the same function the tests read it through, and the cursor clamped into it.
+  const refresh = () => {
+    next.rows = { ...next.rows, aliases: aliasesView(next) };
+    next.cursors.aliases = clamp(next.cursors.aliases ?? 0, 0, Math.max(0, next.rows.aliases.length - 1));
+  };
+  const setExpanded = (alias, open) => {
+    next.expanded = { ...state.expanded, [alias]: open };
+    refresh();
+  };
+  const toParent = () => {
+    const at = rows.findIndex((entry) => entry.kind === "alias" && entry.alias === row.parent);
+    if (at >= 0) next.cursors[tab] = at;
+  };
+  const accept = (proposal) => {
+    // Every proposal is a pending change — a boundary move's refusal too, whose summary is its
+    // message and which `s` refuses to write rather than spend. INVALID or not, the bar already
+    // shows the loader's verdict, so an invalid one needs no shout.
+    next.pending = proposal;
+    if (proposal.saveable === false) next.message = proposal.summary;
+    else next.message = proposal.errors?.length ? "" : "proposed — s saves, esc discards";
+    refresh();
   };
 
   if (state.picker) {
@@ -121,29 +182,77 @@ export function applyKey(state, key) {
     else if (key === "return" || key === "enter") {
       const chosen = state.picker.options[state.picker.cursor];
       next.picker = null;
-      return { state: { ...next, pending: state.picker.pending(chosen), message: "" }, effect: "none" };
+      accept(state.picker.pending(chosen));
+      return { state: next, effect: "none" };
     }
     return { state: next, effect: "none" };
   }
 
+  if (state.help && (key === "?" || key === "escape")) return { state: { ...next, help: false }, effect: "none" };
+
   if (key === "q") return { state: next, effect: "quit" };
   if (key === "escape") {
-    if (state.pending) return { state: { ...next, pending: null, message: "change discarded" }, effect: "none" };
-    return { state: next, effect: "none" };
-  }
-  if (key === "j" || key === "down") move(1);
+    // Back, in the order that gets you out: a proposal first, then a route, then an expansion.
+    if (state.pending) {
+      next.pending = null;
+      next.message = "change discarded";
+      refresh();
+    } else if (row?.kind === "route") toParent();
+    else if (row?.kind === "alias" && row.expanded) setExpanded(row.alias, false);
+  } else if (key === "j" || key === "down") move(1);
   else if (key === "k" || key === "up") move(-1);
-  else if (key === "g") next.cursors[state.tab] = 0;
-  else if (key === "G") next.cursors[state.tab] = Math.max(0, state.rows[state.tab].length - 1);
-  else if (key === "tab" || key === "l" || key === "right") next.tab = TABS[(TABS.indexOf(state.tab) + 1) % TABS.length];
-  else if (key === "shift-tab" || key === "h" || key === "left") next.tab = TABS[(TABS.indexOf(state.tab) - 1 + TABS.length) % TABS.length];
+  else if (key === "g") next.cursors[tab] = 0;
+  else if (key === "G") next.cursors[tab] = Math.max(0, rows.length - 1);
   else if (key === "1" || key === "2" || key === "3") next.tab = TABS[Number(key) - 1];
-  else if (key === "a") next.rain = !state.rain;
+  else if (key === "return" || key === "enter") {
+    if (row?.kind === "route") {
+      toParent();
+      setExpanded(row.parent, false);
+    } else if (row?.kind === "alias" && row.childCount > 0) setExpanded(row.alias, !row.expanded);
+  } else if (key === "left" || key === "h" || key === "shift-tab") {
+    if (row?.kind === "route") toParent();
+    else if (row?.kind === "alias" && row.expanded) setExpanded(row.alias, false);
+  } else if (key === "right" || key === "l" || key === "tab") {
+    if (row?.kind === "alias" && !row.expanded && row.childCount > 0) setExpanded(row.alias, true);
+    else if (row?.kind === "alias" && row.expanded) {
+      const at = rows.findIndex((entry) => entry.kind === "route" && entry.parent === row.alias);
+      if (at >= 0) next.cursors[tab] = at;
+    } else if (row?.kind === "route") {
+      const sibling = rows[state.cursors[tab] + 1];
+      if (sibling?.kind === "route" && sibling.parent === row.parent) move(1);
+    }
+  } else if (key === "K" || key === "J") {
+    if (row?.kind !== "route") next.message = LIST_KEYS;
+    else {
+      const delta = key === "K" ? -1 : 1;
+      const proposal = proposeRouteMove({ state, row, delta });
+      // The route moved one place over in the same flat list, and the cursor follows it there; at a
+      // boundary nothing moved, so the cursor stays where the reader put it.
+      if (proposal.saveable !== false) next.cursors[tab] = state.cursors[tab] + delta;
+      accept(proposal);
+    }
+  } else if (key === "d") {
+    if (row?.kind !== "route") next.message = LIST_KEYS;
+    else accept(proposeRouteDrop({ state, row }));
+  } else if (key === "n") {
+    if (row?.kind !== "route") next.message = LIST_KEYS;
+    else {
+      const display = displayConfig(state);
+      const own = new Set((display.aliases?.[row.parent]?.providers ?? []).map(refName));
+      const every = new Set(Object.values(display.aliases ?? {}).flatMap((spec) => (spec.providers ?? []).map(refName)));
+      const options = [...every].filter((id) => !own.has(id)).sort();
+      if (options.length === 0) next.message = `no other alias offers a route ${row.parent} could try`;
+      else next.picker = { title: `${row.parent}: add route`, options, cursor: 0, pending: (ref) => proposeRouteAdd({ state, row, ref }) };
+    }
+  } else if (key === "e") {
+    // Only the aliases tab answers with a hint instead of a proposal: its list has its own keys.
+    if (tab === "aliases") next.message = EDIT_HINT;
+    else return { state: next, effect: "propose" };
+  } else if (key === "a") next.rain = !state.rain;
   else if (key === "c") next.color = !state.color;
   else if (key === "?") next.help = !state.help;
   else if (key === "r") return { state: next, effect: "reload" };
   else if (key === "R") return { state: next, effect: "reingest" };
-  else if (key === "e") return { state: next, effect: "propose" };
   else if (key === "s") {
     if (!state.pending) next.message = "nothing to save — e proposes a change";
     else if (state.pending.saveable === false) next.message = "nothing to write — that proposal changes nothing";
@@ -194,23 +303,95 @@ export function proposeSeatAlias({ state, row, alias }) {
   };
 }
 
-/** The change an aliases-tab row proposes: the alias's routes rotate, so the second becomes first. */
-export function proposeRouteOrder({ state, row }) {
-  const patch = deepClone(state.layerConfig);
-  const providers = state.config.aliases?.[row.alias]?.providers ?? [];
-  if (providers.length < 2) {
-    // Not an error, but not a change either: `s` must not create or rewrite a layer file to write the
-    // state it already has, so the proposal says it is unsaveable rather than relying on the summary.
-    return { layerFile: state.layerFile, patch, summary: `${row.alias} has one route; nothing to reorder`, errors: [], saveable: false };
-  }
-  const rotated = [...providers.slice(1), providers[0]];
+/** A provider entry as its id: the config takes a plain name or an object carrying overrides. */
+const refName = (ref) => (typeof ref === "string" ? ref : (ref.id ?? "?"));
+
+/** The alias a route-list row belongs to — its parent, or the row itself when it is the parent. */
+const listOwner = (row) => (row.kind === "route" ? row.parent : row.alias);
+
+/**
+ * The baseline a route-list proposal builds over: the pending one for the same alias when there is
+ * one — a refusal's unchanged list as much as a move's net order, so `J` presses on either side of a
+ * boundary are still one pending change — and the layer on disk otherwise, which stays the baseline
+ * `commitProposal` re-checks against.
+ */
+const routeBaseline = (state, owner) =>
+  state.pending?.listOf === owner && state.pending.layerFile === state.layerFile
+    ? deepClone(state.pending.patch)
+    : deepClone(state.layerConfig);
+
+/** The baseline with one alias's route list replaced: the patch every route-list change writes. */
+const routePatch = (state, row, providers) => {
+  const owner = listOwner(row);
+  const patch = routeBaseline(state, owner);
   patch.aliases = patch.aliases ?? {};
-  patch.aliases[row.alias] = patch.aliases[row.alias] ?? {};
-  patch.aliases[row.alias].providers = rotated;
+  patch.aliases[owner] = patch.aliases[owner] ?? {};
+  patch.aliases[owner].providers = providers;
+  return patch;
+};
+
+/** The summary every route-list change shares: the alias and the FULL list it would end up walking. */
+const triesSummary = (owner, providers) => `${owner} now tries ${providers.map(refName).join(" → ") || "nothing"}`;
+
+/**
+ * The change moving a route proposes: the alias's list with the cursor's route one place up or down.
+ * At either end there is nothing to move, and the proposal says so (`saveable: false`) rather than
+ * letting `s` write the order the file already has.
+ */
+export function proposeRouteMove({ state, row, delta }) {
+  const owner = listOwner(row);
+  const providers = [...(displayConfig(state).aliases?.[owner]?.providers ?? [])];
+  const to = row.index + delta;
+  if (to < 0 || to >= providers.length) {
+    return {
+      listOf: owner,
+      layerFile: state.layerFile,
+      patch: routeBaseline(state, owner),
+      summary: `${owner}: that route is already ${to < 0 ? "first" : "last"}`,
+      errors: [],
+      saveable: false,
+    };
+  }
+  [providers[row.index], providers[to]] = [providers[to], providers[row.index]];
+  const patch = routePatch(state, row, providers);
   return {
+    listOf: owner,
     layerFile: state.layerFile,
     patch,
-    summary: `${row.alias} now tries ${rotated.map((ref) => (typeof ref === "string" ? ref : ref.id)).join(" → ")}`,
+    summary: triesSummary(owner, providers),
+    errors: validateAgainst(state, patch),
+  };
+}
+
+/**
+ * The change dropping a route proposes: the alias's list without the cursor's route. Dropping the
+ * last one leaves the list empty, and the loader is what refuses that — not this function.
+ */
+export function proposeRouteDrop({ state, row }) {
+  const owner = listOwner(row);
+  const providers = [...(displayConfig(state).aliases?.[owner]?.providers ?? [])];
+  providers.splice(row.index, 1);
+  const patch = routePatch(state, row, providers);
+  return {
+    listOf: owner,
+    layerFile: state.layerFile,
+    patch,
+    summary: triesSummary(owner, providers),
+    errors: validateAgainst(state, patch),
+  };
+}
+
+/** The change adding a route proposes: `ref` after the cursor's route — at the end for a parent row. */
+export function proposeRouteAdd({ state, row, ref }) {
+  const owner = listOwner(row);
+  const providers = [...(displayConfig(state).aliases?.[owner]?.providers ?? [])];
+  providers.splice(row.kind === "route" ? row.index + 1 : providers.length, 0, ref);
+  const patch = routePatch(state, row, providers);
+  return {
+    listOf: owner,
+    layerFile: state.layerFile,
+    patch,
+    summary: triesSummary(owner, providers),
     errors: validateAgainst(state, patch),
   };
 }
@@ -226,29 +407,27 @@ export function validateAgainst(state, patch) {
   }
 }
 
-/** The interactive `e`: a proposal for the selected row, through a picker where one is needed. */
+/**
+ * The interactive `e`: a proposal for the selected row, through a picker where one is needed. The
+ * aliases tab never comes here — its route list is edited with `K`/`J`/`n`/`d` — and the fusions tab
+ * has nothing to propose yet.
+ */
 export function proposeFor(state) {
   const row = selected(state);
   if (!row) return { ...state, message: "nothing selected" };
-  if (state.tab === "routes") {
-    const options = Object.keys(state.config.aliases ?? {}).sort();
-    if (options.length === 0) return { ...state, message: "no aliases to point a seat at" };
-    return {
-      ...state,
-      message: "",
-      picker: {
-        title: `${row.fusion}.${row.seat}: point at`,
-        options,
-        cursor: 0,
-        pending: (alias) => proposeSeatAlias({ state, row, alias }),
-      },
-    };
-  }
-  if (state.tab === "aliases") {
-    const pending = proposeRouteOrder({ state, row });
-    return { ...state, pending, message: pending.errors.length ? "" : "proposed — s saves, esc discards" };
-  }
-  return { ...state, message: "the fusions tab is read-only for now" };
+  if (state.tab !== "routes") return { ...state, message: state.tab === "aliases" ? EDIT_HINT : READ_ONLY };
+  const options = Object.keys(state.config.aliases ?? {}).sort();
+  if (options.length === 0) return { ...state, message: "no aliases to point a seat at" };
+  return {
+    ...state,
+    message: "",
+    picker: {
+      title: `${row.fusion}.${row.seat}: point at`,
+      options,
+      cursor: 0,
+      pending: (alias) => proposeSeatAlias({ state, row, alias }),
+    },
+  };
 }
 
 /* ---------------------------------------------------------------- drawing */
@@ -302,8 +481,15 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
     put(grid, detailRow + 1, 1, truncate(state.message ?? "", width - 2), palette.dim);
   }
 
-  const keys = "1-3/tab tabs · j/k rows · e edit · s save · R reingest · r reload · a rain · c colour · ? help · q quit";
-  put(grid, height - 1, Math.max(1, width - keys.length - 1), width > keys.length + 12 ? keys : "e edit · s save · q quit", palette.dim);
+  // The key map, as much of it as fits. Even the short form names the tabs and the rain toggle — the
+  // two things a reader would otherwise never discover (`1`-`3`, and that `a` is a toggle at all).
+  const rainState = state.rain ? "rain:ON" : "rain:OFF";
+  const keys =
+    "1/2/3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same · K/J move route · n add route · " +
+    `d drop route · e edit (routes) · s save · esc back/discard · R reingest · r reload · a ${rainState} · c colour · ? help · q quit`;
+  const keysShort = `1-3 tabs · j/k rows · ⏎ open · K/J move · n add · d drop · a ${rainState} · ? help · q quit`;
+  const hint = width > keys.length + 12 ? keys : keysShort;
+  put(grid, height - 1, Math.max(1, width - hint.length - 1), truncate(hint, width - 2), palette.dim);
   put(grid, height - 1, 1, clock, palette.dim);
 
   if (state.help) {
@@ -311,8 +497,12 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
       "aliases — the alias, the model it names, its routes, and what the store saw it do",
       "fusions — mode and face, then runs, failures, degraded seats, cascades, verify, findings, cost",
       "routes  — per fusion and seat: the ordered candidates from config, which alias answered, what refused",
-      "e proposes a change for the selected row (routes: a new candidate alias; aliases: rotate the routes)",
-      "s writes it to the layer named under it after the loader validates it; esc discards it",
+      "keys — 1/2/3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same",
+      "       K/J move route · n add route · d drop route · e edit (routes) · s save · esc back/discard · R reingest",
+      "       r reload · a rain · c colour · q quit",
+      "e re-points a seat (routes tab); ⏎ expands an alias into the routes K/J, n and d reshape",
+      "every change is a proposal: the bar shows it and whether it still validates, s writes it to the",
+      "layer named under it once the loader accepts it, and esc goes back and discards it",
       "$report is what providers priced (with the seats it covers), $est is their own rate card applied to",
       "unpriced seats, $list is the same tokens at list price — one basis per column, never folded together",
     ];
@@ -359,6 +549,9 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
 /** The line under the table: the selected row's own detail, so a truncated cell stays readable. */
 export function detailFor(state, row) {
   if (!row) return "";
+  if (row.kind === "route") {
+    return `${row.parent} · route ${row.index + 1}/${row.count}: ${row.provider} → ${row.model} · seats ${row.seats} · kept ${row.kept}/${row.raised} · located ${row.located}, unlocated ${row.unlocated}`;
+  }
   if (state.tab === "aliases") {
     return `${row.alias} → ${row.model} · routes: ${row.routeDetail || "none"} · seats ${row.seats} · kept ${row.kept}/${row.raised} · located ${row.located}, unlocated ${row.unlocated}${row.noRate ? ` · ${row.noRate} seat(s) with no rate` : ""}`;
   }
@@ -389,14 +582,18 @@ export function detailFor(state, row) {
   return `${row.fusion}.${row.seat} · candidates ${row.candidates}${unconfigured} · seats ${row.seats} · refused: ${refused}`;
 }
 
-/** The rain under the interface: interface cells win, blanks let the rain through. */
+/**
+ * The rain under the interface: interface cells win — including a styled blank, which is a row's own
+ * background (the selection paints to the panel edge) and must not be eaten by rain passing through
+ * its padding. Untouched cells are windows.
+ */
 export function composeOverRain(grid, rainField, palette, { width, height }) {
   const { levels, glyphs } = cells(rainField);
   const composed = createGrid(width, height);
   const colors = { 1: palette.tail, 2: palette.body, 3: palette.head };
   for (let i = 0; i < composed.ch.length; i += 1) {
     const level = levels[i] ?? 0;
-    if (level > 0 && grid.ch[i] === " ") {
+    if (level > 0 && grid.ch[i] === " " && !grid.fg[i]) {
       composed.ch[i] = glyphs[i];
       composed.fg[i] = colors[level] ?? palette.tail;
     } else {
@@ -541,18 +738,22 @@ async function reingest({ dbPath, catalogue }) {
  * as "nothing selected" with a blank detail line rather than as the move it was.
  */
 export const adopt = (current, reloaded) => {
-  const cursors = { ...current.cursors };
-  for (const tab of TABS) cursors[tab] = clamp(cursors[tab] ?? 0, 0, Math.max(0, (reloaded.state.rows[tab]?.length ?? 0) - 1));
-  return {
+  const state = {
     ...current,
     ...reloaded.state,
     tab: TABS.includes(current.tab) && reloaded.state.rows[current.tab] ? current.tab : "aliases",
-    cursors,
+    cursors: { ...current.cursors },
+    expanded: current.expanded ?? {},
     help: current.help,
     picker: null,
     rain: current.rain,
     color: current.color,
   };
+  // Which aliases are open is view state too, so the aliases rows are rebuilt around it exactly as a
+  // key that changes it rebuilds them — before the cursors are clamped into what is actually there.
+  state.rows = { ...state.rows, aliases: aliasesView(state) };
+  for (const tab of TABS) state.cursors[tab] = clamp(state.cursors[tab] ?? 0, 0, Math.max(0, state.rows[tab].length - 1));
+  return state;
 };
 
 /**

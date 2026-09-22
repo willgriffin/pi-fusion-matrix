@@ -249,40 +249,81 @@ const sumStats = (rows) => {
 };
 
 /**
+ * What one store aggregate becomes on a row: the counters, the two money bases kept apart, and the
+ * refusal tally. Shared by alias and route rows so both answer with the same fields — the parent is
+ * just the aggregate over exactly the store rows its children each hold one of.
+ */
+const statFields = (stats) => ({
+  seats: stats.seats,
+  raised: stats.findings,
+  kept: stats.kept,
+  located: stats.located,
+  unlocated: stats.unlocated,
+  reportedUsd: stats.pricedSeats > 0 ? stats.reportedUsd : null,
+  pricedSeats: stats.pricedSeats,
+  // One basis per field: a column that added `estimated` into `list` would overstate list-basis money
+  // with no denominator for the folded part, and no reader could tell the two apart afterwards.
+  listUsd: stats.listUsd,
+  estimatedUsd: stats.estimatedUsd,
+  noRate: stats.noRate,
+  refusals: Object.entries(stats.attempts)
+    .map(([reason, n]) => `${reason}×${n}`)
+    .join(" "),
+  last: stats.lastSeatAt ? String(stats.lastSeatAt).slice(0, 16).replace("T", " ") : "—",
+});
+
+/**
  * The aliases tab: what each alias names, the routes it may walk, and what the store saw it do.
  * The money columns keep their basis in the label — reported and list are different questions and a
  * single `$` column would silently mix them.
+ *
+ * The list is flat — every expanded alias is followed by its route rows — so the cursor walks one
+ * index range and the painter still sees ordinary rows. Route rows keep config order and never join
+ * the parent sort: that order IS the data being edited (K/J moves a route within it), so a sorted
+ * child list would display a position no key could reproduce.
  */
-export function aliasRows({ config, modelStats }) {
-  const rows = [];
+export function aliasRows({ config, modelStats, expanded = {} }) {
+  const groups = [];
   for (const [alias, spec] of Object.entries(config.aliases ?? {})) {
+    const providers = spec.providers ?? [];
     const stats = sumStats(
-      (spec.providers ?? []).map((ref) => statsFor(effectiveModel(spec, ref), typeof ref === "string" ? ref : (ref.id ?? "?"), modelStats)),
+      providers.map((ref) => statsFor(effectiveModel(spec, ref), typeof ref === "string" ? ref : (ref.id ?? "?"), modelStats)),
     );
-    rows.push({
-      alias,
-      model: spec.model,
-      routes: routeNames(spec).length,
-      routeDetail: routeDetail(spec),
-      seats: stats.seats,
-      raised: stats.findings,
-      kept: stats.kept,
-      located: stats.located,
-      unlocated: stats.unlocated,
-      reportedUsd: stats.pricedSeats > 0 ? stats.reportedUsd : null,
-      pricedSeats: stats.pricedSeats,
-      // One basis per field: a column that added `estimated` into `list` would overstate list-basis money
-      // with no denominator for the folded part, and no reader could tell the two apart afterwards.
-      listUsd: stats.listUsd,
-      estimatedUsd: stats.estimatedUsd,
-      noRate: stats.noRate,
-      refusals: Object.entries(stats.attempts)
-        .map(([reason, n]) => `${reason}×${n}`)
-        .join(" "),
-      last: stats.lastSeatAt ? String(stats.lastSeatAt).slice(0, 16).replace("T", " ") : "—",
+    // An alias with no providers has nothing to show, so it never claims to be expanded.
+    const open = providers.length > 0 && Boolean(expanded[alias]);
+    const children = open
+      ? providers.map((ref, index) => {
+          const provider = typeof ref === "string" ? ref : (ref.id ?? "?");
+          const model = effectiveModel(spec, ref);
+          return {
+            kind: "route",
+            parent: alias,
+            index,
+            count: providers.length,
+            provider,
+            model,
+            alias: `  ${index === providers.length - 1 ? "└" : "├"} ${provider}`,
+            routes: `${index + 1}/${providers.length}`,
+            ...statFields(sumStats([statsFor(model, provider, modelStats)])),
+          };
+        })
+      : [];
+    groups.push({
+      parent: {
+        kind: "alias",
+        alias,
+        model: spec.model,
+        routes: routeNames(spec).length,
+        routeDetail: routeDetail(spec),
+        ...statFields(stats),
+        expanded: open,
+        childCount: providers.length,
+      },
+      children,
     });
   }
-  return rows.sort((a, b) => b.seats - a.seats || a.alias.localeCompare(b.alias));
+  groups.sort((a, b) => b.parent.seats - a.parent.seats || a.parent.alias.localeCompare(b.parent.alias));
+  return groups.flatMap(({ parent, children }) => [parent, ...children]);
 }
 
 /** The fusions tab: how each rung runs, how it ended, what it cost, and what its reviews produced. */

@@ -13,6 +13,7 @@ import { MatrixPanel, styledLine } from "../scripts/tui-panel.mjs";
 import { createRain } from "../scripts/tui-rain.mjs";
 
 const ESC = String.fromCharCode(27);
+const CTRL_C = String.fromCharCode(3);
 /** SGR sequences carry style and zero width. Stripped by scan rather than regex: the repo guard bans
  * control characters in patterns, and this shape is stricter — anything a strip leaves behind is an
  * escape the host never sanctioned (a cursor move has no place in a component line). */
@@ -74,12 +75,14 @@ async function mountPanel(t, tab) {
   return { panel, calls, layerFile, dir };
 }
 
-/** The first alias row whose alias carries more than one route, or less than one. */
+/** The first parent alias row whose provider list satisfies the predicate. A route child is never
+ * the row found — it is reached through its parent — so `row.alias` is always a name to look up. */
 function findRow(panel, predicate) {
   for (let i = 0; i < panel.state.rows.aliases.length; i += 1) {
     panel.handleInput("g");
     for (let step = 0; step < i; step += 1) panel.handleInput("j");
     const row = panel.state.rows.aliases[panel.state.cursors.aliases];
+    if (row.kind === "route") continue;
     const providers = panel.state.config.aliases?.[row.alias]?.providers ?? [];
     if (predicate(providers)) return { row, providers };
   }
@@ -114,14 +117,18 @@ test("a render is width-safe, cursor-move-free, and names a missing store", asyn
 
 test("keys move the reader and the toggles; unknown keys are inert", async (t) => {
   const { panel, calls } = await mountPanel(t);
-  const before = JSON.stringify([panel.state.tab, panel.state.cursors, panel.state.rain, panel.state.color]);
-  panel.handleInput("\t");
-  assert.equal(panel.state.tab, "fusions", "tab cycles forward");
-  assert.ok(shows(panel.render(100), "fusions*"), "the tab is visible in the frame");
-  panel.handleInput("\u001b[Z");
-  assert.equal(panel.state.tab, "aliases", "shift-tab cycles back");
+  const startTab = panel.state.tab;
+  const display = () => JSON.stringify([panel.state.tab, panel.state.rain, panel.state.color]);
+  const before = display();
+  // These walk the rows *within* the tab (arrows and h/l move and open rows, tab/shift-tab with
+  // them); the tab itself is keyed by number and nothing else.
+  for (const key of ["\t", "\u001b[Z", "\u001b[D", "\u001b[C", "h", "l"]) {
+    panel.handleInput(key);
+    assert.equal(panel.state.tab, startTab, `${JSON.stringify(key)} moves within the tab — it never switches`);
+  }
   panel.handleInput("3");
   assert.equal(panel.state.tab, "routes", "a number keys the tab directly");
+  assert.ok(shows(panel.render(100), "routes*"), "the tab is visible in the frame");
   panel.handleInput("1");
   assert.equal(panel.state.tab, "aliases", "…and one returns to the first");
   panel.handleInput("a");
@@ -130,37 +137,45 @@ test("keys move the reader and the toggles; unknown keys are inert", async (t) =
   panel.handleInput("c");
   assert.equal(panel.state.color, false, "colour toggles");
   panel.handleInput("c");
-  const after = JSON.stringify([panel.state.tab, panel.state.cursors, panel.state.rain, panel.state.color]);
-  assert.equal(after, before, "the display state returns to where it started");
+  assert.equal(display(), before, "the display state returns to where it started");
+  const settled = JSON.stringify([panel.state.tab, panel.state.cursors, panel.state.rain, panel.state.color]);
   panel.handleInput("x");
   assert.equal(
     JSON.stringify([panel.state.tab, panel.state.cursors, panel.state.rain, panel.state.color]),
-    before,
+    settled,
     "an unbound key does nothing",
   );
   assert.equal(calls.done, 0, "and none of it closes the panel");
   panel.dispose();
 });
 
-test("a one-route alias's edit is a named refusal, and save writes nothing", async (t) => {
+test("moving a one-route alias's only route is a named refusal, and save writes nothing", async (t) => {
   const { panel, layerFile } = await mountPanel(t);
   const found = findRow(panel, (providers) => providers.length === 1);
   assert.ok(found, "the config carries an alias with a single route");
-  panel.handleInput("e");
+  panel.handleInput("\r"); // expand it
+  panel.handleInput("j");
+  const route = panel.state.rows.aliases[panel.state.cursors.aliases];
+  assert.equal(route.parent, found.row.alias, "the cursor is on the alias's only route");
+  panel.handleInput("K"); // the only route is already first
   assert.ok(panel.state.pending, "the reader is told something");
   assert.equal(panel.state.pending.saveable, false, "…and it is a refusal, not a proposal");
+  assert.ok(panel.state.pending.summary.includes(found.row.alias), "the refusal names the alias");
   panel.handleInput("s");
   assert.ok(panel.state.pending, "the refusal stays visible rather than being spent");
   assert.ok(!fs.existsSync(layerFile), "and no layer file is created to hold the state it already has");
-  assert.ok(shows(panel.render(100), found.row.alias), "the refusal names the alias");
   panel.dispose();
 });
 
-test("a proposal names its layer file, and save writes the rotated routes through to disk", async (t) => {
+test("a proposal names its layer file, and save writes the reordered routes through to disk", async (t) => {
   const { panel, layerFile } = await mountPanel(t);
   const found = findRow(panel, (providers) => providers.length >= 2);
-  assert.ok(found, "the config carries an alias with two routes to rotate");
-  panel.handleInput("e");
+  assert.ok(found, "the config carries an alias with two routes to reorder");
+  panel.handleInput("\r"); // expand it
+  panel.handleInput("j");
+  const route = panel.state.rows.aliases[panel.state.cursors.aliases];
+  assert.equal(route.parent, found.row.alias, "the cursor is on the alias's first route");
+  panel.handleInput("J"); // …and that route now tries second
   assert.ok(panel.state.pending, "a proposal is pending");
   assert.notEqual(panel.state.pending.saveable, false, "…and it is saveable");
   assert.ok(shows(panel.render(100), path.basename(layerFile)), "the proposal names the file it would write");
@@ -169,27 +184,49 @@ test("a proposal names its layer file, and save writes the rotated routes throug
   assert.ok(fs.existsSync(layerFile), "the layer file was written");
   const written = JSON.parse(fs.readFileSync(layerFile, "utf8"));
   const providers = written.aliases?.[found.row.alias]?.providers ?? [];
-  assert.deepEqual(providers, [...found.providers.slice(1), found.providers[0]], "the route order is rotated on disk");
+  assert.deepEqual(providers, [found.providers[1], found.providers[0], ...found.providers.slice(2)], "the reordered routes are on disk");
   panel.dispose();
 });
 
 test("a named tab opens there, and both close paths close exactly once", async (t) => {
   const { panel, calls } = await mountPanel(t, "routes");
   assert.equal(panel.state.tab, "routes", "/matrix routes opens on routes");
-  panel.handleInput("\t");
-  assert.equal(panel.state.tab, "aliases", "…and the reader is not leashed to it");
-  panel.handleInput("\u0007");
-  assert.equal(calls.done, 1, "the interrupt action closes the panel once");
+  panel.handleInput("1");
+  assert.equal(panel.state.tab, "aliases", "…and a number walks it back to the first tab");
+  panel.handleInput(ESC);
+  assert.equal(calls.done, 0, "esc is back, not out — it never closes the matrix");
+  panel.handleInput("q");
+  assert.equal(calls.done, 1, "q closes the panel once");
   assert.equal(calls.value, undefined, "…with nothing to report");
   panel.handleInput("q");
   assert.equal(calls.done, 1, "a closed panel ignores further keys");
   panel.dispose();
-  panel.dispose();
 
   const second = await mountPanel(t);
-  second.panel.handleInput("q");
-  assert.equal(second.calls.done, 1, "q closes the panel once");
+  second.panel.handleInput(CTRL_C);
+  assert.equal(second.calls.done, 1, "ctrl-c is the other way out — and it too closes once");
+  second.panel.handleInput(CTRL_C);
+  assert.equal(second.calls.done, 1, "…and a closed panel ignores it too");
   second.panel.dispose();
+});
+
+test("esc is back: it closes a modal, never the matrix", async (t) => {
+  const { panel, calls } = await mountPanel(t, "routes");
+  panel.handleInput("e");
+  assert.ok(panel.state.picker, "e opens a picker to point the seat at another alias");
+  panel.handleInput(ESC);
+  assert.equal(panel.state.picker, null, "esc closes the modal it is in");
+  assert.equal(calls.done, 0, "…and leaves the matrix standing");
+  panel.handleInput("1");
+  const found = findRow(panel, (providers) => providers.length > 0);
+  assert.ok(found, "the config carries a parent alias to sit the cursor on");
+  assert.equal(found.row.expanded, false, "…and its routes are tucked away");
+  panel.handleInput(ESC);
+  assert.equal(panel.state.pending, null, "esc on a collapsed parent is inert — there is nothing to discard");
+  assert.equal(calls.done, 0, "…and an inert esc is still not a way out");
+  panel.handleInput("q");
+  assert.equal(calls.done, 1, "only q closes the matrix");
+  panel.dispose();
 });
 
 test("the rain moves on a clock: renders apart in time differ with nothing driving them", async (t) => {

@@ -25,6 +25,7 @@ import {
   columnsFor,
   compact,
   createGrid,
+  fillRow,
   gridLine,
   money,
   pad,
@@ -37,15 +38,19 @@ import {
 } from "../scripts/tui-view.mjs";
 import {
   adopt,
+  aliasesView,
   applyKey,
   buildState,
   commitProposal,
+  composeOverRain,
   detailFor,
   diff,
   frameFor,
   keyName,
   paint,
-  proposeRouteOrder,
+  proposeRouteAdd,
+  proposeRouteDrop,
+  proposeRouteMove,
   proposeSeatAlias,
   selected,
   validateAgainst,
@@ -173,6 +178,48 @@ const state = () =>
     layerFile: "/tmp/nowhere/pi-fusion-matrix.json",
   });
 
+/**
+ * The editing world: the fixture above, plus the personas its modes name and a decision backend (so
+ * the loader accepts it) and one alias with three routes to reorder. Every proposal made against this
+ * config has to leave `validateConfig` with nothing to say — the fixture itself may not be what it
+ * complains about.
+ */
+const editConfig = {
+  ...config,
+  personas: {
+    technical: { prompt: "reason about the change" },
+    skeptic: { prompt: "find the flaw in it" },
+    judge: { prompt: "pick the better answer" },
+  },
+  decide: { defaultBackend: "local" },
+  backends: { local: { kind: "typesafe", url: "http://127.0.0.1:8080", apiKeyEnv: "TYPESAFE_API_KEY", model: "judge-1" } },
+  aliases: { ...config.aliases, trio: { model: "kimi-k3", providers: ["opencode-go", "kimi-code", "cline-pass"] } },
+};
+
+const editState = () =>
+  buildState({
+    config: editConfig,
+    modelStats,
+    fusionStats,
+    seatStats,
+    baseConfig: editConfig,
+    layerConfig: {},
+    layerFile: "/tmp/nowhere/pi-fusion-matrix.json",
+  });
+
+/** The cursor onto one exact row of the aliases list. */
+const cursorOn = (world, row) => ({ ...world, cursors: { ...world.cursors, aliases: world.rows.aliases.indexOf(row) } });
+
+/** One route row: the child of `alias`'s list that walks `provider`. */
+const routeRow = (world, alias, provider) =>
+  world.rows.aliases.find((row) => row.kind === "route" && row.parent === alias && row.provider === provider);
+
+/** The state after opening `alias`'s route list with the keyboard: expanded, the cursor on its parent. */
+const expandedOn = (world, alias) => {
+  const parent = world.rows.aliases.findIndex((row) => row.kind === "alias" && row.alias === alias);
+  return applyKey({ ...world, cursors: { ...world.cursors, aliases: parent } }, "return").state;
+};
+
 /* --------------------------------------------------------------------- rain */
 
 test("the rain is seeded: one seed draws one field, and its head outshines its tail", () => {
@@ -267,6 +314,20 @@ test("the trail fades, and the rain reads darker than the interface behind it", 
   assert.ok(lum(colour.body) < lum(colour.dim), "even the rain's body is darker than the dimmest interface ink");
 });
 
+test("the rain sits behind the interface: a styled blank is the row's own background", () => {
+  const palette = paletteFor({ color: true });
+  const grid = createGrid(4, 1);
+  put(grid, 0, 0, "ab", palette.selected);
+  fillRow(grid, 0, 2, 1, " ", palette.selected); // the selection's padding
+  const rain = createRain({ width: 4, height: 1, seed: 9, density: 1 });
+  for (let x = 0; x < 4; x += 1) rain.columns[x] = { head: 0, speed: 0, length: 1, birth: 0 };
+  const composed = composeOverRain(grid, rain, palette, { width: 4, height: 1 });
+  assert.equal(composed.ch[0], "a", "ink keeps its cell");
+  assert.equal(composed.ch[2], " ", "the styled blank keeps the row's background");
+  assert.equal(composed.fg[2], palette.selected, "…and its colour — the rain falls behind it");
+  assert.notEqual(composed.ch[3], " ", "an untouched cell is a window onto the rain");
+});
+
 test("the palette drops escapes without dropping the selection", () => {
   const colour = paletteFor({ color: true });
   assert.ok(colour.head.includes("\u001b[38;2;"), "a coloured palette paints truecolour");
@@ -342,6 +403,77 @@ test("the alias table joins the config to the store, modelOverride routes includ
   assert.equal(unknown.last, "—");
 });
 
+test("an expanded alias carries its routes as rows: config order, tree marks, and each route's own numbers", () => {
+  const rows = aliasRows({ config, modelStats, expanded: { kimi: true, muse: true } });
+  assert.deepEqual(
+    rows.map((row) => row.alias),
+    ["kimi", "  ├ opencode-go", "  └ kimi-code", "muse", "  ├ opencode-go", "  └ cline-pass", "kimiAlias"],
+    "parents keep their order and each open alias's routes follow it, in config order",
+  );
+
+  const parent = rows[0];
+  assert.equal(parent.kind, "alias");
+  assert.equal(parent.expanded, true);
+  assert.equal(parent.childCount, 2);
+  const closed = aliasRows({ config, modelStats });
+  assert.equal(closed.length, 3, "without the expanded map nothing is open");
+  assert.deepEqual(
+    closed.map((row) => ({ alias: row.alias, kind: row.kind, expanded: row.expanded, childCount: row.childCount })),
+    [
+      { alias: "kimi", kind: "alias", expanded: false, childCount: 2 },
+      { alias: "muse", kind: "alias", expanded: false, childCount: 2 },
+      { alias: "kimiAlias", kind: "alias", expanded: false, childCount: 1 },
+    ],
+    "and a parent row still carries its own shape",
+  );
+  assert.equal(closed[0].routes, 2, "a parent's own fields are untouched");
+  assert.equal(closed[0].seats, 12);
+
+  // A route row is one store row's worth of numbers — never the parent's totals repeated.
+  const [go, code] = rows.filter((row) => row.kind === "route" && row.parent === "kimi");
+  assert.deepEqual(
+    [go.kind, go.parent, go.index, go.count, go.provider, go.model, go.routes],
+    ["route", "kimi", 0, 2, "opencode-go", "kimi-k3", "1/2"],
+  );
+  assert.equal(go.seats, 12);
+  assert.equal(go.kept, 7);
+  assert.equal(go.raised, 7);
+  assert.equal(go.located, 7);
+  assert.equal(go.reportedUsd, 0.5264);
+  assert.equal(go.pricedSeats, 12);
+  assert.equal(go.refusals, "transient×2");
+  assert.deepEqual([code.index, code.routes], [1, "2/2"]);
+  assert.equal(code.seats, 0, "the route with no store row is a zero, not its sibling's numbers again");
+  assert.equal(code.kept, 0);
+  assert.equal(code.reportedUsd, null);
+  assert.equal(code.last, "—");
+
+  // The modelOverride route reads as the model that ran: its numbers live under that id in the store.
+  const override = rows.find((row) => row.kind === "route" && row.parent === "muse" && row.provider === "cline-pass");
+  assert.equal(override.alias, "  └ cline-pass", "the last child closes the tree");
+  assert.equal(override.model, "cline-free/muse");
+  assert.equal(override.seats, 1);
+  assert.equal(override.kept, 0);
+  assert.equal(override.located, 0);
+  assert.equal(override.pricedSeats, 0);
+  assert.equal(override.reportedUsd, null, "an unpriced route reports no money, not zero money");
+  assert.equal(Number(override.listUsd.toFixed(5)), 0.00012);
+
+  // Children are ordinary rows: every column the table draws has something to draw.
+  for (const row of rows) {
+    for (const column of columnsFor("aliases")) {
+      const value = column.format ? column.format(row) : row[column.key];
+      assert.notEqual(value, undefined, `${row.alias} carries ${column.key}`);
+    }
+  }
+
+  // An alias with no routes cannot be opened, whatever the map says.
+  const bare = aliasRows({ config: { aliases: { bare: { model: "kimi-k3", providers: [] } } }, modelStats: [], expanded: { bare: true } });
+  assert.equal(bare.length, 1);
+  assert.equal(bare[0].expanded, false);
+  assert.equal(bare[0].childCount, 0);
+});
+
 test("the fusion table carries how a rung ran, ended and cost", () => {
   const rows = fusionRows({ config, fusionStats, seatStats });
   const review = rows.find((row) => row.fusion === "review");
@@ -385,9 +517,58 @@ test("every column of every tab reads a field the rows actually carry", () => {
   }
 });
 
+test("enter opens and closes the route list under the cursor, and a reload leaves it as it was", () => {
+  const world = editState();
+  assert.deepEqual(world.expanded, {}, "a fresh state starts closed");
+
+  // Opening leaves the cursor on the parent it opened.
+  const open = expandedOn(world, "trio");
+  assert.deepEqual(
+    open.rows.aliases.filter((row) => row.kind === "route" && row.parent === "trio").map((row) => row.provider),
+    ["opencode-go", "kimi-code", "cline-pass"],
+  );
+  assert.equal(selected(open).alias, "trio");
+  assert.equal(selected(open).expanded, true, "the cursor stays on the parent while it expands");
+
+  // Closing from a child lands on the parent the child belongs to.
+  const onChild = cursorOn(open, routeRow(open, "trio", "kimi-code"));
+  const closed = applyKey(onChild, "return").state;
+  assert.equal(
+    closed.rows.aliases.some((row) => row.kind === "route"),
+    false,
+    "the children are out of the list",
+  );
+  assert.equal(selected(closed).alias, "trio", "the cursor lands on the parent");
+  assert.equal(selected(closed).expanded, false);
+
+  // What the reader sees while editing is the proposal: the staged move is already the row order.
+  const staged = { ...open, pending: proposeRouteMove({ state: open, row: routeRow(open, "trio", "kimi-code"), delta: 1 }) };
+  assert.deepEqual(
+    aliasesView(staged)
+      .filter((row) => row.kind === "route" && row.parent === "trio")
+      .map((row) => row.provider),
+    ["opencode-go", "cline-pass", "kimi-code"],
+  );
+  assert.deepEqual(
+    open.rows.aliases.filter((row) => row.kind === "route" && row.parent === "trio").map((row) => row.provider),
+    ["opencode-go", "kimi-code", "cline-pass"],
+    "and the un-edited world still shows its own order",
+  );
+  assert.deepEqual(open.rows.aliases, aliasesView(open), "the rows are the view of the state, never their own thing");
+
+  // A reload rebuilds the rows and keeps the reader's place in them.
+  const after = adopt(open, { state: editState() });
+  assert.equal(after.expanded.trio, true, "what was open stays open");
+  assert.deepEqual(
+    after.rows.aliases.filter((row) => row.kind === "route" && row.parent === "trio").map((row) => row.provider),
+    ["opencode-go", "kimi-code", "cline-pass"],
+    "and its rows say so",
+  );
+});
+
 /* --------------------------------------------------------------------- keys */
 
-test("keys move the cursor, switch tabs, and never run off a table", () => {
+test("keys move the cursor, switch tabs by number, and never run off a table", () => {
   let world = state();
   assert.equal(world.tab, "aliases");
   world = applyKey(world, "j").state;
@@ -399,19 +580,70 @@ test("keys move the cursor, switch tabs, and never run off a table", () => {
   assert.equal(world.cursors.aliases, world.rows.aliases.length - 1);
   assert.equal(applyKey(world, "j").state.cursors.aliases, world.rows.aliases.length - 1, "and at the bottom");
 
-  assert.equal(applyKey(world, "tab").state.tab, "fusions");
+  // The numbers are the whole way between tabs; everything that looks like one walks the rows.
+  assert.equal(applyKey(world, "1").state.tab, "aliases");
+  assert.equal(applyKey(world, "2").state.tab, "fusions");
   assert.equal(applyKey(world, "3").state.tab, "routes");
-  assert.equal(applyKey(applyKey(world, "3").state, "tab").state.tab, "aliases", "tabs wrap");
-  assert.equal(applyKey(world, "1").state.rows.aliases.length > 0, true);
-  assert.equal(applyKey(world, "a").state.rain, false, "the rain toggles");
+  assert.equal(applyKey(applyKey(world, "3").state, "1").state.tab, "aliases", "and back to the first");
+  for (const key of ["tab", "shift-tab", "h", "l", "left", "right"]) {
+    assert.equal(applyKey(world, key).state.tab, "aliases", `${key} walks the rows, not the tabs`);
+  }
+
+  assert.equal(applyKey(world, "a").state.rain, false, "the rain toggles off");
+  assert.equal(applyKey(applyKey(world, "a").state, "a").state.rain, true, "and on again");
   assert.equal(applyKey(world, "c").state.color, false);
   assert.equal(applyKey(world, "?").state.help, true);
   assert.equal(applyKey(world, "q").effect, "quit");
+  assert.notEqual(applyKey(world, "escape").effect, "quit", "escape is a way back, never a way out");
   assert.equal(applyKey(world, "r").effect, "reload");
   assert.equal(applyKey(world, "R").effect, "reingest");
-  assert.equal(applyKey(world, "e").effect, "propose");
+  assert.equal(applyKey({ ...state(), tab: "routes" }, "e").effect, "propose", "e still proposes on the routes tab");
+  assert.equal(applyKey({ ...state(), tab: "fusions" }, "e").effect, "propose");
+  const guided = applyKey(world, "e");
+  assert.equal(guided.effect, "none", "on the aliases tab the list keys are their own instructions");
+  assert.equal(guided.state.pending, null);
+  assert.match(guided.state.message, /K\/J/);
+  assert.match(guided.state.message, /\bn\b/);
+  assert.match(guided.state.message, /\bd\b/);
   assert.equal(applyKey(world, "s").effect, "none");
   assert.match(applyKey(world, "s").state.message, /nothing to save/);
+});
+
+test("numbers switch tabs; arrows, h/l and the tab key walk one tab's rows", () => {
+  const open = expandedOn(editState(), "trio"); // the cursor on trio, its three routes under it
+
+  // Forward descends and walks: the list's first route, then the next, and it stops at the last.
+  for (const key of ["right", "l", "tab"]) {
+    assert.equal(applyKey(open, key).state.tab, "aliases", `${key} stays on its tab`);
+    const first = applyKey(open, key).state;
+    assert.equal(selected(first).kind, "route", `${key} descends into the open list`);
+    assert.equal(selected(first).provider, "opencode-go");
+    const next = applyKey(first, key).state;
+    assert.equal(selected(next).provider, "kimi-code", `${key} walks to the next route`);
+    const last = applyKey(applyKey(next, key).state, key).state;
+    assert.equal(selected(last).provider, "cline-pass", `${key} stops at the last route`);
+  }
+
+  // Back climbs to the parent and closes the list; a closed list is nothing to do.
+  for (const key of ["left", "h", "shift-tab"]) {
+    const onChild = applyKey(open, "right").state;
+    const parent = applyKey(onChild, key).state;
+    assert.equal(parent.tab, "aliases");
+    assert.equal(selected(parent).alias, "trio", `${key} climbs back to the parent`);
+    const closed = applyKey(parent, key).state;
+    assert.equal(selected(closed).expanded, false, `${key} closes the list under it`);
+    const inert = applyKey(closed, key).state;
+    assert.deepEqual(inert.rows.aliases, closed.rows.aliases, `${key} does nothing on a closed alias`);
+    assert.equal(inert.cursors.aliases, closed.cursors.aliases);
+  }
+
+  // And none of them reach past the tab they are on.
+  const routes = applyKey(open, "3").state;
+  for (const key of ["tab", "shift-tab", "h", "l", "left", "right"]) {
+    const same = applyKey(routes, key).state;
+    assert.equal(same.tab, "routes", `${key} keeps its hands off the tab`);
+    assert.equal(same.cursors.routes, routes.cursors.routes, "and the routes list is flat");
+  }
 });
 
 test("a terminal chunk becomes one key name", () => {
@@ -423,6 +655,50 @@ test("a terminal chunk becomes one key name", () => {
   assert.equal(keyName("\r"), "return");
   assert.equal(keyName("\u0003"), "q", "ctrl-c is a quit, not a character");
   assert.equal(keyName("j"), "j");
+});
+
+test("escape is the way back — a picker, a proposal, a child row, an open list — and never a way out", () => {
+  const open = expandedOn(editState(), "trio");
+
+  // (1) a picker is closed and nothing else happens: the ladder is not reached past it.
+  const picker = { ...editState(), picker: { title: "t", options: ["a"], cursor: 0, pending: () => ({ summary: "x" }) } };
+  const closedPicker = applyKey(picker, "escape");
+  assert.equal(closedPicker.state.picker, null);
+  assert.equal(closedPicker.state.pending, null);
+
+  // (2) a pending proposal is dropped before anything further down the ladder.
+  const proposed = applyKey(cursorOn(open, routeRow(open, "trio", "opencode-go")), "J").state;
+  assert.ok(proposed.pending, "the fixture stands: there is a proposal to discard");
+  const discarded = applyKey(proposed, "escape");
+  assert.equal(discarded.state.pending, null);
+  assert.equal(discarded.state.message, "change discarded");
+
+  // (3) a route row hands the cursor back to its parent.
+  const climbed = applyKey(cursorOn(open, routeRow(open, "trio", "kimi-code")), "escape").state;
+  assert.equal(selected(climbed).kind, "alias");
+  assert.equal(selected(climbed).alias, "trio");
+
+  // (4) an open list under the cursor is closed; (5) a closed one has nothing to escape from.
+  const closed = applyKey(open, "escape").state;
+  assert.equal(selected(closed).expanded, false);
+  assert.equal(closed.cursors.aliases, open.cursors.aliases, "the cursor stays on the alias");
+  const inert = applyKey(closed, "escape").state;
+  assert.deepEqual(inert.rows.aliases, closed.rows.aliases);
+  assert.deepEqual(inert.expanded, closed.expanded);
+  assert.equal(inert.message, closed.message);
+
+  // Whatever else it means, escape never means quit — and `q`, outside a picker, still does.
+  for (const s of [editState(), open, proposed, climbed, closed, picker, { ...editState(), help: true }]) {
+    assert.notEqual(applyKey(s, "escape").effect, "quit");
+  }
+  assert.equal(applyKey(editState(), "q").effect, "quit", "q is still the way out");
+
+  // And the help box closes itself first, by either of its keys, before the ladder below it — the
+  // ladder does not run behind it.
+  const helped = applyKey({ ...editState(), help: true, pending: { summary: "x", errors: [], patch: {} } }, "escape").state;
+  assert.equal(helped.help, false);
+  assert.ok(helped.pending, "closing the help is not also discarding the proposal beneath it");
+  assert.equal(applyKey({ ...editState(), help: true }, "?").state.help, false);
 });
 
 /* ---------------------------------------------------------------- proposals */
@@ -457,21 +733,12 @@ test("a proposal changes one path, and the loader's verdict travels with it", ()
   assert.ok(invalid.errors.length > 0, "an unknown alias is refused");
   assert.match(invalid.errors.join("\n"), /no-such-alias/);
 
-  // Rotating an alias's routes reorders them, and says so.
-  const aliasRow = world.rows.aliases.find((entry) => entry.alias === "kimi");
-  const rotated = proposeRouteOrder({ state: world, row: aliasRow });
-  const providers = rotated.patch.aliases.kimi.providers;
-  assert.equal(providers.length, 2);
-  assert.equal(providers[1], "opencode-go", "the first route moved to the end");
-  assert.match(rotated.summary, /kimi now tries kimi-coding → opencode-go/);
-  assert.deepEqual(rotated.errors, []);
-
   // And the validation is the loader's, not a second opinion: a patch that breaks a rule reports it.
   assert.ok(validateAgainst(world, { fusions: { "review-check": { candidates: { "review-skeptic": ["ghost"] } } } }).length > 0);
   assert.deepEqual(validateAgainst(world, {}), []);
 });
 
-test("the picker proposes, and escape discards", () => {
+test("the picker proposes, and escape or q steps back out of it", () => {
   let world = { ...state(), tab: "routes" };
   world = applyKey(world, "e").state;
   assert.equal(world.picker, null, "applyKey only reports the intent; the driver opens the picker");
@@ -481,11 +748,130 @@ test("the picker proposes, and escape discards", () => {
   const chosen = applyKey(moved, "return").state;
   assert.equal(chosen.picker, null);
   assert.equal(chosen.pending.summary, "b", "the highlighted option is the proposal");
-  assert.equal(applyKey(opened, "escape").state.picker, null);
+  assert.equal(applyKey(opened, "escape").state.picker, null, "escape closes the picker and nothing more");
+  const backedOut = applyKey(opened, "q");
+  assert.equal(backedOut.state.picker, null, "q is a way back while a picker is open");
+  assert.notEqual(backedOut.effect, "quit", "…not a quit");
+  const untouched = applyKey(opened, "2");
+  assert.equal(untouched.state.picker.cursor, 0, "nothing else is handled while the picker is open");
+  assert.equal(untouched.state.tab, "routes", "not even the tab keys");
   assert.equal(applyKey({ ...world, pending: { summary: "x", errors: [] } }, "escape").state.pending, null);
+  assert.equal(applyKey({ ...world, pending: { summary: "x", errors: [] } }, "escape").state.message, "change discarded");
   const withErrors = { ...world, pending: { summary: "x", errors: ["boom"] } };
   assert.equal(applyKey(withErrors, "s").effect, "none", "an invalid change is not saved");
   assert.match(applyKey(withErrors, "s").state.message, /refused: boom/);
+});
+
+test("K and J walk a route through its alias's list, and the presses add up to one proposal", () => {
+  const open = expandedOn(editState(), "trio");
+
+  const first = applyKey(cursorOn(open, routeRow(open, "trio", "opencode-go")), "J").state;
+  assert.equal(first.message, "proposed — s saves, esc discards");
+  assert.equal(first.pending.listOf, "trio");
+  assert.deepEqual(first.pending.patch.aliases.trio.providers, ["kimi-code", "opencode-go", "cline-pass"]);
+  assert.deepEqual(first.pending.errors, [], "the loader accepts the moved order");
+  assert.deepEqual(
+    first.rows.aliases.filter((row) => row.kind === "route" && row.parent === "trio").map((row) => row.provider),
+    ["kimi-code", "opencode-go", "cline-pass"],
+    "the order on screen is the proposal",
+  );
+
+  // Whichever row the move left the cursor on, the next press walks the same route again — and the two
+  // presses are one pending proposal holding the net order, not two proposals stacked up.
+  const second = applyKey(cursorOn(first, routeRow(first, "trio", "opencode-go")), "J").state;
+  assert.deepEqual(second.pending.patch.aliases.trio.providers, ["kimi-code", "cline-pass", "opencode-go"]);
+  assert.equal(second.pending.listOf, "trio", "one proposal, carrying both presses");
+  assert.match(second.pending.summary, /trio/);
+  assert.match(second.pending.summary, /kimi-code → cline-pass → opencode-go/, "its summary is the full resulting order");
+
+  const back = applyKey(cursorOn(second, routeRow(second, "trio", "opencode-go")), "K").state;
+  assert.deepEqual(back.pending.patch.aliases.trio.providers, ["kimi-code", "opencode-go", "cline-pass"]);
+  assert.deepEqual(back.pending.errors, []);
+
+  // At either end of the list a move is refused as the non-change it is, and the refusal is the message.
+  const atFirst = applyKey(cursorOn(open, routeRow(open, "trio", "opencode-go")), "K").state;
+  assert.equal(atFirst.pending.saveable, false);
+  assert.match(atFirst.pending.summary, /already first/);
+  assert.match(atFirst.pending.summary, /trio/);
+  assert.equal(atFirst.message, atFirst.pending.summary);
+  const atLast = applyKey(cursorOn(open, routeRow(open, "trio", "cline-pass")), "J").state;
+  assert.equal(atLast.pending.saveable, false);
+  assert.match(atLast.pending.summary, /already last/);
+});
+
+test("the route keys name themselves and do nothing when the cursor is not on a route", () => {
+  for (const world of [expandedOn(editState(), "trio"), { ...editState(), tab: "routes" }]) {
+    for (const key of ["K", "J", "d", "n"]) {
+      const result = applyKey(world, key);
+      assert.equal(result.effect, "none", `${key} proposes nothing here`);
+      assert.equal(result.state.pending, null);
+      assert.equal(result.state.picker, null);
+      assert.match(result.state.message, /K\/J/);
+      assert.match(result.state.message, /\bn\b/);
+      assert.match(result.state.message, /\bd\b/);
+    }
+  }
+});
+
+test("d drops the cursor's route, and the loader refuses the alias it would empty", () => {
+  const open = expandedOn(editState(), "trio");
+  const dropped = applyKey(cursorOn(open, routeRow(open, "trio", "kimi-code")), "d").state;
+  assert.equal(dropped.pending.listOf, "trio");
+  assert.deepEqual(dropped.pending.patch.aliases.trio.providers, ["opencode-go", "cline-pass"]);
+  assert.deepEqual(dropped.pending.errors, []);
+  assert.match(dropped.pending.summary, /trio/);
+  assert.match(dropped.pending.summary, /opencode-go → cline-pass/, "the summary names what is left");
+  assert.deepEqual(
+    dropped.rows.aliases.filter((row) => row.kind === "route" && row.parent === "trio").map((row) => row.provider),
+    ["opencode-go", "cline-pass"],
+  );
+
+  // The proposal itself drops exactly the route it is handed.
+  const droppedFirst = proposeRouteDrop({ state: open, row: routeRow(open, "trio", "opencode-go") });
+  assert.deepEqual(droppedFirst.patch.aliases.trio.providers, ["kimi-code", "cline-pass"]);
+  assert.equal(droppedFirst.listOf, "trio");
+
+  // Dropping an alias's only route is not refused here: the empty list goes to the loader, and the
+  // loader's own complaint is what comes back.
+  const only = expandedOn(editState(), "kimiAlias");
+  const emptied = applyKey(cursorOn(only, routeRow(only, "kimiAlias", "cline-pass")), "d").state;
+  assert.deepEqual(emptied.pending.patch.aliases.kimiAlias.providers, [], "the drop is the empty list");
+  assert.notEqual(emptied.pending.saveable, false, "no self-authored refusal stands in for the loader's");
+  assert.ok(emptied.pending.errors.length > 0);
+  assert.match(emptied.pending.errors.join("\n"), /has no providers/);
+  assert.match(emptied.pending.summary, /kimiAlias/);
+  assert.match(emptied.pending.summary, /nothing/, "the summary names the empty order it is left with");
+  assert.equal(emptied.message, "", "an invalid change leaves the status line to the verdict bar");
+});
+
+test("n offers the routes the alias could add, and the choice lands after the cursor's route", () => {
+  const open = expandedOn(editState(), "kimi");
+  const opened = applyKey(cursorOn(open, routeRow(open, "kimi", "opencode-go")), "n");
+  assert.equal(opened.effect, "none");
+  assert.equal(opened.state.picker.title, "kimi: add route");
+  assert.deepEqual(opened.state.picker.options, ["cline-pass"], "providers any alias names, minus the ones this alias walks");
+  assert.equal(opened.state.picker.cursor, 0);
+  const chosen = applyKey(opened.state, "return").state;
+  assert.equal(chosen.picker, null);
+  assert.equal(chosen.pending.listOf, "kimi");
+  assert.deepEqual(
+    chosen.pending.patch.aliases.kimi.providers,
+    ["opencode-go", "cline-pass", "kimi-code"],
+    "inserted after the cursor's route",
+  );
+
+  // Called for a whole alias rather than one route, the new route goes to the end of its list.
+  const aliasRow = open.rows.aliases.find((row) => row.kind === "alias" && row.alias === "kimi");
+  const appended = proposeRouteAdd({ state: open, row: aliasRow, ref: "cline-pass" });
+  assert.deepEqual(appended.patch.aliases.kimi.providers, ["opencode-go", "kimi-code", "cline-pass"]);
+  assert.equal(appended.listOf, "kimi");
+
+  // An alias that already walks every provider the config names has nothing to add: a word, no picker.
+  const full = expandedOn(editState(), "trio");
+  const nothing = applyKey(cursorOn(full, routeRow(full, "trio", "opencode-go")), "n");
+  assert.equal(nothing.state.picker, null);
+  assert.notEqual(nothing.state.message, "");
+  assert.equal(nothing.state.pending, null);
 });
 
 /* ------------------------------------------------------------ frame and diff */
@@ -513,6 +899,16 @@ test("a frame keeps the table inside its panel and the detail under it", () => {
   for (const line of lines) assert.equal([...line].length, width);
   const withHelp = frameFor({ width, height, state: { ...world, help: true }, palette: paletteFor({ color: false }) });
   assert.match(Array.from({ length: height }, (_, row) => gridLine(withHelp, row)).join("\n"), /routes {2}— per fusion and seat/);
+});
+
+test("the keys hint shows the rain state and that the numbers pick the tabs", () => {
+  const palette = paletteFor({ color: false });
+  const hint = (world) => gridLine(frameFor({ width: 150, height: 20, state: world, palette, clock: "" }), 19);
+  const on = hint(state());
+  assert.match(on, /rain:ON/);
+  assert.match(hint({ ...state(), rain: false }), /rain:OFF/, "and says so when it is off");
+  for (const digit of ["1", "3"]) assert.ok(on.includes(digit), `the hint names tab key ${digit}`);
+  assert.ok(on.includes("tab"), "the numbers are named as tabs");
 });
 
 test("the diff renderer writes what changed, not what exists", () => {
@@ -560,6 +956,16 @@ test("the detail line names the selected row's own numbers", () => {
   );
   assert.match(routes, /refused: opencode-go quota×1/);
   assert.equal(detailFor(world, undefined), "");
+});
+
+test("the detail line under a route names its parent, its place in the list, and the model it runs", () => {
+  const world = expandedOn(state(), "muse");
+  const detail = detailFor(world, routeRow(world, "muse", "cline-pass"));
+  assert.match(detail, /muse/);
+  assert.match(detail, /cline-pass/);
+  assert.match(detail, /cline-free\/muse/);
+  assert.match(detail, /2\/2/);
+  assert.match(detail, /seats 1/);
 });
 
 test("a reload keeps your place: the tab, the cursors and the toggles survive it", () => {
@@ -636,9 +1042,10 @@ test("a save asks the loader again, and refuses what it cannot validate or read"
   };
   assert.equal(unreadable.layerReadError !== null, true, "an unreadable layer is a named state");
 
-  // A proposal that changes nothing is not saveable, whatever its summary says.
-  const aliasRow = world.rows.aliases.find((row) => row.alias === "kimiAlias");
-  const noop = proposeRouteOrder({ state: world, row: aliasRow });
+  // A proposal that changes nothing is not saveable, whatever its summary says: moving an alias's only
+  // route is refused as the non-change it is.
+  const only = expandedOn(world, "kimiAlias");
+  const noop = proposeRouteMove({ state: only, row: routeRow(only, "kimiAlias", "cline-pass"), delta: -1 });
   assert.equal(noop.saveable, false);
   assert.equal(applyKey({ ...world, pending: noop }, "s").effect, "none", "so `s` writes nothing");
   assert.match(applyKey({ ...world, pending: noop }, "s").state.message, /changes nothing/);
@@ -713,5 +1120,53 @@ test("a proposal writes only its own path into the layer it names", () => {
   const pending = proposeSeatAlias({ state: world, row, alias: "muse" });
   fs.writeFileSync(file, `${JSON.stringify(pending.patch, null, 2)}\n`);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { fusions: { quick: { candidates: { technical: ["muse"] } } } });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a moved, dropped or added route is what the layer file comes to hold", async () => {
+  // The same proposals the keys build, through the writer to real files: what is asserted is the
+  // bytes on disk, and the loader is asked again at the moment of writing. The packaged config is a
+  // base it accepts, so its `kimi` is a route list worth editing.
+  const packaged = loadMatrixConfig({ cwd: root, layers: ["packaged"] }).config;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tui-routes-"));
+  const file = path.join(dir, "pi-fusion-matrix.json");
+  const opts = { dbPath: path.join(dir, "no-store.db") };
+  const world = () =>
+    buildState({
+      config: packaged,
+      baseConfig: packaged,
+      layerConfig: {},
+      layerFile: file,
+      modelStats: [],
+      fusionStats: [],
+      seatStats: [],
+    });
+  const onKimi = expandedOn(world(), "kimi");
+  const route = (provider) => routeRow(onKimi, "kimi", provider);
+
+  // Reordered: the first route becomes the second, and the layer holds exactly that.
+  const moved = applyKey(cursorOn(onKimi, route("opencode-go")), "J").state;
+  const wroteMoved = await commitProposal(moved, opts);
+  assert.equal(wroteMoved.wrote, true, "the moved order is written");
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), {
+    aliases: { kimi: { providers: [{ id: "kimi-coding", modelOverride: "k3" }, "opencode-go"] } },
+  });
+
+  // Dropped: what remains is what the file says.
+  fs.rmSync(file);
+  const dropped = applyKey(cursorOn(onKimi, route("kimi-coding")), "d").state;
+  const wroteDropped = await commitProposal(dropped, opts);
+  assert.equal(wroteDropped.wrote, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { aliases: { kimi: { providers: ["opencode-go"] } } });
+
+  // Added: the new route lands after the cursor's, string ref and all.
+  fs.rmSync(file);
+  const added = proposeRouteAdd({ state: onKimi, row: route("opencode-go"), ref: "zai" });
+  const wroteAdded = await commitProposal({ ...onKimi, pending: added }, opts);
+  assert.equal(wroteAdded.wrote, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), {
+    aliases: { kimi: { providers: ["opencode-go", "zai", { id: "kimi-coding", modelOverride: "k3" }] } },
+  });
+
   fs.rmSync(dir, { recursive: true, force: true });
 });
