@@ -16,14 +16,16 @@
  *
  * Editing is deliberate. `⏎` expands an alias into the routes it walks, where `K`/`J` reorder them and
  * `d` drops one — each staged as a two-step *proposal*: the status bar shows it, the layer it would be
- * written to, *and whether the config still validates*; `s` writes it. `n` adds a *sibling* to whatever
- * the cursor sits on — at alias level a whole new alias (its name, the vendor model it names, and the
- * first route it walks, one prompt each), at route level one more route after the cursor's — and the
- * last answer submits it straight through that same validated write: the prompt's submit creates and
- * saves, no second `s`. `e` re-points a seat on the routes tab. `esc` goes back (a prompt step, then
- * discarding a proposal, then leaving a route, then collapsing an alias) and only `q` quits. A change
- * that would not load is refused with the loader's own message before the file is touched — the same
- * rule the loader enforces, not a second opinion about it.
+ * written to, *and whether the config still validates*; `s` writes it. `n` opens the *route builder* —
+ * a provider → models tree beside the routes being built, in place of typed prompts: no provider id is
+ * ever typed, `⏎` on a model adds that (provider, model) pair whole, `K`/`J`/`d` move and drop it in
+ * the list beside the tree, and `s` writes the picked list through that same validated write. At alias
+ * level `n` builds a new alias — its name is the one prompt left, and the alias's `model` is its first
+ * route's picked model; at route level the builder holds that alias's whole list, seeded with what it
+ * walks now. `e` re-points a seat on the routes tab. `esc` goes back (a builder step, then a prompt
+ * step, then discarding a proposal, then leaving a route, then collapsing an alias) and only `q` quits.
+ * A change that would not load is refused with the loader's own message before the file is touched —
+ * the same rule the loader enforces, not a second opinion about it.
  *
  * The driver is the only part that needs a terminal: the rain (`tui-rain.mjs`), the layout, the
  * tables and the key handling (`tui-view.mjs`) are pure, so a test drives the interface without a TTY
@@ -50,7 +52,18 @@ import {
   routeRows,
   truncate,
 } from "./tui-view.mjs";
-import { DEFAULT_CATALOGUE, DEFAULT_DB, byFusion, byFusionSeat, byModel, ingest, loadSqlite, openStore, totals } from "./metrics-store.mjs";
+import {
+  DEFAULT_CATALOGUE,
+  DEFAULT_DB,
+  byFusion,
+  byFusionSeat,
+  byModel,
+  ingest,
+  loadSqlite,
+  openStore,
+  readPriceCard,
+  totals,
+} from "./metrics-store.mjs";
 import { configPaths, loadMatrixConfig, mergeConfig, validateConfig } from "../extensions/pi-fusion-matrix/config.js";
 
 const args = process.argv.slice(2);
@@ -61,6 +74,33 @@ const value = (name, fallback) => {
 };
 
 /* ------------------------------------------------------------------- state */
+
+/**
+ * The provider → models tree the route builder picks from, merged from everything that knows a pair:
+ * pi's own registry (`registry.getAll()`, the catalogue the doctor checks against), the harness rate
+ * card (`readPriceCard` over `DEFAULT_CATALOGUE`), and the pairs the config already names — an
+ * alias's `model` under each of its providers, and a ref's `modelOverride` under its own id. Sorted
+ * by provider, models sorted, duplicates collapsed. A source that is not there contributes nothing:
+ * no registry is a smaller tree, never an error.
+ */
+export function catalogueFor({ registry, priceCard, config } = {}) {
+  const byProvider = new Map();
+  const add = (provider, model) => {
+    if (typeof provider !== "string" || !provider || typeof model !== "string" || !model) return;
+    const models = byProvider.get(provider) ?? new Set();
+    models.add(model);
+    byProvider.set(provider, models);
+  };
+  for (const entry of registry?.getAll?.() ?? []) add(entry?.provider, entry?.id);
+  for (const row of priceCard?.rows ?? []) add(row?.provider, row?.model);
+  for (const alias of Object.values(config?.aliases ?? {})) {
+    for (const ref of alias?.providers ?? []) {
+      add(typeof ref === "string" ? ref : ref?.id, alias?.model);
+      if (ref && typeof ref === "object") add(ref.id, ref.modelOverride);
+    }
+  }
+  return [...byProvider.keys()].sort().map((provider) => ({ provider, models: [...byProvider.get(provider)].sort() }));
+}
 
 /**
  * The whole interface state, built from the config and the store. `rows` is rebuilt on every reload;
@@ -79,6 +119,7 @@ export function buildState({
   layerConfig = {},
   layerFile = "",
   layerReadError = null,
+  catalogue = [],
 } = {}) {
   const state = {
     tab: "aliases",
@@ -91,6 +132,7 @@ export function buildState({
     },
     stats: { modelStats, fusionStats, seatStats },
     config,
+    catalogue,
     baseConfig,
     layerConfig,
     layerFile,
@@ -98,6 +140,7 @@ export function buildState({
     pending: null,
     picker: null,
     input: null,
+    builder: null,
     help: false,
     rain: true,
     color: true,
@@ -136,16 +179,28 @@ const LIST_KEYS = "K/J move · d drop need a route row — ⏎ expands an alias 
 const READ_ONLY = "the fusions tab is read-only for now";
 
 /**
+ * The builder's tree as its visible rows — every provider in catalogue order, and the models under
+ * exactly the ones that are open. `left` counts these: provider rows and their indented models.
+ */
+const treeRows = (tree, expanded) =>
+  (tree ?? []).flatMap((entry) => [
+    { kind: "provider", provider: entry.provider, models: entry.models ?? [] },
+    ...(expanded?.[entry.provider] ? (entry.models ?? []).map((model) => ({ kind: "model", provider: entry.provider, model })) : []),
+  ]);
+
+/**
  * A key into a new state. No terminal, no I/O: the driver applies the effect, and the tests drive
  * this directly. Effects: `quit`, `reload`, `reingest`, `propose`, `save`, `none`.
  *
  * `1`/`2`/`3` are the only keys that switch tabs; `tab`/`shift-tab`, the arrows and `h`/`l` walk the
  * rows *inside* one — a tree on the aliases tab, where `enter` expands an alias into its routes and
  * the arrows move between a route and its parent. `K`/`J`/`d` reshape the route list under the cursor
- * as staged proposals `s` writes, while `n` adds a sibling — a new alias at alias level (its name, its
- * model and its first route, one prompt each), a route after the cursor's at route level — its prompt
- * saving what it adds as it submits. `esc` is back (a prompt step first, then a pending change, then a
- * route, then an expansion), and only `q` ever quits.
+ * as staged proposals `s` writes, while `n` opens the route builder — a provider → models tree beside
+ * the routes being built, where `enter` adds a pair and `s` writes the picked list whole. At alias
+ * level that builder defines a new alias (one name prompt first; the alias's `model` is its first
+ * route's picked model), at route level it edits the cursor's alias's whole list. `esc` is back (the
+ * builder first, then a prompt step, then a pending change, then a route, then an expansion), and only
+ * `q` ever quits.
  */
 export function applyKey(state, key) {
   const next = { ...state, cursors: { ...state.cursors }, message: state.message };
@@ -179,18 +234,102 @@ export function applyKey(state, key) {
     refresh();
   };
 
-  // The typing surface, asked first while it is open: an answer is going in, so every printable key
+  // The route builder, asked before every other surface while it is open: the providers-and-models
+  // tree on the left, the routes being built on the right. Only its own keys mean anything — `q`
+  // included, everything else is inert — and ctrl-c is still the way out. `s` is the whole write: the
+  // builder's `commit` either names its refusal (and the builder stays open over the list) or hands
+  // back the proposal, staged exactly like a prompt's and saved in the same breath.
+  if (state.builder) {
+    const builder = state.builder;
+    const flat = treeRows(builder.tree, builder.expanded);
+    const node = flat[builder.left];
+    const edited = (patch) => ({ state: { ...next, builder: { ...builder, ...patch } }, effect: "none" });
+    if (key === "ctrl-c") return { state: next, effect: "quit" };
+    if (key === "tab") return edited({ focus: "routes" });
+    if (key === "shift-tab") return edited({ focus: "tree" });
+    if (key === "j" || key === "down" || key === "k" || key === "up") {
+      const delta = key === "j" || key === "down" ? 1 : -1;
+      return builder.focus === "routes"
+        ? edited({ right: clamp(builder.right + delta, 0, Math.max(0, builder.routes.length - 1)) })
+        : edited({ left: clamp(builder.left + delta, 0, Math.max(0, flat.length - 1)) });
+    }
+    if (key === "return" || key === "enter") {
+      if (builder.focus !== "tree" || !node) return { state: next, effect: "none" };
+      if (node.kind === "provider") return edited({ expanded: { ...builder.expanded, [node.provider]: !builder.expanded[node.provider] } });
+      // A model is picked whole — the pair it names is appended exactly, and the routes cursor sits
+      // on it without dragging focus over, so a few can be picked in a row.
+      const routes = [...builder.routes, { id: node.provider, model: node.model }];
+      return edited({ routes, right: routes.length - 1 });
+    }
+    if (key === "right" || key === "l") {
+      if (builder.focus !== "tree" || !node) return { state: next, effect: "none" };
+      const open = treeRows(builder.tree, { ...builder.expanded, [node.provider]: true });
+      const first = open.findIndex((entry) => entry.kind === "model" && entry.provider === node.provider);
+      return edited({ expanded: { ...builder.expanded, [node.provider]: true }, left: first >= 0 ? first : builder.left });
+    }
+    if (key === "left" || key === "h") {
+      if (builder.focus !== "tree" || !node) return { state: next, effect: "none" };
+      if (node.kind === "provider") return edited({ expanded: { ...builder.expanded, [node.provider]: false } });
+      return edited({ left: flat.findIndex((entry) => entry.kind === "provider" && entry.provider === node.provider) });
+    }
+    if (key === "K" || key === "J") {
+      const to = builder.right + (key === "K" ? -1 : 1);
+      if (builder.focus !== "routes" || to < 0 || to >= builder.routes.length) return { state: next, effect: "none" };
+      const routes = [...builder.routes];
+      [routes[builder.right], routes[to]] = [routes[to], routes[builder.right]];
+      return edited({ routes, right: to });
+    }
+    if (key === "d") {
+      if (builder.focus !== "routes" || builder.routes.length === 0) return { state: next, effect: "none" };
+      const routes = builder.routes.filter((_, at) => at !== builder.right);
+      return edited({ routes, right: clamp(builder.right, 0, Math.max(0, routes.length - 1)) });
+    }
+    if (key === "s") {
+      const out = builder.commit(builder.routes);
+      if (out.error !== undefined) {
+        next.message = out.error;
+        return { state: next, effect: "none" };
+      }
+      if (out.proposal !== undefined) {
+        next.builder = null;
+        accept(out.proposal);
+        return { state: next, effect: "save" };
+      }
+      return { state: next, effect: "none" };
+    }
+    if (key === "escape") {
+      // Back, to the modal that opened this one: an earlier builder takes the builder slot again, the
+      // alias chain's name step comes back over its typing, and a directly opened builder just closes.
+      const back = builder.back ?? null;
+      if (typeof back?.commit === "function") next.builder = back;
+      else {
+        next.builder = null;
+        next.input = back;
+      }
+      return { state: next, effect: "none" };
+    }
+    return { state: next, effect: "none" };
+  }
+
+  // The typing surface, asked next while it is open: an answer is going in, so every printable key
   // is text — `q` types a q rather than quitting — and only these named keys mean anything else. A
   // step's `submit` answers with one of three outcomes: an error names the refusal and keeps the
-  // prompt over its typing, an input is the chain's next step, a proposal is the change itself.
+  // prompt over its typing, an input is the chain's next step (another prompt, or the route builder
+  // that ends the alias chain), a proposal is the change itself.
   if (state.input) {
     const input = state.input;
     if (key === "backspace") next.input = { ...input, value: input.value.slice(0, -1) };
     else if (key === "return" || key === "enter") {
       const out = input.submit(input.value.trim());
       if (out.error !== undefined) next.message = out.error;
-      else if (out.input !== undefined) next.input = out.input;
-      else if (out.proposal !== undefined) {
+      else if (out.input !== undefined) {
+        // The chain's next step: another prompt, or — the end of the alias chain — the route builder,
+        // which takes the builder slot over the typing rather than the input one.
+        if (typeof out.input.commit === "function") {
+          next.input = null;
+          next.builder = out.input;
+        } else next.input = out.input;
+      } else if (out.proposal !== undefined) {
         next.input = null;
         accept(out.proposal);
         // Submitting the prompt is create *and* save: the staged proposal goes through the same
@@ -275,21 +414,29 @@ export function applyKey(state, key) {
     else accept(proposeRouteDrop({ state, row }));
   } else if (key === "n") {
     if (tab !== "aliases" || !row) next.message = LIST_KEYS;
+    else if (!state.catalogue?.length) next.message = "no provider/model list to choose from";
     else if (row.kind === "route") {
-      // A route's sibling is one more route of its parent: the single prompt, inserting after the
-      // cursor's route, over the list that stays on screen while the name is typed.
-      setExpanded(row.parent, true);
-      next.input = {
-        title: `${row.parent}: add route`,
-        value: "",
-        hint: "type the route's provider id · enter adds · esc discards",
+      // A route row's `n` edits its alias's WHOLE list in the route builder, seeded with the current
+      // refs at their effective models — reordered, dropped and picked again there, then written
+      // wholesale by `s`. The alias's own model never moves.
+      const owner = listOwner(row);
+      const spec = displayConfig(state).aliases?.[owner] ?? {};
+      next.builder = {
+        title: `${owner}: routes`,
+        tree: state.catalogue,
+        expanded: {},
+        left: 0,
+        routes: (spec.providers ?? []).map((ref) => ({ id: refName(ref), model: effectiveModel(ref, spec) })),
+        right: 0,
+        focus: "tree",
+        commit: (routes) =>
+          routes.length ? { proposal: proposeRouteList({ state, row, routes }) } : { error: "a route list cannot be empty" },
         back: null,
-        submit: (ref) => (ref ? { proposal: proposeRouteAdd({ state, row, ref }) } : { error: "a route needs a name" }),
       };
     } else {
-      // An alias's sibling is a whole alias — a name, the vendor model it names, and the first route
-      // it walks — so the ask is a chain: each answer opens the next step over the one before it,
-      // `esc` steps back to it with its typing, and nothing is staged until the last answer saves.
+      // An alias's sibling is a whole alias, and the builder is what defines it: the name prompt
+      // chains straight into the route builder over its typing, `esc` steps back to the name with its
+      // typing, and the new alias's `model` is simply its first route's picked model.
       const nameStep = {
         title: "new alias",
         value: "",
@@ -298,23 +445,23 @@ export function applyKey(state, key) {
         submit: (name) => {
           if (!name) return { error: "an alias needs a name" };
           if (Object.keys(displayConfig(state).aliases ?? {}).includes(name)) return { error: `${name} already exists` };
-          return { input: modelStep(name) };
+          return { input: builderStep(name) };
         },
       };
-      const modelStep = (name) => ({
-        title: `${name}: model`,
-        value: "",
-        hint: "type the vendor model id · enter continues · esc back",
+      const builderStep = (name) => ({
+        title: `${name}: routes`,
+        tree: state.catalogue,
+        expanded: {},
+        left: 0,
+        routes: [],
+        right: 0,
+        focus: "tree",
+        commit: (routes) =>
+          routes.length
+            ? { proposal: proposeAliasCreate({ state, name, model: routes[0].model, routes }) }
+            : { error: "an alias needs at least one route" },
         // Back is the step before, as it was left — its typing comes back with it.
         back: { ...nameStep, value: name },
-        submit: (model) => (model ? { input: routeStep(name, model) } : { error: "a model id is required" }),
-      });
-      const routeStep = (name, model) => ({
-        title: `${name}: first route`,
-        value: "",
-        hint: "type the route's provider id · enter adds · esc discards",
-        back: { ...modelStep(name), value: model },
-        submit: (ref) => (ref ? { proposal: proposeAliasCreate({ state, name, model, ref }) } : { error: "a route needs a name" }),
       });
       next.input = nameStep;
     }
@@ -391,6 +538,15 @@ export function proposeSeatAlias({ state, row, alias }) {
 /** A provider entry as its id: the config takes a plain name or an object carrying overrides. */
 const refName = (ref) => (typeof ref === "string" ? ref : (ref.id ?? "?"));
 
+/** A route's effective model: the alias's own `model`, or the ref's `modelOverride` where it names one. */
+const effectiveModel = (ref, alias) => (typeof ref === "string" ? alias.model : (ref.modelOverride ?? alias.model));
+
+/**
+ * A picked pair the way `matrix-info` prints a route: the provider alone where the pair walks
+ * `model`, and `provider:model` where it names another one.
+ */
+const pairLabel = (pair, model) => (pair.model === model ? pair.id : `${pair.id}:${pair.model}`);
+
 /** The alias a route-list row belongs to — its parent, or the row itself when it is the parent. */
 const listOwner = (row) => (row.kind === "route" ? row.parent : row.alias);
 
@@ -466,36 +622,50 @@ export function proposeRouteDrop({ state, row }) {
   };
 }
 
-/** The change adding a route proposes: `ref` after the cursor's route — at the end for a parent row. */
-export function proposeRouteAdd({ state, row, ref }) {
+/**
+ * Picked pairs as provider refs: the plain id where the pair walks the alias's `model`, and an
+ * explicit `modelOverride` where it names another model. A pair is stored exactly as picked — never
+ * substituted toward the alias's model, and never away from it.
+ */
+const normalizeRefs = (routes, model) =>
+  routes.map((pair) => (pair.model === model ? pair.id : { id: pair.id, modelOverride: pair.model }));
+
+/**
+ * The change the route builder commits over an existing alias: its list, WHOLESALE, exactly as
+ * picked. What was there is replaced rather than spliced — the only honest write for a list that was
+ * seeded, reordered and re-picked in one sitting — and the alias's own `model` never moves here:
+ * editing the routes must not re-point the alias, so each pair is stored against it (`modelOverride`
+ * only where a pair names a different model).
+ */
+export function proposeRouteList({ state, row, routes }) {
   const owner = listOwner(row);
-  const providers = [...(displayConfig(state).aliases?.[owner]?.providers ?? [])];
-  providers.splice(row.kind === "route" ? row.index + 1 : providers.length, 0, ref);
-  const patch = routePatch(state, row, providers);
+  const refs = normalizeRefs(routes, displayConfig(state).aliases?.[owner]?.model);
+  const patch = routePatch(state, row, refs);
   return {
     listOf: owner,
     layerFile: state.layerFile,
     patch,
-    summary: triesSummary(owner, providers),
+    summary: triesSummary(owner, refs),
     errors: validateAgainst(state, patch),
   };
 }
 
 /**
- * The change creating an alias proposes: a new alias naming `model` and walking `ref` first — the end
- * of the new-alias prompt chain (name, model, first route). It builds over the same baseline the
- * route-list changes do, so it accumulates into a pending change for the same name rather than
- * starting again from the layer on disk, and the alias it names replaces whatever entry was there.
+ * The change creating an alias proposes: the alias the route builder's picked list defines — its
+ * `model` is the first route's picked model, and the list is stored exactly as picked. It is the end
+ * of the name → builder chain. It builds over the same baseline the route-list changes do, so it
+ * accumulates into a pending change for the same name rather than starting again from the layer on
+ * disk, and the alias it names replaces whatever entry was there.
  */
-export function proposeAliasCreate({ state, name, model, ref }) {
+export function proposeAliasCreate({ state, name, model, routes }) {
   const patch = routeBaseline(state, name);
   patch.aliases = patch.aliases ?? {};
-  patch.aliases[name] = { model, providers: [ref] };
+  patch.aliases[name] = { model, providers: normalizeRefs(routes, model) };
   return {
     listOf: name,
     layerFile: state.layerFile,
     patch,
-    summary: `${name} → ${model} walking ${ref}`,
+    summary: `${name} = ${model} @ ${routes.map((pair) => pairLabel(pair, model)).join(" → ")}`,
     errors: validateAgainst(state, patch),
   };
 }
@@ -513,8 +683,8 @@ export function validateAgainst(state, patch) {
 
 /**
  * The interactive `e`: a proposal for the selected row, through a picker where one is needed. The
- * aliases tab never comes here — its tree is edited with `K`/`J`/`n`/`d`, `n` naming a sibling — and
- * the fusions tab has nothing to propose yet.
+ * aliases tab never comes here — its tree is edited with `K`/`J`/`n`/`d`, `n` opening the route
+ * builder — and the fusions tab has nothing to propose yet.
  */
 export function proposeFor(state) {
   const row = selected(state);
@@ -589,9 +759,9 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
   // two things a reader would otherwise never discover (`1`-`3`, and that `a` is a toggle at all).
   const rainState = state.rain ? "rain:ON" : "rain:OFF";
   const keys =
-    "1/2/3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same · K/J move route · n add sibling · " +
+    "1/2/3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same · K/J move route · n route builder · " +
     `d drop route · e edit (routes) · s save · esc back/discard · R reingest · r reload · a ${rainState} · c colour · ? help · q quit`;
-  const keysShort = `1-3 tabs · j/k rows · ⏎ open · K/J move · n add · d drop · a ${rainState} · ? help · q quit`;
+  const keysShort = `1-3 tabs · j/k rows · ⏎ open · K/J move · n builder · d drop · a ${rainState} · ? help · q quit`;
   const hint = width > keys.length + 12 ? keys : keysShort;
   put(grid, height - 1, Math.max(1, width - hint.length - 1), truncate(hint, width - 2), palette.dim);
   put(grid, height - 1, 1, clock, palette.dim);
@@ -602,13 +772,13 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
       "fusions — mode and face, then runs, failures, degraded seats, cascades, verify, findings, cost",
       "routes  — per fusion and seat: the ordered candidates from config, which alias answered, what refused",
       "keys — 1/2/3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same",
-      "       K/J move route · n add sibling · d drop route · e edit (routes) · s save · esc back/discard · R reingest",
+      "       K/J move route · n route builder · d drop route · e edit (routes) · s save · esc back/discard · R reingest",
       "       r reload · a rain · c colour · q quit",
       "e re-points a seat (routes tab); ⏎ expands an alias into the routes K/J and d reshape",
       "K/J/d stage a proposal: the bar shows it and whether it still validates, s writes it to the",
-      "layer named under it once the loader accepts it; n adds a sibling — at alias level a new alias",
-      "(its name, model and first route, one prompt each), at route level a route after the cursor's —",
-      "submitted through that same validated write, and esc goes back and discards",
+      "layer named under it once the loader accepts it; n opens the route builder — a provider/model",
+      "tree beside the routes being built, where ⏎ adds a pick and J/K/d move and drop the list;",
+      "s writes the picked list whole, a new alias's model is its first route's model, and esc backs out",
       "$report is what providers priced (with the seats it covers), $est is their own rate card applied to",
       "unpriced seats, $list is the same tokens at list price — one basis per column, never folded together",
     ];
@@ -664,6 +834,73 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
     );
     put(grid, inner.row, inner.col, truncate(line, inner.width), palette.ink);
     put(grid, inner.row + 1, inner.col, truncate(hint, inner.width), palette.dim);
+  }
+
+  // The route builder, over everything else: a box that sizes itself to its content and fills most of
+  // the width when there is width to fill. The provider → models tree on the left, the routes being
+  // built on the right, and under both the alias's identity line and the keys that finish or back out.
+  if (state.builder) {
+    const builder = state.builder;
+    const flat = treeRows(builder.tree, builder.expanded);
+    const treeLines = flat.map((entry) =>
+      entry.kind === "provider" ? `${builder.expanded[entry.provider] ? "▾" : "▸"} ${entry.provider}` : `  ${entry.model}`,
+    );
+    const routeLines = builder.routes.map((pair) => `${pair.id} → ${pair.model}`);
+    const shown = routeLines.length ? routeLines : ["no routes yet"];
+    const want = (lines, title) => Math.max(10, title.length + 2, ...lines.map((line) => line.length + 2));
+    const contentWidth = want(treeLines, "models") + 3 + want(shown, "routes");
+    const boxWidth = Math.min(width - 4, Math.max(contentWidth, Math.floor((width - 4) * 0.8), 28));
+    const boxHeight = Math.min(height - 4, Math.max(treeLines.length, routeLines.length, 1) + 5);
+    const top = Math.max(2, Math.floor((height - boxHeight) / 2));
+    const inner = drawPanel(
+      grid,
+      { row: top, col: Math.floor((width - boxWidth) / 2), width: boxWidth, height: boxHeight, title: builder.title },
+      palette,
+    );
+    const leftCol = Math.min(want(treeLines, "models"), Math.max(10, Math.floor((inner.width - 3) / 2)));
+    const at = inner.col + leftCol + 3;
+    const rightCol = Math.max(0, inner.width - leftCol - 3);
+    const body = Math.max(0, inner.height - 3);
+    // Both panes keep their cursor on screen the way the picker does — a cursor scrolled out of its
+    // own box is a blind commit.
+    const view = (count, cursor) => {
+      const first = clamp(cursor - body + 1, 0, Math.max(0, count - body));
+      return { first, last: Math.min(count, first + body) };
+    };
+    put(grid, inner.row, inner.col, truncate("models", leftCol), builder.focus === "tree" ? palette.accent : palette.dim);
+    put(grid, inner.row, at, truncate("routes", rightCol), builder.focus === "routes" ? palette.accent : palette.dim);
+    for (let row = inner.row; row < inner.row + inner.height; row += 1) put(grid, row, inner.col + leftCol + 1, "│", palette.box);
+    const treeView = view(treeLines.length, builder.left);
+    for (let i = treeView.first; i < treeView.last; i += 1) {
+      put(
+        grid,
+        inner.row + 1 + (i - treeView.first),
+        inner.col,
+        truncate(treeLines[i], leftCol),
+        i === builder.left ? (builder.focus === "tree" ? palette.selected : palette.accent) : palette.ink,
+      );
+    }
+    const routeView = view(shown.length, builder.right);
+    for (let i = routeView.first; i < routeView.last; i += 1) {
+      const style = !routeLines.length
+        ? palette.dim
+        : i === builder.right
+          ? builder.focus === "routes"
+            ? palette.selected
+            : palette.accent
+          : palette.ink;
+      put(grid, inner.row + 1 + (i - routeView.first), at, truncate(shown[i], rightCol), style);
+    }
+    // The identity line is `matrix-info`'s own line, live: the name, the model the alias carries (the
+    // existing one at route-edit time — the `commit` closure is the authority here, never this line —
+    // and the first route's model only while a new alias is being picked), then the routes as picked.
+    const name = builder.title.replace(/: routes$/, "");
+    const model = displayConfig(state).aliases?.[name]?.model ?? builder.routes[0]?.model ?? "—";
+    const picked = builder.routes.map((pair) => pairLabel(pair, model)).join(" → ") || "—";
+    const identity = `${name} = ${model} @ ${picked}`;
+    put(grid, inner.row + inner.height - 2, inner.col, truncate(identity, inner.width), palette.ink);
+    const hintLine = "tab pane · ⏎ open/add · J/K move · d drop · s writes · esc back";
+    put(grid, inner.row + inner.height - 1, inner.col, truncate(hintLine, inner.width), palette.dim);
   }
 
   return grid;
@@ -801,8 +1038,18 @@ const readLayer = (file) => {
   }
 };
 
-/** Load the config and the store's stats. A missing store is a named state, not an empty table. */
-export async function loadWorld({ dbPath = DEFAULT_DB, cwd = process.cwd(), layerFile } = {}) {
+/**
+ * Load the config and the store's stats. A missing store is a named state, not an empty table. The
+ * same read collects the route builder's tree: pi's `registry`, the rate card at `catalogue`, and the
+ * pairs the config names, merged by `catalogueFor`.
+ */
+export async function loadWorld({
+  dbPath = DEFAULT_DB,
+  cwd = process.cwd(),
+  layerFile,
+  registry = null,
+  catalogue = DEFAULT_CATALOGUE,
+} = {}) {
   const loaded = loadMatrixConfig({ cwd });
   const paths = configPaths({ cwd });
   const target = layerFile ?? paths.machine;
@@ -824,6 +1071,7 @@ export async function loadWorld({ dbPath = DEFAULT_DB, cwd = process.cwd(), laye
   }
   const state = buildState({
     config: loaded.config,
+    catalogue: catalogueFor({ registry, priceCard: readPriceCard(catalogue), config: loaded.config }),
     baseConfig,
     layerConfig,
     layerFile: target,
@@ -856,9 +1104,11 @@ async function reingest({ dbPath, catalogue }) {
 /**
  * A freshly loaded world, adopted without losing your place: the tab, the per-tab cursors and the
  * display toggles belong to the *view*, and a reload that reset them sent the reader back to the first
- * tab every time a change was saved. Cursors are clamped to what the reloaded tabs actually hold — a
- * reload can shrink a table (a store that emptied, a fusion that went away), and a stale cursor reads
- * as "nothing selected" with a blank detail line rather than as the move it was.
+ * tab every time a change was saved. The catalogue the route builder picks from belongs to the view
+ * too — session knowledge (registry, rate card, config pairs), not layer state. Cursors are clamped to
+ * what the reloaded tabs actually hold — a reload can shrink a table (a store that emptied, a fusion
+ * that went away), and a stale cursor reads as "nothing selected" with a blank detail line rather than
+ * as the move it was. Every modal closes: the layer was re-read under it.
  */
 export const adopt = (current, reloaded) => {
   const state = {
@@ -870,8 +1120,10 @@ export const adopt = (current, reloaded) => {
     help: current.help,
     picker: null,
     input: null,
+    builder: null,
     rain: current.rain,
     color: current.color,
+    catalogue: current.catalogue ?? reloaded.state.catalogue,
   };
   // Which aliases are open is view state too, so the aliases rows are rebuilt around it exactly as a
   // key that changes it rebuilds them — before the cursors are clamped into what is actually there.
@@ -950,7 +1202,7 @@ export async function main() {
   // named here — the flag that lets a smoke test exercise the write path without touching an
   // operator's own overlay.
   const layerFile = value("layer", null) ?? undefined;
-  const world = await loadWorld({ dbPath, layerFile });
+  const world = await loadWorld({ dbPath, layerFile, catalogue });
   let state = { ...world.state, color: !has("no-color") && !process.env.NO_COLOR, rain: !has("no-rain") };
   let palette = paletteFor({ color: state.color });
 
@@ -998,7 +1250,7 @@ export async function main() {
   };
 
   const reload = async (note) => {
-    const reloaded = await loadWorld({ dbPath, layerFile });
+    const reloaded = await loadWorld({ dbPath, layerFile, catalogue });
     state = { ...adopt(state, reloaded), message: note || reloaded.state.message };
   };
 

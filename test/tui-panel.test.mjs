@@ -229,65 +229,151 @@ test("esc is back: it closes a modal, never the matrix", async (t) => {
   panel.dispose();
 });
 
-test("n adds a sibling at the cursor's level — an alias at alias level, a route at route level", async (t) => {
+test("n opens the route builder — the tree picks the pairs, the list beside it keeps them, and s writes through", async (t) => {
   const { panel, calls, layerFile } = await mountPanel(t, "aliases");
-  const found = findRow(panel, (providers) => providers.length > 0);
-  assert.ok(found, "the config carries a parent alias row to sit the cursor on");
-  // Alias level: the sibling is a whole new alias, so `n` runs a three-ask chain — name, model, first route.
+  // The tree is whatever this machine's catalogue actually holds — the registry's models, the rate card's rows, and the pairs the config
+  // already names, merged. Nothing in it is named here: the walk finds a provider with models at runtime, and an empty catalogue is a
+  // named refusal instead of a walk — so the suite means the same thing on every machine.
+  const catalogue = panel.state.catalogue ?? [];
+  const pairs = (routes) => routes.map((pair) => ({ id: pair.id, model: pair.model }));
+  const normalize = (routes, model) => routes.map((pair) => (pair.model === model ? pair.id : { id: pair.id, modelOverride: pair.model }));
+  if (catalogue.length === 0) {
+    assert.ok(
+      findRow(panel, () => true),
+      "the config carries an alias row to sit the cursor on",
+    );
+    panel.handleInput("n");
+    assert.equal(panel.state.input, null, "no name ask opens");
+    assert.equal(panel.state.builder ?? null, null, "…and no builder either");
+    assert.equal(panel.state.message, "no provider/model list to choose from", "the refusal names why");
+    assert.ok(shows(panel.render(100), "no provider/model list to choose from"), "…and says so on screen");
+    assert.equal(calls.done, 0, "a refusal is not a close");
+    return;
+  }
+  const found = findRow(panel, () => true);
+  assert.ok(found, "the config carries an alias row to sit the cursor on");
+  // A probe at the name ask first: a reader's esc arrives as an escape-sequence chunk, and it is never text to type into the field.
   panel.handleInput("n");
   assert.ok(panel.state.input, "n on an alias row starts the chain");
   assert.ok(shows(panel.render(100), "new alias"), "and the ask is on screen — the reader sees something happen");
   panel.handleInput("za"); // keys arrive as chunks: a multi-key chunk — a paste — appends whole
   panel.handleInput("x"); // …and a single key appends its one character
   assert.ok(shows(panel.render(100), "zax"), "the typed name is visible in the frame as it is typed");
-  panel.handleInput("\r"); // the name is answered; the model is asked
-  assert.ok(shows(panel.render(100), "zax: model"), "enter continues to the model ask");
-  panel.handleInput(ESC); // esc in a chain is one step back, not out of it
-  assert.ok(panel.state.input, "esc at the model ask steps back — the chain is not lost");
-  assert.ok(shows(panel.render(100), "new alias"), "the name ask is the one on screen again");
-  assert.ok(shows(panel.render(100), "zax"), "…and the typed name it kept is still in the frame");
-  panel.handleInput(ESC);
-  assert.equal(panel.state.input, null, "esc at the name ask closes the chain — there is nowhere back");
-  assert.equal(calls.done, 0, "…and the matrix lives");
-  panel.handleInput("n");
-  panel.handleInput("zax");
-  const sequence = String.fromCharCode(27) + "[27~"; // the reader's esc arrives as an escape-sequence chunk, not a name
+  const sequence = String.fromCharCode(27) + "[27~";
   panel.handleInput(sequence);
-  assert.equal(panel.state.input, null, "an escape sequence backs out too — it is never text to type into the field");
-  assert.equal(calls.done, 0, "…and it is still back, not out");
+  assert.equal(panel.state.input, null, "an escape sequence backs out of the ask — it is never typed text");
   const tail = "[27~";
   assert.ok(!JSON.stringify(panel.state).includes(tail), "the sequence's tail is nowhere in the state");
   assert.ok(!panel.render(100).some((line) => line.includes(tail)), "…nor anywhere in the frame");
-  // The chain walked to its end: the third enter is create *and* save both — no separate "s" to land it.
+  assert.equal(calls.done, 0, "back is never out");
+  // Alias level: the chain is name → builder. The typed model step is gone — a new alias's model is its first route's.
   panel.handleInput("n");
-  panel.handleInput("zax");
+  panel.handleInput("za");
+  panel.handleInput("x");
+  panel.handleInput("\r"); // the name is answered; the routes are built
+  assert.ok(panel.state.builder, "enter continues to the builder");
+  assert.equal(panel.state.builder.title, "zax: routes", "…which names the list it builds");
+  assert.equal(panel.state.builder.focus, "tree", "it starts on the tree pane");
+  assert.deepEqual(pairs(panel.state.builder.routes), [], "with an empty list to build into");
+  assert.ok(panel.state.builder.back, "the name step waits behind it");
+  // The tree comes from the builder's own view of the catalogue — discovered here, named by nothing.
+  // Both panes scroll with their cursor, so a frame claim is only made with the cursor on the row it is
+  // about, and the pick favours short names so no column can truncate one away.
+  const tree = panel.state.builder.tree;
+  const usable = tree.filter((entry) => (entry.models ?? []).length > 0);
+  assert.ok(usable.length > 0, "every tree entry carries its models");
+  const pool = usable.filter((entry) => entry.models.length >= 2);
+  const rank = (entry) => entry.provider.length + entry.models.slice(0, 2).reduce((sum, id) => sum + id.length, 0);
+  const chosen = [...(pool.length ? pool : usable)].sort((a, b) => rank(a) - rank(b))[0];
+  const at = tree.indexOf(chosen);
+  const two = chosen.models.length >= 2;
+  const first = { id: chosen.provider, model: chosen.models[0] };
+  const second = { id: chosen.provider, model: chosen.models[two ? 1 : 0] };
+  assert.ok(shows(panel.render(100), "zax: routes"), "the builder is on screen");
+  assert.ok(shows(panel.render(100), "zax = "), "…with the identity line as it stands");
+  assert.ok(shows(panel.render(100), "no routes yet"), "and the routes pane names the empty list it starts from");
+  // Esc in the chain is one step back, not out of it: the name ask comes back with its typing intact.
+  panel.handleInput(ESC);
+  assert.ok(shows(panel.render(100), "new alias"), "esc at the builder steps back — the name ask is the one on screen again");
+  assert.ok(shows(panel.render(100), "zax"), "…and the typed name it kept is still in the frame");
+  assert.equal(calls.done, 0, "…and the matrix lives");
+  panel.handleInput("\r"); // …and answering it again resumes at a fresh builder
+  assert.ok(panel.state.builder, "the chain is not lost");
+  assert.deepEqual(pairs(panel.state.builder.routes), [], "…and the list starts empty again");
+  // The walk: reach the chosen provider in the flattened tree, open it, pick two models from beneath.
+  for (let i = 0; i < at; i += 1) panel.handleInput("j");
+  assert.equal(panel.state.builder.left, at, "the cursor walks the tree to the provider");
+  assert.ok(shows(panel.render(100), `▸ ${chosen.provider}`), "…and the provider is on screen under it");
   panel.handleInput("\r");
-  panel.handleInput("zmx");
+  assert.ok(panel.state.builder.expanded[chosen.provider], "enter opens the provider");
+  assert.ok(shows(panel.render(100), `▾ ${chosen.provider}`), "…and the frame shows it open");
+  panel.handleInput("j");
+  assert.equal(panel.state.builder.left, at + 1, "the cursor steps onto the first model row");
+  assert.ok(shows(panel.render(100), `  ${chosen.models[0]}`), "with its models indented beneath");
+  panel.handleInput("\r"); // enter on a model adds that (provider, model) pair
+  assert.deepEqual(pairs(panel.state.builder.routes), [first], "the first pick lands in the routes list");
+  assert.equal(panel.state.builder.right, 0, "…and the routes cursor follows it");
+  if (two) {
+    panel.handleInput("j");
+    assert.equal(panel.state.builder.left, at + 2, "the cursor steps onto the second model row");
+    assert.ok(shows(panel.render(100), `  ${chosen.models[1]}`), "each model row in turn");
+  }
   panel.handleInput("\r");
-  assert.ok(shows(panel.render(100), "zax: first route"), "enter continues to the first-route ask");
-  panel.handleInput("zrp");
-  panel.handleInput("\r");
-  await until(() => panel.state.pending === null, "the submit to be written through");
+  assert.deepEqual(pairs(panel.state.builder.routes), [first, second], "the second pick appends");
+  assert.equal(panel.state.builder.right, 1, "…and the cursor follows that one too");
+  assert.ok(shows(panel.render(100), `${chosen.provider} → ${first.model}`), "the list renders its rows as provider → model");
+  // The routes pane is where the list is ordered and trimmed.
+  panel.handleInput("\t");
+  assert.equal(panel.state.builder.focus, "routes", "tab moves to the routes pane");
+  panel.handleInput("K");
+  assert.deepEqual(pairs(panel.state.builder.routes), [second, first], "K moves the focused pair up");
+  assert.equal(panel.state.builder.right, 0, "…and the cursor rides along");
+  panel.handleInput("J");
+  assert.deepEqual(pairs(panel.state.builder.routes), [first, second], "J moves it back down");
+  assert.equal(panel.state.builder.right, 1, "…following it again");
+  panel.handleInput("K");
+  assert.deepEqual(pairs(panel.state.builder.routes), [second, first], "…and up once more");
+  panel.handleInput("d");
+  assert.deepEqual(pairs(panel.state.builder.routes), [first], "d drops the focused pair");
+  // `s` is create *and* save both — no separate write to land it.
+  panel.handleInput("s");
+  assert.equal(panel.state.builder ?? null, null, "the commit closes the builder");
+  await until(() => panel.state.pending === null, "the create to be written through");
   const written = JSON.parse(fs.readFileSync(layerFile, "utf8"));
-  assert.deepEqual(written.aliases?.zax, { model: "zmx", providers: ["zrp"] }, "the new alias is on disk with its model and first route");
-  assert.ok(shows(panel.render(100), "zax"), "…and it shows up on screen — the new alias row is in the table");
-  // Route level: the sibling is one more route of the parent, inserted after the cursor's own.
-  const added = findRow(panel, (providers) => providers.length >= 2);
-  assert.ok(added, "the config carries an alias with two routes to insert between");
+  assert.deepEqual(
+    written.aliases?.zax,
+    { model: first.model, providers: normalize([first], first.model) },
+    "the new alias is on disk — the model is the first pair's, the providers exactly per the picking rule",
+  );
+  assert.ok(shows(panel.render(100), "zax"), "and the new alias's name is visible in the frame");
+  assert.equal(calls.done, 0, "the chain walked its whole length without closing the matrix");
+  // Route level: the same builder opens over the alias's current list and rewrites it wholesale — the alias's model is never re-pointed.
+  const listed = findRow(panel, (providers) => providers.length >= 2);
+  assert.ok(listed, "the config carries an alias with two routes to open");
+  const alias = listed.row.alias;
+  const entry = panel.state.config.aliases[alias];
+  const model = entry.model;
+  const seeded = (entry.providers ?? []).map((ref) => ({
+    id: typeof ref === "string" ? ref : ref.id,
+    model: typeof ref === "object" && ref.modelOverride ? ref.modelOverride : model,
+  }));
   panel.handleInput("\r"); // expand it
   panel.handleInput("j");
   const route = panel.state.rows.aliases[panel.state.cursors.aliases];
-  assert.equal(route.parent, added.row.alias, "the cursor is on the alias's first route");
+  assert.equal(route.parent, alias, "the cursor is on the alias's first route");
   panel.handleInput("n");
-  assert.ok(panel.state.input, "n on a route row is one ask for the route's name");
-  assert.ok(shows(panel.render(100), `${added.row.alias}: add route`), "and the ask names the list it adds to");
-  panel.handleInput("zro");
-  panel.handleInput("\r"); // one ask, one enter: the route is added and saved
-  await until(() => panel.state.pending === null, "the add to be written through");
-  const withRoute = JSON.parse(fs.readFileSync(layerFile, "utf8"));
-  const providers = withRoute.aliases?.[added.row.alias]?.providers ?? [];
-  const afterCursor = [added.providers[0], "zro", ...added.providers.slice(1)];
-  assert.deepEqual(providers, afterCursor, "the new route lands after the cursor's route on disk");
+  assert.ok(panel.state.builder, "n on a route row opens the builder over that list");
+  assert.equal(panel.state.builder.title, `${alias}: routes`, "…named for the list it edits");
+  assert.equal(panel.state.builder.back ?? null, null, "it opens straight in — there is nowhere back");
+  assert.ok(shows(panel.render(100), `${alias}: routes`), "and it is on screen");
+  assert.deepEqual(pairs(panel.state.builder.routes), seeded, "seeded from the alias's current list — the effective model each");
+  panel.handleInput("s");
+  await until(() => panel.state.pending === null, "the wholesale rewrite to be written through");
+  const after = JSON.parse(fs.readFileSync(layerFile, "utf8"));
+  assert.deepEqual(after.aliases?.[alias]?.providers ?? [], normalize(seeded, model), "the whole list is on disk exactly as picked");
+  assert.equal(after.aliases?.[alias]?.model ?? model, model, "the layer never re-points the alias's model");
+  assert.equal(panel.state.config.aliases[alias].model, model, "…and the alias still answers with its own model");
+  assert.equal(calls.done, 0, "and none of it closed the matrix");
   panel.dispose();
 });
 

@@ -53,6 +53,7 @@ export class MatrixPanel {
     this.dbPath = dbPath;
     this.cwd = cwd;
     this.layerFile = layerFile;
+    this.registry = ctx?.modelRegistry ?? null;
     this.state = null;
     this.palette = paletteFor({ color: true });
     this.rainField = null;
@@ -89,7 +90,7 @@ export class MatrixPanel {
   }
 
   async reload(note) {
-    const world = await loadWorld({ dbPath: this.dbPath, cwd: this.cwd, layerFile: this.layerFile });
+    const world = await loadWorld({ dbPath: this.dbPath, cwd: this.cwd, layerFile: this.layerFile, registry: this.registry });
     if (this.closed) return;
     this.state = note === null ? world.state : { ...adopt(this.state, world), message: note };
     if (this.tab) {
