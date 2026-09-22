@@ -72,12 +72,20 @@ export class MatrixPanel {
     this.timer = schedule(() => {
       if (this.closed) return;
       try {
-        this.tui.invalidate();
+        this.repaint();
       } catch {
         /* a missed frame is not a torn-down session */
       }
     }, 50);
     this.ready = this.reload(null);
+  }
+
+  /** Ask the host for a frame. `requestRender` is its scheduler — the call its own async components
+   * make when their state changes between inputs; `invalidate` only flushes caches and never woke
+   * the renderer. `invalidate` stays as the fallback for a host that offers nothing better. */
+  repaint() {
+    if (this.tui.requestRender) this.tui.requestRender();
+    else this.tui.invalidate?.();
   }
 
   async reload(note) {
@@ -88,7 +96,7 @@ export class MatrixPanel {
       this.state = { ...this.state, tab: this.tab };
       this.tab = undefined;
     }
-    this.tui.invalidate();
+    this.repaint();
   }
 
   render(width) {
@@ -135,7 +143,7 @@ export class MatrixPanel {
     else if (effect === "save") void this.save();
     else if (effect === "reload") void this.reload("");
     else if (effect === "reingest") void this.reingest();
-    this.tui.invalidate();
+    this.repaint();
   }
 
   async save() {
@@ -143,13 +151,13 @@ export class MatrixPanel {
     // immediately before writing, so this call cannot carry a stale verdict to the filesystem.
     const result = await commitProposal(this.state, { dbPath: this.dbPath, cwd: this.cwd });
     this.state = result.state;
-    this.tui.invalidate();
+    this.repaint();
   }
 
   /** The same ingest the standalone `R` runs, through the store's own `ingest`. */
   async reingest() {
     this.state = { ...this.state, message: "ingesting…" };
-    this.tui.invalidate();
+    this.repaint();
     const sqlite = await loadSqlite();
     let note = "no node:sqlite: nothing was ingested";
     if (sqlite) {

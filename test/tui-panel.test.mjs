@@ -203,3 +203,20 @@ test("the rain moves on a clock: renders apart in time differ with nothing drivi
   await new Promise((resolve) => setTimeout(resolve, 140));
   assert.notEqual(frame(), before, "the field fell between two renders with no input and no timer");
 });
+
+test("the clock asks the host for frames through its scheduler", async (t) => {
+  let frames = 0;
+  const panel = new MatrixPanel({
+    tui: {
+      requestRender: () => {
+        frames += 1;
+      },
+      invalidate() {},
+    },
+    keybindings: { matches: () => false },
+    done: () => {},
+  });
+  t.after(() => panel.dispose());
+  await until(() => frames > 0, "the host to be asked for a frame", 1000);
+  assert.ok(frames >= 1, "requestRender is what wakes the renderer — a cache flush does not");
+});
