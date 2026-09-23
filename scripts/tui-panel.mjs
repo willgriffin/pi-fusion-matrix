@@ -68,8 +68,12 @@ export class MatrixPanel {
     // inside `render`, so the motion is right at any repaint cadence: an animation stepped by
     // whatever happens to repaint reads as "one step per keypress", which is what it read as.
     this.lastStep = Date.now();
-    const schedule = ctx?.setInterval ?? setInterval;
-    this.unschedule = ctx ? (handle) => ctx.clearTimer(handle) : (handle) => clearInterval(handle);
+    // The two hooks come as a pair: a host ctx that offers neither (or only one) falls back to the
+    // globals for both, so `dispose()` can never throw from `unschedule` and leak the repaint timer —
+    // a leaked one once held a process open.
+    const managed = Boolean(ctx?.setInterval && ctx?.clearTimer);
+    const schedule = managed ? (fn, ms) => ctx.setInterval(fn, ms) : (fn, ms) => setInterval(fn, ms);
+    this.unschedule = managed ? (handle) => ctx.clearTimer(handle) : (handle) => clearInterval(handle);
     this.timer = schedule(() => {
       if (this.closed) return;
       try {

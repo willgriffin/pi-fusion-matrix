@@ -199,6 +199,25 @@ test("a proposal names its layer file, and save writes the reordered routes thro
   panel.dispose();
 });
 
+test("a host ctx without timer hooks still disposes cleanly", async (t) => {
+  // schedule/unschedule come as a pair: once a fallback timer is scheduled, `dispose` must clear it
+  // through the same fallback — the unpaired shape threw from dispose and leaked the repaint timer.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tui-nopair-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const panel = new MatrixPanel({
+    tui: { invalidate() {} },
+    keybindings: { matches: () => false },
+    done: () => {},
+    ctx: {},
+    dbPath: path.join(dir, "absent.db"),
+    cwd: dir,
+    layerFile: path.join(dir, "layer.json"),
+  });
+  t.after(() => panel.dispose());
+  await panel.ready;
+  assert.doesNotThrow(() => panel.dispose());
+});
+
 test("a named tab opens there, and both close paths close exactly once", async (t) => {
   const { panel, calls } = await mountPanel(t, "personas");
   assert.equal(panel.state.tab, "personas", "/matrix personas opens on personas");
