@@ -66,6 +66,11 @@ import {
 import { THINKING_LEVELS, loadMatrixConfig } from "../extensions/pi-fusion-matrix/config.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+// The write-path checks drive `commitProposal`, which asks the loader again — machine layer and all.
+// A suite may not depend on whose laptop it runs on, so for this file's process the loader's own
+// isolation hook (`PI_CODING_AGENT_DIR`) points at nothing: the machine layer is the operator's, not
+// the subject under test.
+process.env.PI_CODING_AGENT_DIR = path.join(os.tmpdir(), "tui-test-no-machine-layer");
 
 /* ------------------------------------------------------------------ fixture */
 
@@ -1104,15 +1109,15 @@ test("a proposal changes one path, and the loader's verdict travels with it", ()
     fusionStats,
     seatStats,
   });
-  const row = { fusion: "review-check", seat: "review-skeptic", candidates: "muse" };
-  const pending = proposeSeatAlias({ state: world, row, alias: "muse" });
+  const row = { fusion: "review-check", seat: "review-skeptic", candidates: "glm" };
+  const pending = proposeSeatAlias({ state: world, row, alias: "mimo" });
   assert.deepEqual(
     pending.patch,
-    { fusions: { "review-check": { candidates: { "review-skeptic": ["muse"] } } } },
+    { fusions: { "review-check": { candidates: { "review-skeptic": ["mimo"] } } } },
     "only the changed path is written",
   );
   assert.equal(pending.layerFile, "/tmp/nowhere/pi-fusion-matrix.json");
-  assert.match(pending.summary, /review-check\.review-skeptic walks muse/);
+  assert.match(pending.summary, /review-check\.review-skeptic walks mimo/);
   assert.deepEqual(pending.errors, [], "a real alias is a valid change");
 
   // A change the loader refuses is refused here, with the loader's own message, before any write.
@@ -2739,7 +2744,7 @@ test("the write path re-reads the layer and the base, and refuses what it cannot
   // (3) a patch the loader rejects: refused before mkdir, so no file appears at all.
   fs.rmSync(file);
   const invalid = await commitProposal(
-    { ...world, pending: proposal({ fusions: { quick: { candidates: { technical: ["ghost"] } } } }) },
+    { ...world, pending: proposal({ fusions: { cheap: { candidates: { technical: ["ghost"] } } } }) },
     opts,
   );
   assert.equal(invalid.wrote, false, "a change the loader refuses writes nothing");
@@ -2747,7 +2752,7 @@ test("the write path re-reads the layer and the base, and refuses what it cannot
   assert.equal(fs.existsSync(file), false, "and no directory or file is created for it");
 
   // (4) a proposal the loader accepts writes exactly the proposal, and spends the pending one.
-  const patch = { fusions: { quick: { candidates: { technical: ["kimi"] } } } };
+  const patch = { fusions: { cheap: { candidates: { technical: ["mimo"] } } } };
   const ok = await commitProposal({ ...world, pending: proposal(patch) }, opts);
   assert.equal(ok.wrote, true, "a clean proposal is written");
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), patch, "the file is the proposal, not a merge with what was read");
@@ -2777,7 +2782,7 @@ test("a proposal writes only its own path into the layer it names", () => {
 test("a moved, dropped or rebuilt route list is what the layer file comes to hold", async () => {
   // The same proposals the keys build, through the writer to real files: what is asserted is the
   // bytes on disk, and the loader is asked again at the moment of writing. The packaged config is a
-  // base it accepts, so its `kimi` is a route list worth editing.
+  // base it accepts, so its `glm` is a route list worth editing.
   const packaged = loadMatrixConfig({ cwd: root, layers: ["packaged"] }).config;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tui-routes-"));
   const file = path.join(dir, "pi-fusion-matrix.json");
@@ -2792,41 +2797,41 @@ test("a moved, dropped or rebuilt route list is what the layer file comes to hol
       fusionStats: [],
       seatStats: [],
     });
-  const onKimi = expandedOn({ ...world(), tab: "aliases" }, "kimi");
-  const route = (provider) => routeRow(onKimi, "kimi", provider);
+  const onGlm = expandedOn({ ...world(), tab: "aliases" }, "glm");
+  const route = (provider) => routeRow(onGlm, "glm", provider);
 
   // Reordered: the first route becomes the second, and the layer holds exactly that.
-  const moved = applyKey(cursorOn(onKimi, route("opencode-go")), "J").state;
+  const moved = applyKey(cursorOn(onGlm, route("opencode-go")), "J").state;
   const wroteMoved = await commitProposal(moved, opts);
   assert.equal(wroteMoved.wrote, true, "the moved order is written");
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), {
-    aliases: { kimi: { providers: [{ id: "kimi-coding", modelOverride: "k3" }, "opencode-go"] } },
+    aliases: { glm: { providers: ["zai", "opencode-go"] } },
   });
 
   // Dropped: what remains is what the file says.
   fs.rmSync(file);
-  const dropped = applyKey(cursorOn(onKimi, route("kimi-coding")), "d").state;
+  const dropped = applyKey(cursorOn(onGlm, route("zai")), "d").state;
   const wroteDropped = await commitProposal(dropped, opts);
   assert.equal(wroteDropped.wrote, true);
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { aliases: { kimi: { providers: ["opencode-go"] } } });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { aliases: { glm: { providers: ["opencode-go"] } } });
 
   // Rebuilt wholesale: what the route builder picked is what the file says — a plain ref where the
   // pair names the alias's model, an override where it names another.
   fs.rmSync(file);
   const rebuilt = proposeRouteList({
-    state: onKimi,
+    state: onGlm,
     row: route("opencode-go"),
     routes: [
-      { id: "opencode-go", model: "kimi-k3" },
-      { id: "zai", model: "glm-5" },
-      { id: "kimi-coding", model: "k3" },
+      { id: "opencode-go", model: "glm-5.3" },
+      { id: "zai", model: "glm-5.3" },
+      { id: "alibaba-token-plan", model: "glm-5" },
     ],
   });
-  const wroteRebuilt = await commitProposal({ ...onKimi, pending: rebuilt }, opts);
+  const wroteRebuilt = await commitProposal({ ...onGlm, pending: rebuilt }, opts);
   assert.equal(wroteRebuilt.wrote, true);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), {
     aliases: {
-      kimi: { providers: ["opencode-go", { id: "zai", modelOverride: "glm-5" }, { id: "kimi-coding", modelOverride: "k3" }] },
+      glm: { providers: ["opencode-go", "zai", { id: "alibaba-token-plan", modelOverride: "glm-5" }] },
     },
   });
 

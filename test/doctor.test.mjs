@@ -77,7 +77,7 @@ test("the packaged config, against a registry that knows every provider it names
 test("a config error is exit 1, and it is the validator's own words", async () => {
   const broken = deep(packaged);
   // A `review: true` router without a route: a silent degradation the loader refuses.
-  broken.fusions["smrt-review"] = { ...broken.fusions["smrt-review"], route: undefined };
+  broken.fusions["review-check"] = { ...broken.fusions["review-check"], review: true };
   const result = await runDoctor({ config: broken, sources, registry: registryFor(broken) });
   assert.equal(result.exit, EXIT.config);
   assert.ok(

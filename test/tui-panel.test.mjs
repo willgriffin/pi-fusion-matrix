@@ -14,6 +14,10 @@ import { createRain } from "../scripts/tui-rain.mjs";
 
 const ESC = String.fromCharCode(27);
 const CTRL_C = String.fromCharCode(3);
+// The loader reads its machine layer from the agent directory. A suite may not depend on whose
+// laptop it runs on, so for this file's process the loader's own isolation hook points at nothing:
+// the machine layer is the operator's, not the subject under test.
+process.env.PI_CODING_AGENT_DIR = path.join(os.tmpdir(), "tui-panel-test-no-machine-layer");
 /** SGR sequences carry style and zero width. Stripped by scan rather than regex: the repo guard bans
  * control characters in patterns, and this shape is stricter — anything a strip leaves behind is an
  * escape the host never sanctioned (a cursor move has no place in a component line). */
@@ -45,11 +49,18 @@ async function until(condition, label, deadlineMs = 2000) {
   assert.fail(`deadline waiting for: ${label}`);
 }
 
-/** A panel over its own store and layer file, mounted with a fake host that records the close. */
-async function mountPanel(t, tab) {
+/** A panel over its own store and layer file, mounted with a fake host that records the close.
+ * Two files by design: `seed` is the scratch `cwd`'s own project layer — part of the base the panel
+ * loads — while the layer file is the one the panel writes, which a persona it creates may then be
+ * dropped from (a base-declared persona can only ever be overridden). */
+async function mountPanel(t, tab, seed = null) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tui-panel-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const layerFile = path.join(dir, "layer.json");
+  if (seed) {
+    fs.mkdirSync(path.join(dir, ".pi"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".pi", "pi-fusion-matrix.json"), `${JSON.stringify(seed, null, 2)}\n`);
+  }
   const calls = { done: 0, value: Symbol("unset"), invalidations: 0 };
   const panel = new MatrixPanel({
     tui: {
@@ -63,7 +74,7 @@ async function mountPanel(t, tab) {
       calls.value = value;
     },
     dbPath: path.join(dir, "absent.db"),
-    cwd: process.cwd(),
+    cwd: dir,
     layerFile,
     tab,
   });
@@ -510,7 +521,23 @@ test("the personas tab makes, retunes and drops one end to end — and a seat's 
 });
 
 test("the fusion tree opens its decision and takes a nested branch", async (t) => {
-  const { panel, calls, layerFile } = await mountPanel(t, "fusions");
+  // The six paths ship no router, so this check's routed fusion is its own layer — like every other
+  // fixture here it is found at runtime, never hardcoded beyond its own file.
+  const { panel, calls, layerFile } = await mountPanel(t, "fusions", {
+    fusions: {
+      routed: {
+        mode: "single",
+        candidates: { technical: ["mimo"] },
+        route: {
+          instructions: "how deep does this go?",
+          criteria: {
+            deeper: { description: "ask again" },
+            stop: { description: "stay here", then: "cheap" },
+          },
+        },
+      },
+    },
+  });
   const goto = (pred) => {
     panel.handleInput("g");
     for (let i = 0; i < panel.state.rows.fusions.length; i += 1) {

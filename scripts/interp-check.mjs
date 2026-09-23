@@ -127,7 +127,13 @@ check(
   `judge calls=${judgeCallsAmbiguous}, prior="${prior.slice(0, 60)}"`,
 );
 
-// 3. debate: rounds × seats calls, and peers excludes the seat itself
+// 3. debate: rounds × seats calls, and peers excludes the seat itself. The packaged roster no longer
+// ships the shape (the six paths have no rounds), so the fixture carries it: the contract under test is
+// the engine's — rounds × seats calls, and a peers envelope that never carries the seat's own prior.
+config.modes.debate = {
+  stages: [{ parallel: ["technical", "skeptic", "systems"], input: "prompt", rounds: 3, roundInput: "peers" }, { render: "panel" }],
+};
+config.fusions.debate = { mode: "debate", candidates: { technical: ["mimo"], skeptic: ["glm"], systems: ["qwen-max"] } };
 calls.length = 0;
 run = await runPipeline({
   config,
@@ -227,10 +233,20 @@ check("verify: decision entries recorded", verification.length >= 1, `entries=${
 
 // 6. route: a sufficient match routes; a low-confidence one declines
 config.fusions.target = { mode: "single", candidates: { technical: ["glm"] } };
+// The six paths ship no router, so the fixture carries one: the contract is the walk itself. The stub's
+// decisive answer takes the first criterion, and that criterion's `then` is what the assert reads.
 config.fusions.router = {
-  ...config.fusions["default-smrt"],
   id: "router",
-  route: { ...config.fusions["default-smrt"].route, sufficientWhen: { minConfidence: 0.8 } },
+  mode: "single",
+  candidates: { technical: ["mimo"] },
+  route: {
+    instructions: "How much work does this request need?",
+    criteria: {
+      small: { description: "A lookup or a one-line factual answer.", then: "cheap" },
+      large: { description: "Design work with interacting decisions.", then: "target" },
+    },
+    sufficientWhen: { minConfidence: 0.8 },
+  },
 };
 await setMode("decisive");
 let routed = await routeFusion({ config, fusion: config.fusions.router, prompt: "x", decide, emit: silent });
@@ -398,37 +414,52 @@ const decideAs =
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     },
   });
-// the loader keys fusions by id; the object itself carries none, so the router is built the way a run sees it
-const smrt = { ...config.fusions["smrt-review"], id: "smrt-review" };
+// the loader keys fusions by id; the object itself carries none, so the router is built the way a run sees it.
+// The six paths keep one review rung, so the review router is that rung wearing a class map: the contracts
+// under test are the review rules — a class routes to a rung that declares a disposition, a class with no
+// target escalates to the router's own review, and an unsure answer escalates rather than going cheap.
+config.fusions["review-router"] = {
+  ...config.fusions["review-check"],
+  review: true,
+  route: {
+    instructions:
+      "How much review does this change need? Judge the blast radius of the diff — what it can affect if it is wrong — and prefer the cheapest review that can carry it. Answer `high` when you are unsure.",
+    criteria: {
+      mechanical: {
+        description: "Docs, comments, formatting, or a configuration value, with no behaviour change.",
+        then: "review-check",
+      },
+      high: {
+        description: "A boundary: authentication, data, release tooling, anything irreversible.",
+      },
+    },
+    sufficientWhen: { minConfidence: 0.6 },
+  },
+};
+const smrt = { ...config.fusions["review-router"], id: "review-router" };
 const routeOf = async (choice, confidence) =>
   routeFusion({ config, fusion: smrt, prompt: "a packet", decide: decideAs(choice, confidence), emit: silent });
 
 const mechanical = await routeOf("mechanical");
 check(
-  "review route: a mechanical change goes to the cheap single-seat review",
-  mechanical.routing?.routedTo === "review-quick" &&
-    mechanical.fusion.id === "review-quick" &&
+  "review route: a class with a target routes to the rung that declares a disposition",
+  mechanical.routing?.routedTo === "review-check" &&
+    mechanical.fusion.id === "review-check" &&
     mechanical.routing.answer?.choice === "mechanical",
   JSON.stringify(mechanical.routing),
-);
-const standard = await routeOf("standard");
-check(
-  "review route: an ordinary change goes to the committee",
-  standard.routing?.routedTo === "review-check" && standard.fusion.id === "review-check",
-  JSON.stringify(standard.routing),
 );
 // `high` declares no target on purpose: running this fusion *is* the deep review, so the record says escalated,
 // not declined — a deliberate escalation that reads as a decline is a lie in the audit trail.
 const high = await routeOf("high");
 check(
   "review route: the boundary class escalates to the router's own deep review",
-  high.fusion.id === "smrt-review" && high.routing?.escalated === "high" && high.routing.declined === undefined,
+  high.fusion.id === "review-router" && high.routing?.escalated === "high" && high.routing.declined === undefined,
   JSON.stringify(high.routing),
 );
 const unsure = await routeOf("mechanical", 0.2);
 check(
   "review route: an unsure answer escalates rather than routing cheap",
-  unsure.fusion.id === "smrt-review" && String(unsure.routing?.declined).includes("confidence"),
+  unsure.fusion.id === "review-router" && String(unsure.routing?.declined).includes("confidence"),
   JSON.stringify(unsure.routing),
 );
 
@@ -557,11 +588,27 @@ const dispositionModel = (payload) => async (_args) => ({
   stopReason: "stop",
   toolCalls: [],
 });
+// The two-seat review shape — one reviewer and a synthesis — is where a per-seat canned disposition is
+// the clearest to read. The six paths keep one (five-seat) review rung, so the shape lives here.
+config.modes["review-lite"] = {
+  stages: [
+    { parallel: ["review-skeptic"], input: "prompt" },
+    { single: "review-synth", input: "panel" },
+  ],
+};
+config.fusions["review-lite"] = {
+  id: "review-lite",
+  mode: "review-lite",
+  execute: false,
+  fileAgent: false,
+  disposition: { personas: ["review-skeptic", "review-synth"] },
+  candidates: { "review-skeptic": ["mimo"], "review-synth": ["mimo"] },
+};
 const runReview = (model) =>
   runPipeline({
     config,
     sources,
-    fusion: { ...config.fusions["review-quick"], id: "review-quick" },
+    fusion: { ...config.fusions["review-lite"], id: "review-lite" },
     prompt: "a packet",
     callModel: model,
     decide,
@@ -815,7 +862,7 @@ calls.length = 0;
 const proxied = await driveStream(
   fusionStream(
     makeProxyPeer(seen, { text: "pi-fusion-matrix.", tool: { id: "call_1", name: "read", arguments: { path: "package.json" } } }),
-  )(fusionModel("quick"), harnessContext, harnessOptions),
+  )(fusionModel("cheap"), harnessContext, harnessOptions),
 );
 const forwarded = seen[0];
 check(
@@ -823,7 +870,7 @@ check(
   seen.length === 1 && JSON.stringify(forwarded.context) === JSON.stringify(harnessContext),
   `calls=${seen.length}, context=${JSON.stringify(forwarded.context).slice(0, 80)}`,
 );
-// The writer defines the executor: `quick`'s writing seat is `technical` on `deepseek-flash`, and its
+// The writer defines the executor: `cheap`'s writing seat is `technical` on `deepseek-flash`, and its
 // declared level is `low` — not the harness's `high`.
 check(
   "proxy: the writing alias answers at the fusion's declared level",
@@ -848,7 +895,7 @@ check(
 check(
   "proxy: reported as the fusion's model, with the executor in details",
   proxied.final.provider === "fusion-matrix" &&
-    proxied.final.model === "quick" &&
+    proxied.final.model === "cheap" &&
     proxied.final.stopReason === "toolUse" &&
     proxied.final.details?.proxied?.alias === "deepseek-flash" &&
     proxied.final.details?.proxied?.provider === "opencode-go" &&
@@ -886,6 +933,12 @@ check(
 
 // 9. branch selection: a rung with no writing seat still deliberates when tools are present, and the
 // `matrix` tool path (`runOnce`) never proxies because it calls the pipeline directly.
+// The branch rule's other half is a mode that writes nothing: one that ends in `render`. The six paths
+// ship none, so the fixture carries the shape (and it doubles as the registration default below).
+config.modes.opinion = {
+  stages: [{ parallel: ["technical", "skeptic", "systems"], input: "prompt" }, { render: "panel" }],
+};
+config.fusions.opinions = { mode: "opinion", candidates: { technical: ["mimo"], skeptic: ["glm"], systems: ["qwen-max"] } };
 calls.length = 0;
 const deliberate = await driveStream(fusionStream(makeProxyPeer([]))(fusionModel("opinions"), harnessContext, harnessOptions));
 check(
@@ -937,7 +990,7 @@ check(
 );
 
 // 11. a level the target does not support is our request, not the target's failure: retried once
-// without one, recorded, and the turn still runs. `quick`'s writing seat declares `low`, which
+// without one, recorded, and the turn still runs. `cheap`'s writing seat declares `low`, which
 // alibaba-token-plan's deepseek lane refuses ("Supported efforts: high, max", measured live).
 const refusalSeen = [];
 const refusingPeer = {
@@ -950,7 +1003,7 @@ const refusingPeer = {
     return makeProxyPeer([]).streamSimple(model, context, options);
   },
 };
-const refusedLevel = await driveStream(fusionStream(refusingPeer)(fusionModel("quick"), harnessContext, harnessOptions));
+const refusedLevel = await driveStream(fusionStream(refusingPeer)(fusionModel("cheap"), harnessContext, harnessOptions));
 check(
   "proxy: an unsupported thinking level is dropped once and recorded",
   refusalSeen.join(",") === "low," &&
@@ -1131,26 +1184,45 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "pfm-intercept-"));
 fs.mkdirSync(path.join(scratch, ".pi"), { recursive: true });
 fs.writeFileSync(
   path.join(scratch, ".pi", "pi-fusion-matrix.json"),
-  JSON.stringify({ fusions: { quick: { proxy: { alias: "glm-flash" } } } }),
+  JSON.stringify({
+    aliases: {
+      "glm-flash": { model: "glm-5.3-flash", contextWindow: 1000000, maxTokens: 131072, providers: ["opencode-go"] },
+    },
+    modes: {
+      panel: {
+        stages: [{ parallel: ["technical", "skeptic", "systems"], input: "prompt" }, { render: "panel" }],
+      },
+    },
+    fusions: {
+      cheap: { proxy: { alias: "glm-flash" } },
+      opinions: { mode: "panel", candidates: { technical: ["mimo"], skeptic: ["glm"], systems: ["qwen-max"] } },
+    },
+  }),
 );
 const originalCwd = process.cwd();
+// `PI_CODING_AGENT_DIR` is the loader's own isolation hook: the machine layer is the operator's, and
+// inheriting it makes this registration check depend on whose laptop it runs on.
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+process.env.PI_CODING_AGENT_DIR = path.join(scratch, "agent");
 process.chdir(scratch);
 try {
   await extensionFactory(stubApi);
 } finally {
   process.chdir(originalCwd);
+  if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 }
 const registeredModels = new Map(registered.get("fusion-matrix").models.map((m) => [m.id, m]));
-// `quick` carries a project-layer `proxy.alias` here, so its advertised numbers are the override's, not
+// `cheap` carries a project-layer `proxy.alias` here, so its advertised numbers are the override's, not
 // its writer's — the harness budgets for the model that will answer.
 check(
   "registration: the advertised numbers follow the model that answers",
-  registeredModels.get("quick").contextWindow === 1000000 &&
-    registeredModels.get("quick").maxTokens === 131072 &&
-    registeredModels.get("quick").reasoning === true &&
-    registeredModels.get("best").contextWindow === 1000000 &&
-    registeredModels.get("best").maxTokens === 131072,
-  `quick(proxy→glm-flash)=${registeredModels.get("quick").contextWindow}/${registeredModels.get("quick").maxTokens}, best=${registeredModels.get("best").contextWindow}/${registeredModels.get("best").maxTokens}`,
+  registeredModels.get("cheap").contextWindow === 1000000 &&
+    registeredModels.get("cheap").maxTokens === 131072 &&
+    registeredModels.get("cheap").reasoning === true &&
+    registeredModels.get("smart").contextWindow === 1000000 &&
+    registeredModels.get("smart").maxTokens === 131072,
+  `cheap(proxy→glm-flash)=${registeredModels.get("cheap").contextWindow}/${registeredModels.get("cheap").maxTokens}, smart=${registeredModels.get("smart").contextWindow}/${registeredModels.get("smart").maxTokens}`,
 );
 check(
   "registration: a rung with no execute face keeps the package default",
@@ -1169,12 +1241,11 @@ await commands.get("matrix-info").handler(undefined, {
   },
 });
 check(
-  "matrix-info: every fusion prints its execute face, and the review rungs print the declaration",
-  / {2}quick: single\n[\s\S]*? {4}executes: glm-flash @low \(proxy alias\)/.test(info) &&
-    / {2}best: pair-judged\n[\s\S]*? {4}executes: glm-flash @high \(writing seat synth\)/.test(info) &&
+  "matrix-info: every fusion prints its execute face, and the review rung prints the declaration",
+  / {2}cheap: single\n[\s\S]*? {4}executes: glm-flash @low \(proxy alias\)/.test(info) &&
+    / {2}smart: handoff\n[\s\S]*? {4}executes: mimo @high \(writing seat synth\)/.test(info) &&
     / {2}review-check: review-committee[^\n]*\n[\s\S]*? {4}executes: — \(declared never a session model/.test(info) &&
-    / {2}smrt-review: review-committee[^\n]*\n[\s\S]*? {4}executes: — \(declared never a session model/.test(info) &&
-    / {2}opinions: opinion[^\n]*\n[\s\S]*? {4}executes: — \(no writing seat/.test(info),
+    / {2}opinions: panel[^\n]*\n[\s\S]*? {4}executes: — \(no writing seat/.test(info),
   info
     .split("\n")
     .filter((line) => line.includes("executes:"))
@@ -1217,7 +1288,7 @@ const failingCallModel = async (_args) => {
 const failedRun = await runPipeline({
   config,
   sources,
-  fusion: { ...config.fusions.quick, id: "quick" },
+  fusion: { ...config.fusions.cheap, id: "cheap" },
   prompt: "fail",
   callModel: failingCallModel,
   decide,
@@ -1400,6 +1471,8 @@ check(
 
 // A writer in the object form pins the proxied turn to that seat's own route and level, because the two
 // faces have to walk the same candidates.
+// The object form names an alias for its model id and pins its own route and level on top of it.
+config.aliases["kimi"] = { model: "kimi-k3", providers: ["kimi-coding"] };
 config.fusions["proxy-object"] = {
   mode: "single",
   candidates: { technical: [{ alias: "kimi", providers: ["kimi-coding"], thinking: "high" }] },
@@ -1416,13 +1489,15 @@ check(
 // seat's declared level still governs the turn. (It was ignored on the wire until a review found that the
 // route resolved the writer's candidate even when the override was set — registration and `/matrix-info`
 // said one thing and the stream did another.)
+config.aliases["glm-flash"] = { model: "glm-5.3-flash", contextWindow: 1000000, maxTokens: 131072, providers: ["opencode-go"] };
 config.fusions["proxy-override"] = {
-  mode: "pair-judged",
+  mode: "committee",
   thinking: { technical: "low", skeptic: "low", judge: "high", synth: "high" },
   proxy: { alias: "glm-flash" },
   candidates: {
     technical: [{ alias: "kimi", providers: ["kimi-coding"], thinking: "high" }],
     skeptic: ["glm"],
+    systems: ["glm"],
     judge: ["deepseek-flash"],
     synth: [{ alias: "kimi", providers: ["kimi-coding"], thinking: "low" }],
   },
@@ -1519,7 +1594,7 @@ const temperatureThenFail = async (_args) => {
 const retryRun = await runPipeline({
   config,
   sources,
-  fusion: { ...config.fusions.quick, id: "quick" },
+  fusion: { ...config.fusions.cheap, id: "cheap" },
   prompt: "retry and fail",
   callModel: temperatureThenFail,
   decide,
@@ -1654,10 +1729,10 @@ const hungRace = await Promise.race([
     config,
     sources,
     fusion: {
-      ...config.fusions["review-quick"],
-      id: "review-quick",
+      ...config.fusions["review-lite"],
+      id: "review-lite",
       seatTimeoutMs: 50,
-      candidates: { "review-skeptic": ["deepseek-pro", "kimi"], "review-synth": ["deepseek-pro"] },
+      candidates: { "review-skeptic": ["mimo", "deepseek-flash"], "review-synth": ["mimo"] },
     },
     prompt: "a packet",
     callModel: hanging,
