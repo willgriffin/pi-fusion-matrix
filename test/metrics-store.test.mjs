@@ -32,6 +32,7 @@ import {
   byModel,
   byFusionSeat,
   byProxyAlias,
+  decideResults,
   ingest,
   loadSqlite,
   openStore,
@@ -193,13 +194,36 @@ function writeFixtureStore() {
             {
               seat: "review-skeptic",
               kind: "decision",
+              path: "review-check.review-skeptic#0",
+              parent: "review-check.review-skeptic",
               sufficient: false,
               advancedTo: "next candidate",
               answer: { type: "choice", choice: "partial", confidence: 0.6 },
             },
             { seat: "review-synth", kind: "decision", sufficient: true, answer: { type: "choice", choice: "agrees", confidence: 0.9 } },
           ],
-          routing: { answer: { type: "choice", choice: "standard", confidence: 0.62 }, threshold: 0.6, routedTo: "review-check" },
+          routing: {
+            walk: [
+              {
+                path: "review-check.route",
+                parent: "review-check",
+                answer: { type: "choice", choice: "standard", confidence: 0.62, probabilities: { standard: 0.62, deep: 0.38 } },
+                option: "standard",
+                branch: "then",
+              },
+              {
+                path: "review-check.route/standard",
+                parent: "review-check.route",
+                answer: { type: "choice", choice: "yes", confidence: 0.8 },
+                option: "yes",
+                branch: "declined",
+              },
+            ],
+            answer: { type: "choice", choice: "standard", confidence: 0.62 },
+            threshold: 0.6,
+            routedTo: "review-check",
+            declined: "review-check.route/standard",
+          },
           verification: [
             {
               check: "how does the review read",
@@ -930,4 +954,37 @@ test("the CLI accounts for the store it built, and refuses a flag it does not ta
   const bad = runCli(["scripts/ingest-metrics.mjs", "--nope"]);
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /unknown flag --nope/);
+});
+
+test("decideResults: one row per usage context, with the parent it was used under", { skip: noSqlite }, async () => {
+  // The fixture carries both eras: one cascade with a recorded node path and parent, one from before
+  // node paths existed (its `kind` is a word, not a node) — and a routing walk whose steps name their
+  // own paths and parents. The point of the parent: the same node under a different parent is a
+  // different usage, so rows are per context and never pooled.
+  const { db } = await openFixture();
+  const { rows } = decideResults(db);
+  const at = (p) => rows.find((r) => r.path === p);
+
+  const root = at("review-check.route");
+  assert.equal(root.parent, "review-check", "the route root belongs to its fusion");
+  assert.equal(root.total, 1);
+  assert.equal(root.sufficient, 1, "a branch taken is a gate that held");
+  assert.deepEqual({ ...root.tallies }, { standard: 1 });
+  assert.equal(root.latest.choice, "standard");
+  assert.deepEqual(root.latest.probabilities, { standard: 0.62, deep: 0.38 }, "the answer keeps its probabilities");
+
+  const nested = at("review-check.route/standard");
+  assert.equal(nested.parent, "review-check.route", "a nested node belongs to the node it hangs under");
+  assert.equal(nested.sufficient, 0, "a declined walk counts as a gate that did not hold");
+
+  const chain = at("review-check.review-skeptic#0");
+  assert.equal(chain.parent, "review-check.review-skeptic", "a chain entry belongs to its chain");
+  assert.equal(chain.total, 1);
+  assert.equal(chain.sufficient, 0);
+  assert.ok(chain.latest.at.length > 0, "the newest answer is named by its run's clock");
+
+  // A record from before node paths keeps loading and keeps counting toward its run — it names no
+  // node, so it claims no row rather than a wrong one.
+  assert.equal(at("decision"), undefined, "a kind word is not a node");
+  assert.notEqual(root.parent, chain.parent, "distinct contexts stay distinct rows");
 });

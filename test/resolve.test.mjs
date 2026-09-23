@@ -48,6 +48,16 @@ const registryOf = (models, { credentialed = true } = {}) => ({
   getProviderAuthStatus: () => ({ authenticated: credentialed }),
 });
 
+test("a continuation entry resolves like any candidate: an alias or a decision", () => {
+  // The chain walk jumps to `then`/`otherwise` entries; they are ordinary candidates — including a
+  // nested decision — so the same two shapes the seat loop already walks are all a continuation is.
+  assert.deepEqual(normalizeCandidate("solo"), { kind: "alias", alias: "solo" });
+  const nested = { decide: { instructions: "again?", criteria: { a: { description: "a" }, b: { description: "b" } } }, otherwise: "solo" };
+  assert.equal(normalizeCandidate(nested).kind, "decide", "a nested decision entry is a decision");
+  const jumped = resolveCandidates(config, { alias: "solo", thinking: "low" });
+  assert.equal(jumped[0].thinking, "low", "an alias continuation resolves its routes with the seat's level");
+});
+
 test("an alias becomes one route per provider, in order, carrying the alias's own model", () => {
   const routes = resolveCandidates(config, "pro");
   assert.deepEqual(

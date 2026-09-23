@@ -145,26 +145,41 @@ export type DecideSpec =
   | { state: string; options: { id: string; description: string }[]; question: string; backend?: string }
   | { state: string; questions: Record<string, TsQuestion>; backend?: string };
 
-/** A routing option: a description the model reads, and the fusion to run when this option wins. */
-export type RouteCriterion = string | { description?: string; then?: string };
+/**
+ * A branch of a route: a fusion to run (`"id"` or `{run: "id"}`) or a nested decision whose own
+ * options branch again — decisions in routes in decisions. `otherwise` is the branch for options that
+ * carry no `then`; neither it nor any `then` is required, and an implicit leaf declines to the fusion
+ * that owns the route: unsure means spend, at every depth. The named-fusion graph a walk can move
+ * between must be acyclic (inline nodes are trees and cannot cycle) — that, and nothing else, keeps a
+ * walk finite.
+ */
+export type RouteNode =
+  | string
+  | { run: string }
+  | { decide: DecideSpec; otherwise?: RouteNode; sufficientWhen?: SufficientWhen };
+
+/** A routing option: a description the model reads, and where the walk goes when this option wins. */
+export type RouteCriterion = string | { description?: string; then?: RouteNode };
 
 export type RouteSpec = {
   instructions: string;
-  criteria: Record<string, RouteCriterion>;   // 2..16 option ids; at least one carries `then`
+  criteria: Record<string, RouteCriterion>;   // 2..16 option ids
+  otherwise?: RouteNode;                      // the branch for options that carry no `then`
   state?: string;                             // default "{{prompt}}"
   backend?: string;
   /**
-   * Same predicate as a slot cascade, at fusion level: the winning option must carry `then`, and
-   * `sufficientWhen` (default `{ minConfidence: 0.5 }`) must hold. Otherwise the run proceeds as this
-   * fusion — unsure means spend, not gamble.
+   * Same predicate as a slot cascade, at every depth: the branch the winning option names (or the
+   * node's `otherwise`) is followed only when `sufficientWhen` (default `{ minConfidence: 0.5 }`)
+   * holds. Otherwise the run proceeds as this fusion — unsure means spend, not gamble.
    */
   sufficientWhen?: SufficientWhen;
 };
 
 /**
  * When a decision's answer is actionable enough to stop the cascade. Omitted conditions are not
- * tested; all supplied conditions must hold. A candidate whose answer is not sufficient advances to
- * the next candidate with reason `"insufficient"` — a success that escalates, not a failure.
+ * tested; all supplied conditions must hold. A candidate whose answer is not sufficient continues the
+ * chain — at the option's named continuation, or the next entry — with reason `"insufficient"`: a
+ * success that escalates, not a failure.
  */
 export type SufficientWhen = {
   choiceIs?: string | string[];   // the winning option id, or any of several
@@ -174,11 +189,17 @@ export type SufficientWhen = {
   minConfidence?: number;         // choice/score confidence at or above this counts
 };
 
-/** A slot entry is an alias id, an object pinning/reordering that alias's providers, or a decision. */
+/**
+ * A slot entry is an alias id, an object pinning/reordering that alias's providers, or a decision.
+ * A decision's `criteria` values may carry `then` — another entry, a nested decision included — and
+ * `otherwise` is the continuation for options that carry none; with neither, the chain continues to
+ * the next list entry, which is what it has always done. A named continuation runs first and the rest
+ * of the list stays behind it as the chain's failure fallbacks.
+ */
 export type SlotCandidate =
   | string
   | { alias: string; providers?: (string | ProviderRef)[]; thinking?: Persona["thinking"] }
-  | { decide: DecideSpec; sufficientWhen?: SufficientWhen };
+  | { decide: DecideSpec; otherwise?: SlotCandidate; sufficientWhen?: SufficientWhen };
 
 /**
  * A persona is a seat: what it is told, how it samples. Defined once and reused by any mode or fusion,
@@ -373,9 +394,16 @@ Validation runs on every load and throws `pi-fusion-matrix: <problem>`; never fa
 - a decision naming a `backend` absent from `backends` → error; `decide.defaultBackend` absent → error.
 - `questions` on a `kind: "semif"` backend → error, naming the option-form alternative, because the
   SemIf row schema carries one question and typed batching does not exist there.
-- `route.criteria` with fewer than two options, or with no entry carrying `then` → error, because
-  such a route can never fire.
-- a `then` naming an unknown fusion, this fusion, or a fusion that itself declares `route` → error.
+- `route.criteria` with fewer than two options, or with no entry carrying `then` and no `otherwise` →
+  error, because such a route can never fire. A map is never *required* to be total: options without
+  `then`, nodes without `otherwise`, and implicit leaves are all legal — a leaf declines to the fusion
+  that owns the route.
+- a `then` naming an unknown fusion or this fusion → error, and the graph of named fusions a walk can
+  move between must be **acyclic** — the error names the cycle (`route cycle: a → b → a`). Nesting is
+  unbounded on purpose; this is the whole of what keeps a walk finite.
+- a `then` that is not a node of its own level → error: at chain level an alias form or a nested
+  decision (a bare fusion id is not a candidate), at route level a fusion id, `{run}`, or a nested
+  decision (an alias-only object is not a branch).
 - `sufficientWhen` on a model candidate → error (`models produce no answer to test`); it applies to
   decision candidates only.
 - `sufficientWhen` with none of `choiceIs`/`noulAbove`/`scoreAbove`/`scoreBelow`/`minConfidence` →
@@ -636,9 +664,14 @@ async function runSeat(
 2. Expand the candidate list with `resolveCandidates` per entry, keeping entry order. Each entry
    contributes its own ordered provider list. The expansion is the execution plan; log it once per run
    in the banner as `<persona>: <alias>@<provider>` sequences.
-3. Walk the expansion in order, capped at `fusion.maxAdvance ?? 3` advances per seat:
+3. Walk the expansion as a queue — a chain is a walk, not a loop — capped at `fusion.maxAdvance ?? 3`
+   advances per seat:
    - decide entry → `decide(...)` per Step 4; failure records a substitution `reason: "decision"` and
-     moves to the next entry. A decision's text contribution to the judge/synthesis context is
+     continues to the next entry. A sufficient answer is the seat's output and skips the rest. An
+     insufficient one continues where the winning option's `then` names (or the entry's `otherwise`),
+     a nested decision included; with neither named, at the next list entry — the advance it has
+     always been. Every decision records the node it happened at (`path`) and the node it hangs under
+     (`parent`). A decision's text contribution to the judge/synthesis context is
      `option: probability` lines (`<id>: <p>` sorted descending), and the winner is marked.
    - Otherwise build the seat's model through the credential seam above and stream it:
      ```ts
@@ -664,7 +697,7 @@ async function runSeat(
    | text matches `/\b40[13]\b|unauthorized|invalid api key/i` | advance | `"credential"` | both |
    | text matches `/not found|unknown model|\b404\b/i` | advance | `"missing model"` | both |
    | transport failure, 5xx, or a 429 without quota semantics | retry same candidate once after 2000 ms, then advance | `"transient"` | both |
-   | a decision candidate answered, but `sufficientWhen` did not hold | advance at once, keeping the answer | `"insufficient"` | seat cascade |
+   | a decision candidate answered, but `sufficientWhen` did not hold | continue at once (the option's `then`, the entry's `otherwise`, or the next entry), keeping the answer | `"insufficient"` | seat cascade |
    | the caller stopped the run, or the seat's own deadline passed | advance at once, no retry | `"aborted"` / `"timeout"` | seat cascade |
    | any delta already streamed to the caller | do not advance; end with emitted text, `degraded: true` | — | — |
 
@@ -753,8 +786,16 @@ type RunDetails = {
   seatErrors: { persona: string; error?: string; reason?: string }[];
   rounds?: { round: number; seats: string[]; inputs: Record<string, string> }[];
   substitutions: Substitution[];
-  cascades: Cascade[];               // answer, sufficiency, prior, next candidate
-  routing?: { answer: DecideAnswer; routedTo?: string; declined?: string; threshold: number };
+  cascades: Cascade[];               // path, parent, branch, answer, sufficiency, prior, continuation
+  routing?: {
+    walk: { path: string; parent: string; answer: DecideAnswer; option: string | null;
+            branch: "then" | "otherwise" | "escalated" | "declined" }[];
+    answer: DecideAnswer;            // the root decision's answer
+    routedTo?: string;               // the fusion the walk ended at
+    escalated?: string;              // an option that matched with no branch: a choice to run this fusion
+    declined?: string;               // why the walk fell back to this fusion
+    threshold: number;
+  };
   verification?: { check: string; result: unknown; gate?: { exit: number; timedOut?: boolean; durationMs: number; output: string } }[];
   usage: Usage;
 };
@@ -763,28 +804,39 @@ type RunDetails = {
 `details.substitutions` and `details.seatErrors` are always present, empty arrays included: a silently
 degraded run is a wrong answer and must be visible. `seats[].model` is the vendor id that actually
 answered, so a provider-level substitution stays auditable after the fact, and `stages[].calls` is what
-makes a shape's cost contract checkable.
+makes a shape's cost contract checkable. Every recorded decision carries `path` and `parent`: tracking
+keeps the parent so results can be read for the context the node was used in — the same decision under
+a different parent is different usage, and the store keeps one row per (fusion, path) context.
+`parent` is recorded explicitly; the derivation `path` minus its last segment is only the fallback for
+records that predate it.
 
-`/matrix` with no arguments — or with exactly one that names a tab (`aliases`, `fusions`, `routes`,
-`personas`) —
-opens the interface as a mounted component (`scripts/tui-panel.mjs`) and runs nothing. Otherwise the
+`/matrix` with no arguments — or with exactly one that names a tab (`aliases`, `fusions`, `personas`) —
+opens the interface as a mounted component (`scripts/tui-panel.mjs`) and runs nothing (the `routes` tab
+folded into `fusions`: a fusion's rows are its seats' routes, with what the store saw beside them).
+Otherwise the
 first whitespace-delimited token is a fusion id when it matches a key in `fusions`, and when it does
 not, the whole argument string is the prompt and `defaultFusion` is used. Unknown id →
 `ctx.ui.notify('unknown fusion "x"; known: cheap, quick, ...', "error")` and no run.
 A decision entry reports as before; a `gate` entry runs a command and records its exit status.
 
-**`route` runs before the first stage** (Step 3 step 1). The clause is one choice question built from
-`route.instructions` and the option ids of `route.criteria` (descriptions only — `then` is this
-extension's vocabulary and is never sent). `state` defaults to `{{prompt}}`. A `then` on the winning
-option names the fusion to run instead of this one; an option without `then`, an option id the map
-does not contain, or a `sufficientWhen` that does not hold (`{ minConfidence: 0.5 }` by default) all
-mean the run proceeds as this fusion — the same "unsure means spend" rule as a slot cascade, one level
-up. The decision and the routing are reported
-(` ├─ ↪ routed to flash (complexity=trivial, confidence 0.91)\n`) and recorded in `details.routing`,
-including when the confidence gate declines to route.
+**`route` runs before the first stage** (Step 3 step 1): a walk over a decision map, where a branch may
+be another decision at any depth — decisions in routes in decisions. Each step asks one choice
+question built from that node's `instructions` and option ids (descriptions only — `then` is this
+extension's vocabulary and is never sent); `state` defaults to `{{prompt}}`. The branch the winning
+option names (`then`, else the node's `otherwise`) is followed only when `sufficientWhen`
+(`{ minConfidence: 0.5 }` by default) holds; an option without `then`, an option id the map does not
+contain, or a gate that does not hold all mean the run proceeds as this fusion — the same "unsure
+means spend" rule as a slot cascade, applied at every depth and declining to the fusion that owns the
+route. A matched option with no branch and no `otherwise` is a *choice to run this fusion* and is
+recorded as `escalated`, not as a decline. Every step is recorded in `details.routing.walk` under the
+node it happened at (`path`) and the node it hangs under (`parent`), and the decision and the routing
+are reported (` ├─ ↪ routed to flash (complexity=trivial, confidence 0.91)\n`), including when the
+gate declines to route.
 Routing may target a more expensive fusion — escalation on `"architectural"` is a normal use — so
-there is no cost-direction rule. The guardrails are structural: one hop (a target may not declare
-`route`), no self-route, and full reporting of the answer, its probabilities, and its confidence.
+there is no cost-direction rule. The guardrails are structural: no self-route, the graph of named
+fusions a walk can move between is acyclic (the error names the cycle), one decision call per node
+visited — the walk is as deep as the map and no deeper — and full reporting of every answer, its
+probabilities, and its confidence.
 
 **`verify` runs after synthesis** and is report-only. Two kinds, evaluated in order, with
 `vars = { prompt, panel, judge, synthesis, cwd }`:

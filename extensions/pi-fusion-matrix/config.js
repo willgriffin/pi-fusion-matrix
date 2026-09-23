@@ -447,6 +447,7 @@ export function validateConfig(config, { sources } = {}) {
 
   // ---- fusions ----
   const fusions = config.fusions ?? {};
+  const routeEdges = {};
   if (Object.keys(fusions).length === 0) err("no fusions defined");
   for (const [id, fusion] of Object.entries(fusions)) {
     if (/[:/]/.test(id)) err(`fusion id "${id}" may not contain ":" or "/"`);
@@ -478,29 +479,13 @@ export function validateConfig(config, { sources } = {}) {
       }
       list.forEach((candidate, i) => {
         const where = `fusion "${id}" candidate for "${persona}" [${i}]`;
-        if (typeof candidate === "string") {
-          if (!aliases[candidate]) err(`${where}: unknown alias "${candidate}"`);
-          return;
-        }
-        if (!isObject(candidate)) {
-          err(`${where}: not a string, alias object, or decision`);
-          return;
-        }
-        const kind = SLOT_KINDS.filter((k) => candidate[k] !== undefined);
-        if (kind.length !== 1) {
-          err(`${where}: must set exactly one of ${SLOT_KINDS.join("/")}`);
-          return;
-        }
-        if (kind[0] === "alias") {
-          if (!aliases[candidate.alias]) err(`${where}: unknown alias "${candidate.alias}"`);
-          if (candidate.sufficientWhen !== undefined)
-            err(`${where}: models produce no answer to test; sufficientWhen applies to decisions`);
-        } else {
-          validateDecision(candidate.decide, where, config, err);
-          validateSufficientWhen(candidate.sufficientWhen, where, candidate.decide, err, effectiveBackend(candidate.decide, config));
-        }
+        validateChainEntry(candidate, where, config, err, aliases);
       });
     }
+
+    // The route validates before the rules that reason about what its walk can reach — a review's
+    // targets must all be deliberating rungs, at every depth — so the walk's reach is collected first.
+    const routeReach = fusion.route ? validateRoute(fusion.route, id, config, err, (routeEdges[id] ??= [])) : [];
 
     const executor = executorOf(config, fusion);
     for (const [persona, level] of Object.entries(fusion.thinking ?? {})) {
@@ -602,11 +587,11 @@ export function validateConfig(config, { sources } = {}) {
     }
     if (fusion.review === true) {
       if (!fusion.route) err(`fusion "${id}": review requires route — the class it answers is what selects the rung`);
-      // Every route target has to be a deliberating rung too: the class changes which models run, and a target
-      // with an execute face would answer the review with one model instead of its panel.
-      for (const [option, value] of Object.entries(fusion.route?.criteria ?? {})) {
-        const target = isObject(value) ? value.then : undefined;
-        if (target && config.fusions?.[target]?.execute !== false) {
+      // Every fusion the route walk can reach has to be a deliberating rung too, at any depth: the class
+      // changes which models run, and a target with an execute face would answer the review with one model
+      // instead of its panel.
+      for (const { option, target } of routeReach) {
+        if (config.fusions?.[target]?.execute !== false) {
           err(
             `fusion "${id}": review option "${option}" routes to "${target}", which declares no execute: false — a reviewer pinned to it would proxy to its writing seat instead of deliberating`,
           );
@@ -649,9 +634,10 @@ export function validateConfig(config, { sources } = {}) {
       }
       validateDecision(entry, where, config, err);
     }
-
-    if (fusion.route) validateRoute(fusion.route, id, config, err);
   }
+
+  // Nesting is unbounded on purpose; this is the whole of what keeps a route walk finite.
+  checkRouteCycles(routeEdges, err);
 
   // ---- decide + backends ----
   const backends = config.backends ?? {};
@@ -731,9 +717,10 @@ function effectiveBackend(spec, config) {
 
 /**
  * One choice vocabulary across every surface (slot candidate, pipeline stage, verify, route): an
- * `instructions` string and a `criteria` map. A route may attach an action to a criterion with
- * `then`; nothing else may, because nothing else has an action to take. The batched `questions` form
- * (noul/choice/score) stays for typed questions a backend can answer several of at once.
+ * `instructions` string and a `criteria` map. A route — or a cascade's decision, at chain level — may
+ * attach an action to a criterion with `then`; a stage's or a verify check's decision may not, because
+ * nothing there has an action to take. The batched `questions` form (noul/choice/score) stays for typed
+ * questions a backend can answer several of at once.
  */
 function validateDecision(spec, where, config, err, { allowActions = false, scoreLevels = false } = {}) {
   if (!isObject(spec)) {
@@ -776,7 +763,7 @@ function validateDecision(spec, where, config, err, { allowActions = false, scor
         err(`${where}: criteria "${id}" description must be a string`);
       }
       if (value.then !== undefined && !allowActions) {
-        err(`${where}: criteria "${id}" attaches an action, which only a route may do`);
+        err(`${where}: criteria "${id}" attaches an action, which only a route or a cascade may do`);
       }
     }
   } else if (hasQuestions) {
@@ -857,26 +844,151 @@ export function validateSufficientWhen(sufficientWhen, where, decision, err, bac
   }
 }
 
-export function validateRoute(route, fusionId, config, err) {
+/**
+ * A route branch is a fusion to run (`"id"` or `{run: "id"}`) or a nested decision whose own options
+ * branch again — decisions in routes in decisions. `otherwise` is the branch for options that carry no
+ * `then`; neither it nor any `then` is required, and an implicit leaf declines to the fusion that owns
+ * the route: unsure means spend, at every depth.
+ */
+export const routeTarget = (node) => (typeof node === "string" ? node : isObject(node) && typeof node.run === "string" ? node.run : null);
+
+/**
+ * Validate one route branch. `reach` collects `{ option, target }` for every fusion the walk can reach
+ * from the top-level `option` (or `otherwise`), which is what the review rules reason over and what the
+ * cycle check walks. The graph is over named fusions — inline nodes are trees and cannot cycle.
+ */
+function validateRouteNode(node, label, config, err, fusionId, reach, option) {
+  const target = routeTarget(node);
+  if (target !== null) {
+    if (target === fusionId) err(`${label} routes to this fusion`);
+    else if (!config.fusions?.[target]) err(`${label} routes to unknown fusion "${target}"`);
+    else reach.push({ option, target });
+    return;
+  }
+  if (
+    !isObject(node) ||
+    node.decide === undefined ||
+    Object.keys(node).some((k) => !["decide", "otherwise", "sufficientWhen"].includes(k))
+  ) {
+    err(`${label} must be a fusion id, {run: <fusion>}, or a decision node`);
+    return;
+  }
+  const where = label;
+  validateDecision(node.decide, where, config, err, { allowActions: true });
+  validateSufficientWhen(node.sufficientWhen, where, node.decide, err, effectiveBackend(node.decide, config));
+  for (const [id, value] of Object.entries(node.decide?.criteria ?? {})) {
+    const branch = isObject(value) ? value.then : undefined;
+    if (branch !== undefined) validateRouteNode(branch, `${where} → option "${id}"`, config, err, fusionId, reach, option);
+  }
+  if (node.otherwise !== undefined) validateRouteNode(node.otherwise, `${where} → otherwise`, config, err, fusionId, reach, option);
+}
+
+/**
+ * A seat cascade's entry: an alias (string or object) or a decision whose options may name where the
+ * chain continues (`then` → another entry, a nested decision included). No `then` continues to the
+ * next list entry — today's advance — and `otherwise` is the continuation for options that carry none.
+ * Entries are trees by construction (nothing is referenced by name here), so there is no cycle to walk.
+ */
+function validateChainEntry(entry, where, config, err, aliases) {
+  if (typeof entry === "string") {
+    if (!aliases[entry]) err(`${where}: unknown alias "${entry}"`);
+    return;
+  }
+  if (!isObject(entry)) {
+    err(`${where}: not a string, alias object, or decision`);
+    return;
+  }
+  const kind = SLOT_KINDS.filter((k) => entry[k] !== undefined);
+  if (kind.length !== 1) {
+    err(`${where}: must set exactly one of ${SLOT_KINDS.join("/")}`);
+    return;
+  }
+  if (kind[0] === "alias") {
+    if (!aliases[entry.alias]) err(`${where}: unknown alias "${entry.alias}"`);
+    if (entry.sufficientWhen !== undefined) err(`${where}: models produce no answer to test; sufficientWhen applies to decisions`);
+    return;
+  }
+  validateDecision(entry.decide, where, config, err, { allowActions: true });
+  validateSufficientWhen(entry.sufficientWhen, where, entry.decide, err, effectiveBackend(entry.decide, config));
+  for (const [id, value] of Object.entries(entry.decide?.criteria ?? {})) {
+    const branch = isObject(value) ? value.then : undefined;
+    if (branch !== undefined) validateChainEntry(branch, `${where} option "${id}"`, config, err, aliases);
+  }
+  if (entry.otherwise !== undefined) validateChainEntry(entry.otherwise, `${where} otherwise`, config, err, aliases);
+}
+
+/**
+ * The graph of named fusions a route walk can move between must be acyclic: nesting is unbounded on
+ * purpose, and this is the whole of what keeps a walk finite. An error names the cycle it found.
+ */
+export function checkRouteCycles(edges, err) {
+  const state = new Map();
+  const stack = [];
+  const visit = (id) => {
+    if (state.get(id) === "done") return;
+    if (state.get(id) === "open") {
+      const at = stack.indexOf(id);
+      err(`route cycle: ${[...stack.slice(at), id].join(" → ")}`);
+      return;
+    }
+    state.set(id, "open");
+    stack.push(id);
+    for (const next of edges[id] ?? []) visit(next);
+    stack.pop();
+    state.set(id, "done");
+  };
+  for (const id of Object.keys(edges)) visit(id);
+}
+
+/** The branch an option leads to: its `then`, else the node's `otherwise`. */
+export const optionThen = (spec, optionId) => {
+  const value = spec?.criteria?.[optionId];
+  const then = isObject(value) ? value.then : undefined;
+  return then !== undefined ? then : spec?.otherwise;
+};
+
+/**
+ * A recorded node's parent: `path` minus its last segment (`P/o` → `P`, `<fusion>.<seat>#i` →
+ * `<fusion>.<seat>`, the root `<fusion>.route` → `<fusion>`). Tracking records keep `parent`
+ * explicitly; this derivation is only the fallback for records that predate it. Fusion ids may
+ * contain dots, which makes the root case approximate for them — another reason the field is recorded.
+ */
+export function nodeParent(path) {
+  const at = String(path ?? "");
+  const slash = at.lastIndexOf("/");
+  if (slash >= 0) return at.slice(0, slash);
+  const hash = at.lastIndexOf("#");
+  if (hash >= 0) return at.slice(0, hash);
+  const dot = at.lastIndexOf(".");
+  return dot > 0 ? at.slice(0, dot) : at;
+}
+
+/**
+ * `reach` collects `{ option, target }` for every named fusion the walk can reach (from each top-level
+ * option, or from `otherwise`) — the set the review rules must hold at every depth.
+ */
+export function validateRoute(route, fusionId, config, err, edges = null, reach = []) {
   const where = `fusion "${fusionId}" route`;
   if (!isObject(route)) {
     err(`${where}: not an object`);
-    return;
+    return reach;
   }
   validateDecision(route, where, config, err, { allowActions: true });
-  const entries = Object.entries(route.criteria ?? {});
   let targets = 0;
-  for (const [option, value] of entries) {
-    if (!isObject(value) || value.then === undefined) continue;
+  for (const [option, value] of Object.entries(route.criteria ?? {})) {
+    const branch = isObject(value) ? value.then : undefined;
+    if (branch === undefined) continue;
     targets += 1;
-    if (!config.fusions?.[value.then]) err(`${where}: option "${option}" routes to unknown fusion "${value.then}"`);
-    else {
-      if (value.then === fusionId) err(`${where}: option "${option}" routes to this fusion`);
-      if (config.fusions[value.then].route)
-        err(`${where}: option "${option}" routes to "${value.then}", which declares its own route (two hops)`);
-    }
+    validateRouteNode(branch, `${where}: option "${option}"`, config, err, fusionId, reach, option);
   }
-  if (targets === 0) err(`${where}: no option carries then, so the route can never fire`);
+  if (route.otherwise !== undefined) {
+    targets += 1;
+    validateRouteNode(route.otherwise, `${where}: otherwise`, config, err, fusionId, reach, "otherwise");
+  }
+  if (targets === 0) err(`${where}: no option carries then and there is no otherwise, so the route can never fire`);
+  for (const { target } of reach) {
+    if (target !== fusionId && config.fusions?.[target]) (edges ?? []).push(target);
+  }
   const backend = effectiveBackend(route, config);
   // A route always needs a confidence to decide with (its default gate is `{ minConfidence: 0.5 }`),
   // so a SemIf backend is a load error here even when no `sufficientWhen` is written.
@@ -886,4 +998,5 @@ export function validateRoute(route, fusionId, config, err) {
   if (route.sufficientWhen !== undefined) {
     validateSufficientWhen(route.sufficientWhen, where, undefined, err);
   }
+  return reach;
 }

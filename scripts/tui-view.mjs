@@ -16,8 +16,9 @@
 
 import { promptPath } from "../extensions/pi-fusion-matrix/config.js";
 
-/** The closed tab list, in display order. */
-export const TABS = ["aliases", "fusions", "routes", "personas"];
+/** The closed tab list, in display order. The routes tab folded into fusions: a fusion's rows are its
+ * seats' routes, with what the store saw beside them. */
+export const TABS = ["aliases", "fusions", "personas"];
 
 const BOX = { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│", tee: "├", teeR: "┤" };
 
@@ -505,6 +506,347 @@ export function personaRows({ config, seatStats = [], sources = {}, expanded = {
   return rows;
 }
 
+/** Every tree row carries every column: a row that lacked one would read as an empty cell, not a dash. */
+const treeRow = (fields) => ({
+  mode: "—",
+  face: "—",
+  runs: 0,
+  failures: 0,
+  seats: 0,
+  degraded: 0,
+  sufficient: "—",
+  verify: 0,
+  malformed: 0,
+  located: 0,
+  unlocated: 0,
+  reportedUsd: null,
+  estimatedUsd: 0,
+  listUsd: 0,
+  last: "—",
+  answered: "",
+  refusals: "",
+  ...fields,
+});
+
+/**
+ * The fusions tab as a tree: a fusion opens to the decision its route walks — its choices, its
+ * editable branches, its gate, and what it answered underneath (the store's rows, keyed by the very
+ * node paths the runner records) — then its mode's stages (a shape is shared, so its seats are read
+ * here rather than edited), then each seat's candidate chain. This is where the `routes` tab lives
+ * now: a fusion's rows are its seats' routes, with what the store saw beside them.
+ *
+ * A row's `id` keys `expanded`, and its `editPath` is where in the fusion spec an edit lands — one
+ * locator for every editor, from a choice's description to a branch's target.
+ */
+export function fusionTree({ config, fusionStats = [], seatStats = [], decideRows = [], expanded = {} }) {
+  const rows = [];
+  const parents = fusionRows({ config, fusionStats, seatStats });
+  const seatRows = routeRows({ config, seatStats });
+  const resultAt = (fusion, path) => decideRows.find((row) => row.fusion === fusion && row.path === path) ?? null;
+  const indent = (depth, mark = "") => `${"  ".repeat(Math.max(0, depth))}${mark}`;
+
+  const branchLabel = (then, level) => {
+    if (then === undefined) return "this " + (level === "route" ? "fusion" : "chain");
+    if (typeof then === "string") return then;
+    if (then && typeof then === "object") {
+      if (typeof then.run === "string") return then.run;
+      if (typeof then.alias === "string") return then.alias;
+      if (then.decide !== undefined) return "another decision";
+    }
+    return "?";
+  };
+
+  /** One decision node's rows: itself, and — when open — its choices (with nested decisions under
+   * them), its gate, and its result. `nodePath` is the path the runner records for it. */
+  const decisionRows = ({ spec, sufficientWhen, otherwiseNode, level, nodePath, editPath, fusion, depth, id, label, mark }) => {
+    const open = Boolean(expanded[id]);
+    const result = resultAt(fusion, nodePath);
+    rows.push(
+      treeRow({
+        kind: "decision",
+        fusionId: fusion,
+        id,
+        depth,
+        label: indent(depth, mark) + label,
+        fusion: indent(depth, mark) + label,
+        nodePath,
+        editPath,
+        decide: spec,
+        sufficientWhen,
+        face: "decision",
+        sufficient: result ? `${result.sufficient}/${result.total}` : "—",
+        last: result?.latest ? `${result.latest.choice ?? "?"}` : "—",
+        result,
+        expanded: open,
+        childCount: 1 + Object.keys(spec?.criteria ?? {}).length + (otherwiseNode !== undefined ? 1 : 0),
+      }),
+    );
+    if (!open) return;
+    for (const [option, value] of Object.entries(spec?.criteria ?? {})) {
+      const then = value && typeof value === "object" ? value.then : undefined;
+      const choiceId = `${id}/${option}`;
+      rows.push(
+        treeRow({
+          kind: "choice",
+          fusionId: fusion,
+          id: choiceId,
+          depth: depth + 1,
+          label: indent(depth + 1, "├ ") + `choice ${option} → ${branchLabel(then, level)}`,
+          fusion: indent(depth + 1, "├ ") + `choice ${option} → ${branchLabel(then, level)}`,
+          option,
+          then,
+          nodePath,
+          editPath: [...editPath, "criteria", option],
+          level,
+          face: "branch",
+          last: result?.tallies?.[option] !== undefined ? `${option}×${result.tallies[option]}` : "—",
+          expanded: Boolean(expanded[choiceId]),
+          childCount: then && typeof then === "object" && then.decide !== undefined ? 1 : 0,
+        }),
+      );
+      if (then && typeof then === "object" && then.decide !== undefined && expanded[choiceId]) {
+        rows.push(
+          ...decisionRowsFor({
+            node: then,
+            level,
+            nodePath: `${nodePath}/${option}`,
+            editPath: [...editPath, "criteria", option, "then"],
+            fusion,
+            depth: depth + 2,
+            id: `${choiceId}~`,
+            label: "decision",
+            mark: "",
+          }),
+        );
+      }
+    }
+    if (otherwiseNode !== undefined) {
+      rows.push(
+        treeRow({
+          kind: "choice",
+          fusionId: fusion,
+          id: `${id}/~`,
+          depth: depth + 1,
+          label: indent(depth + 1, "├ ") + `otherwise → ${branchLabel(otherwiseNode, level)}`,
+          fusion: indent(depth + 1, "├ ") + `otherwise → ${branchLabel(otherwiseNode, level)}`,
+          option: "~",
+          then: otherwiseNode,
+          nodePath,
+          editPath: [...editPath, "otherwise"],
+          level,
+          face: "branch",
+        }),
+      );
+    }
+    const gate = sufficientWhen ?? (level === "route" ? { minConfidence: 0.5 } : undefined);
+    rows.push(
+      treeRow({
+        kind: "gate",
+        fusionId: fusion,
+        id: `${id}/gate`,
+        depth: depth + 1,
+        label:
+          indent(depth + 1, "├ ") +
+          `gate: ${
+            gate
+              ? Object.entries(gate)
+                  .map(([k, v]) => `${k} ${Array.isArray(v) ? v.join("|") : v}`)
+                  .join(" ")
+              : "none — an answer always holds"
+          }`,
+        fusion: indent(depth + 1, "├ ") + "gate",
+        nodePath,
+        editPath: [...editPath, "sufficientWhen"],
+        sufficientWhen: gate,
+        criteria: spec?.criteria ?? {},
+        face: "gate",
+      }),
+    );
+    if (result) {
+      rows.push(
+        treeRow({
+          kind: "result",
+          fusionId: fusion,
+          id: `${id}/result`,
+          depth: depth + 1,
+          label:
+            indent(depth + 1, "└ ") +
+            `result: ${result.latest ? `${result.latest.choice ?? "?"}${result.latest.confidence != null ? ` conf ${result.latest.confidence}` : ""}` : "—"} · ${
+              Object.entries(result.tallies ?? {})
+                .map(([o, n]) => `${o}×${n}`)
+                .join(" ") || "no answers"
+            }`,
+          fusion: indent(depth + 1, "└ ") + "result",
+          nodePath,
+          result,
+          face: "result",
+          sufficient: `${result.sufficient}/${result.total}`,
+          last: result?.latest?.at ? String(result.latest.at).slice(0, 16).replace("T", " ") : "—",
+        }),
+      );
+    }
+  };
+  // The route node is flat at its root (its `criteria` lives on `fusion.route`) and wrapped one level
+  // down (`{decide, otherwise, sufficientWhen}`) — today's spelling, kept.
+  const decisionRowsFor = ({ node, level, nodePath, editPath, fusion, depth, id, label, mark }) => {
+    const at = rows.length;
+    decisionRows({
+      spec: node.decide ?? node,
+      sufficientWhen: node.sufficientWhen,
+      otherwiseNode: node.otherwise,
+      level,
+      nodePath,
+      editPath: node.decide === undefined ? editPath : [...editPath, "decide"],
+      fusion,
+      depth,
+      id,
+      label: `${label} — ${String(node.decide?.instructions ?? node.instructions ?? "").slice(0, 40)}`,
+      mark,
+    });
+    return rows.splice(at);
+  };
+
+  for (const parent of parents) {
+    const fusion = parent.fusion;
+    const spec = config.fusions?.[fusion] ?? {};
+    const id = `f:${fusion}`;
+    const open = Boolean(expanded[id]);
+    const mode = config.modes?.[spec.mode];
+    const seatsHere = seatRows.filter((row) => row.fusion === fusion);
+    rows.push(
+      treeRow({
+        ...parent,
+        kind: "fusion",
+        fusionId: fusion,
+        id,
+        depth: 0,
+        label: fusion,
+        fusion,
+        editPath: [],
+        expanded: open,
+        childCount: 1 + (mode?.stages ?? []).length,
+      }),
+    );
+    if (!open) continue;
+    if (spec.route) {
+      rows.push(
+        ...decisionRowsFor({
+          node: spec.route,
+          level: "route",
+          nodePath: `${fusion}.route`,
+          editPath: ["route"],
+          fusion,
+          depth: 1,
+          id: `${id}:route`,
+          label: "◆ route",
+          mark: "",
+        }),
+      );
+    }
+    (mode?.stages ?? []).forEach((stage, index) => {
+      const kind = stage.parallel ? "parallel" : stage.single ? "single" : stage.decide ? "decide" : stage.score ? "score" : "render";
+      const names = stage.parallel ?? (stage.single ? [stage.single] : []);
+      const stageId = `${id}:stage${index}`;
+      const stageOpen = Boolean(expanded[stageId]);
+      rows.push(
+        treeRow({
+          kind: "stage",
+          fusionId: fusion,
+          id: stageId,
+          depth: 1,
+          label: indent(1) + `stage ${index + 1} · ${kind}${names.length ? ` (${names.join(", ")})` : ""}`,
+          fusion: indent(1) + `stage ${index + 1} · ${kind}`,
+          face: kind,
+          editPath: [],
+          expanded: stageOpen,
+          childCount: names.length + (stage.decide ? 1 : 0),
+        }),
+      );
+      if (!stageOpen) return;
+      if (stage.decide) {
+        rows.push(
+          ...decisionRowsFor({
+            node: { decide: stage.decide, sufficientWhen: stage.sufficientWhen },
+            level: "stage",
+            nodePath: `${fusion}.${stage.name ?? `stage${index}`}`,
+            editPath: ["mode"], // a mode is shared: its stages are read here, not edited from one fusion
+            fusion,
+            depth: 2,
+            id: `${stageId}:decide`,
+            label: "◆ decide",
+            mark: "",
+          }),
+        );
+      }
+      for (const persona of names) {
+        const seat = seatsHere.find((row) => row.seat === persona) ?? null;
+        const seatId = `${id}@${persona}`;
+        const seatOpen = Boolean(expanded[seatId]);
+        const chain = spec.candidates?.[persona] ?? [];
+        rows.push(
+          treeRow({
+            kind: "seat",
+            fusionId: fusion,
+            id: seatId,
+            depth: 2,
+            label: indent(2, "├ ") + persona,
+            fusion: indent(2, "├ ") + persona,
+            persona,
+            editPath: ["candidates", persona],
+            face: "seat",
+            answered: seat?.answered ?? "",
+            refusals: seat?.refusals ?? "",
+            seats: seat?.seats ?? 0,
+            degraded: seat?.degraded ?? 0,
+            expanded: seatOpen,
+            childCount: chain.length,
+          }),
+        );
+        if (!seatOpen) continue;
+        chain.forEach((entry, entryIndex) => {
+          const entryId = `${seatId}#${entryIndex}`;
+          const last = entryIndex === chain.length - 1;
+          const mark = last ? "└ " : "├ ";
+          if (entry && typeof entry === "object" && entry.decide !== undefined) {
+            rows.push(
+              ...decisionRowsFor({
+                node: entry,
+                level: "chain",
+                nodePath: `${fusion}.${persona}#${entryIndex}`,
+                editPath: ["candidates", persona, entryIndex, "decide"],
+                fusion,
+                depth: 3,
+                id: entryId,
+                label: `◆ decision`,
+                mark,
+              }),
+            );
+            return;
+          }
+          const aliasName = typeof entry === "string" ? entry : (entry?.alias ?? "?");
+          rows.push(
+            treeRow({
+              kind: "candidate",
+              fusionId: fusion,
+              id: entryId,
+              depth: 3,
+              label: indent(3, mark) + aliasName,
+              fusion: indent(3, mark) + aliasName,
+              persona,
+              entryIndex,
+              editPath: ["candidates", persona, entryIndex],
+              face: "alias",
+              answered: seat?.answered ?? "",
+              refusals: seat?.refusals ?? "",
+            }),
+          );
+        });
+      }
+    });
+  }
+  return rows;
+}
+
 /** The columns each tab shows. Every one carries a number the store answered. */
 export function columnsFor(tab) {
   if (tab === "aliases")
@@ -524,7 +866,7 @@ export function columnsFor(tab) {
     ];
   if (tab === "fusions")
     return [
-      { key: "fusion", label: "fusion", min: 10, max: 16 },
+      { key: "fusion", label: "fusion", min: 10, max: 28 },
       { key: "mode", label: "mode", min: 10, max: 18 },
       { key: "face", label: "face", min: 9, max: 16 },
       { key: "runs", label: "runs", align: "right", min: 4 },
@@ -539,6 +881,8 @@ export function columnsFor(tab) {
       { key: "reportedUsd", label: "$report", align: "right", min: 8, format: (row) => money(row.reportedUsd) },
       { key: "estimatedUsd", label: "$est", align: "right", min: 7, format: (row) => (row.estimatedUsd ? money(row.estimatedUsd) : "—") },
       { key: "listUsd", label: "$list", align: "right", min: 8, format: (row) => (row.listUsd ? money(row.listUsd) : "—") },
+      { key: "answered", label: "answered (store)", min: 10, max: 22 },
+      { key: "refusals", label: "refused", min: 8, max: 22 },
       { key: "last", label: "last run", min: 10, max: 16 },
     ];
   if (tab === "personas")

@@ -50,13 +50,12 @@ import {
   columnsFor,
   createGrid,
   drawPanel,
-  fusionRows,
+  fusionTree,
   gridLine,
   paintTable,
   paletteFor,
   personaRows,
   put,
-  routeRows,
   truncate,
 } from "./tui-view.mjs";
 import {
@@ -70,6 +69,7 @@ import {
   openStore,
   readPriceCard,
   totals,
+  decideResults,
 } from "./metrics-store.mjs";
 import {
   THINKING_LEVELS,
@@ -127,6 +127,7 @@ export function buildState({
   config,
   modelStats = [],
   fusionStats = [],
+  decideRows = [],
   seatStats = [],
   storeTotals = null,
   source = "",
@@ -139,12 +140,12 @@ export function buildState({
 } = {}) {
   const state = {
     tab: "aliases",
-    cursors: { aliases: 0, fusions: 0, routes: 0, personas: 0 },
+    cursors: { aliases: 0, fusions: 0, personas: 0 },
     expanded: {},
+    decideRows: decideRows ?? [],
     rows: {
       aliases: [],
-      fusions: fusionRows({ config, fusionStats, seatStats }),
-      routes: routeRows({ config, seatStats }),
+      fusions: fusionTree({ config, fusionStats, seatStats, decideRows: decideRows ?? [] }),
       personas: [],
     },
     stats: { modelStats, fusionStats, seatStats },
@@ -602,7 +603,10 @@ export function applyKey(state, key) {
       next.message = "change discarded";
       refresh();
     } else if (row?.kind === "route" || row?.kind === "seat") toParent();
-    else if (row?.kind === "alias" && row.expanded) setExpanded(row.alias, false);
+    else if (row?.id !== undefined && row.expanded) {
+      next.expanded = { ...state.expanded, [row.id]: false };
+      next.rows = { ...next.rows, fusions: fusionView(next) };
+    } else if (row?.kind === "alias" && row.expanded) setExpanded(row.alias, false);
     else if (row?.kind === "persona" && row.expanded) setExpanded(row.persona, false);
   } else if (key === "j" || key === "down") move(1);
   else if (key === "k" || key === "up") move(-1);
@@ -610,7 +614,12 @@ export function applyKey(state, key) {
   else if (key === "G") next.cursors[tab] = Math.max(0, rows.length - 1);
   else if (/^[1-9]$/.test(key) && Number(key) <= TABS.length) next.tab = TABS[Number(key) - 1];
   else if (key === "return" || key === "enter") {
-    if (tab === "personas") {
+    if (row?.id !== undefined) {
+      if (row.childCount > 0) {
+        next.expanded = { ...state.expanded, [row.id]: !row.expanded };
+        next.rows = { ...next.rows, fusions: fusionView(next) };
+      }
+    } else if (tab === "personas") {
       // The personas split: `enter` opens — a parent into its seats, a seat into the alias dropdown
       // it already gets on the routes tab — and only `e` edits.
       if (row?.kind === "seat") return { state: next, effect: "propose" };
@@ -620,9 +629,23 @@ export function applyKey(state, key) {
       setExpanded(row.parent, false);
     } else if (row?.kind === "alias" && row.childCount > 0) setExpanded(row.alias, !row.expanded);
   } else if (key === "left" || key === "h" || key === "shift-tab") {
+    if (row?.id !== undefined) {
+      if (row.expanded) {
+        next.expanded = { ...state.expanded, [row.id]: false };
+        next.rows = { ...next.rows, fusions: fusionView(next) };
+      }
+      return { state: next, effect: "none" };
+    }
     if (row?.kind === "route") toParent();
     else if (row?.kind === "alias" && row.expanded) setExpanded(row.alias, false);
   } else if (key === "right" || key === "l" || key === "tab") {
+    if (row?.id !== undefined) {
+      if (row.childCount > 0 && !row.expanded) {
+        next.expanded = { ...state.expanded, [row.id]: true };
+        next.rows = { ...next.rows, fusions: fusionView(next) };
+      }
+      return { state: next, effect: "none" };
+    }
     if (row?.kind === "alias" && !row.expanded && row.childCount > 0) setExpanded(row.alias, true);
     else if (row?.kind === "alias" && row.expanded) {
       const at = rows.findIndex((entry) => entry.kind === "route" && entry.parent === row.alias);
@@ -632,6 +655,21 @@ export function applyKey(state, key) {
       if (sibling?.kind === "route" && sibling.parent === row.parent) move(1);
     }
   } else if (key === "K" || key === "J") {
+    if (row?.id !== undefined) {
+      if (row.kind !== "candidate") next.message = TREE_KEYS;
+      else
+        accept(
+          proposeFusionEdit({
+            state,
+            row,
+            action: "move",
+            offset: row.entryIndex,
+            to: row.entryIndex + (key === "K" ? -1 : 1),
+            summary: `${row.fusionId}.${row.persona} candidate ${row.entryIndex + 1} moves`,
+          }),
+        );
+      return { state: next, effect: "none" };
+    }
     if (row?.kind !== "route") next.message = tab === "personas" ? PERSONA_KEYS : LIST_KEYS;
     else {
       const delta = key === "K" ? -1 : 1;
@@ -642,6 +680,23 @@ export function applyKey(state, key) {
       accept(proposal);
     }
   } else if (key === "d") {
+    if (row?.id !== undefined) {
+      if (row.kind === "fusion") accept(proposeFusionDelete({ state, row }));
+      else if (row.kind === "candidate")
+        accept(
+          proposeFusionEdit({
+            state,
+            row,
+            action: "delete",
+            offset: row.entryIndex,
+            summary: `${row.fusionId}.${row.persona} drops ${String(row.label).trim()}`,
+          }),
+        );
+      else if (row.kind === "choice")
+        accept(proposeFusionEdit({ state, row, action: "delete", offset: 0, summary: `${row.option} dropped` }));
+      else next.message = TREE_KEYS;
+      return { state: next, effect: "none" };
+    }
     if (tab === "personas") {
       // Dropping a persona is the same two-step as dropping a route — and a seat row is not the
       // reader's to drop here: `e` is what points a seat at an alias.
@@ -651,6 +706,7 @@ export function applyKey(state, key) {
     } else if (row?.kind !== "route") next.message = LIST_KEYS;
     else accept(proposeRouteDrop({ state, row }));
   } else if (key === "n") {
+    if (row?.id !== undefined) return route(treeAdd(state, row, next), "map");
     if (tab === "personas") {
       // A persona's sibling is a whole persona: the name prompt chains straight into the persona
       // editor over an empty draft, `esc` steps back to the name with its typing, and `s` there is
@@ -711,6 +767,7 @@ export function applyKey(state, key) {
     // The aliases tab answers with a hint instead of a proposal: its list has its own keys. On the
     // personas tab `e` edits the persona under the cursor — and a seat row opens the alias dropdown,
     // the same `proposeFor` the routes tab uses.
+    if (row?.id !== undefined) return route(treeEdit(state, row, next), "map");
     if (tab === "aliases") next.message = EDIT_HINT;
     else if (tab === "personas") {
       if (row?.kind === "seat") return { state: next, effect: "propose" };
@@ -760,6 +817,362 @@ export function keyName(chunk) {
   if (chunk === "Backspace") return "backspace";
   return chunk;
 }
+
+/* ------------------------------------------------------------- editing fusions */
+
+/** The fusions tab's visible rows re-derived — what a toggle or an edit rebuilds. */
+function fusionView(state) {
+  return fusionTree({
+    config: state.config,
+    fusionStats: state.stats.fusionStats,
+    seatStats: state.stats.seatStats,
+    decideRows: state.decideRows ?? [],
+    expanded: state.expanded,
+  });
+}
+
+const deepGet = (object, path) => path.reduce((at, key) => (at == null ? undefined : at[key]), object);
+
+function deepSet(object, path, value) {
+  let at = object;
+  for (let i = 0; i < path.length - 1; i += 1) {
+    if (at[path[i]] == null || typeof at[path[i]] !== "object") at[path[i]] = typeof path[i + 1] === "number" ? [] : {};
+    at = at[path[i]];
+  }
+  const last = path[path.length - 1];
+  if (value === undefined) delete at[last];
+  else at[last] = value;
+  return object;
+}
+
+/**
+ * The one proposer every tree edit takes: set a value at the row's `editPath`, or insert, delete or
+ * move a list entry there — over the accumulated baseline like every other proposal. Dropping
+ * something a base layer declares is the named refusal the personas rules already speak: this layer
+ * can only override it.
+ */
+export function proposeFusionEdit({ state, row, action = "set", value, offset = 0, to = 0, summary }) {
+  const fusionId = row.fusionId;
+  const listOf = `fusions:${fusionId}`;
+  const path = row.editPath ?? [];
+  const refusal = (text) => ({
+    listOf,
+    layerFile: state.layerFile,
+    patch: proposalBaseline(state, listOf),
+    summary: text,
+    errors: [],
+    saveable: false,
+  });
+  if (action === "delete" && deepGet(state.baseConfig?.fusions?.[fusionId], path) !== undefined) {
+    return refusal(
+      `${path.join(".")} is declared in ${state.sources?.fusions?.[fusionId]?.file ?? "a base layer"}; this layer can only override it`,
+    );
+  }
+  const patch = proposalBaseline(state, listOf);
+  patch.fusions = patch.fusions ?? {};
+  if (patch.fusions[fusionId] == null || typeof patch.fusions[fusionId] !== "object") patch.fusions[fusionId] = {};
+  const target = patch.fusions[fusionId];
+  if (action === "insert" || action === "delete" || action === "move") {
+    // A row may name an entry (`[…, index]`); a list op works on the list that holds it.
+    const listPath = typeof path[path.length - 1] === "number" ? path.slice(0, -1) : path;
+    // A list edit walks the MERGED list (base plus this layer) and restates it whole — over the
+    // layer's copy alone an insert would silently drop everything a base layer listed.
+    const merged = mergeConfig(state.baseConfig?.fusions?.[fusionId] ?? {}, target);
+    const list = deepGet(merged, listPath);
+    if (action === "insert") {
+      const entries = Array.isArray(list) ? [...list] : [];
+      entries.splice(Math.min(offset, entries.length), 0, value);
+      deepSet(target, listPath, entries);
+    } else if (!Array.isArray(list)) {
+      if (action === "delete" && typeof listPath[listPath.length - 1] !== "number") deepSet(target, listPath, undefined);
+      else return refusal(`${summary}: there is no list there`);
+    } else {
+      const entries = [...list];
+      if (action === "delete") entries.splice(offset, 1);
+      else {
+        if (to < 0 || to >= entries.length) return refusal(`${summary}: already at the end`);
+        entries.splice(to, 0, ...entries.splice(offset, 1));
+      }
+      deepSet(target, listPath, entries);
+    }
+  } else if (path.length === 0) Object.assign(target, value);
+  else deepSet(target, path, value);
+  return { listOf, layerFile: state.layerFile, patch, summary, errors: validateAgainst(state, patch) };
+}
+
+/** Drop a whole fusion this layer owns — the same named refusal where a base layer declared it. */
+export function proposeFusionDelete({ state, row }) {
+  const fusionId = row.fusionId;
+  const listOf = `fusions:${fusionId}`;
+  if (state.baseConfig?.fusions?.[fusionId] !== undefined) {
+    return {
+      listOf,
+      layerFile: state.layerFile,
+      patch: proposalBaseline(state, listOf),
+      summary: `${fusionId} is declared in ${state.sources?.fusions?.[fusionId]?.file ?? "a base layer"}; this layer can only override it`,
+      errors: [],
+      saveable: false,
+    };
+  }
+  const patch = proposalBaseline(state, listOf);
+  if (patch.fusions) delete patch.fusions[fusionId];
+  return { listOf, layerFile: state.layerFile, patch, summary: `fusion ${fusionId} dropped`, errors: validateAgainst(state, patch) };
+}
+
+/** A dropdown outcome whose choice runs `onPick` — the picker every branch and alias edit uses. */
+const menu = (next, title, options, onPick) => ({ modal: { title, options, cursor: 0, back: next?.back ?? null, pending: onPick } });
+
+/** A one-line prompt outcome whose submit runs `submit`. */
+const askLine = (next, title, hint, value, submit) => ({ modal: { title, hint, value, back: next?.back ?? null, submit } });
+
+const branchName = (then) =>
+  then === undefined ? "nothing" : typeof then === "string" ? then : (then.run ?? then.alias ?? "another decision");
+
+/**
+ * What `e` opens on a tree row: the one edit that row is *about* — a choice's branch, a decision's
+ * question, a candidate's alias — as a dropdown or a prompt over the existing sub-modals. Every path
+ * ends in one proposal, and the modal's submit is the transaction.
+ */
+function treeEdit(state, row, next) {
+  const chain = row.kind === "candidate" || row.level === "chain";
+  const ids = chain ? Object.keys(state.config.aliases ?? {}).sort() : Object.keys(state.config.fusions ?? {}).sort();
+  // A gate row already ends its `editPath` in `sufficientWhen`; its node's edits hang off the node.
+  const base = row.kind === "gate" ? { ...row, editPath: (row.editPath ?? []).slice(0, -1) } : row;
+  const at = (...suffix) => ({ ...base, editPath: [...(base.editPath ?? []), ...suffix] });
+  const gate = (choiceIs, minConfidence) => {
+    const want = { ...(row.sufficientWhen ?? {}) };
+    if (choiceIs !== undefined) want.choiceIs = choiceIs;
+    if (minConfidence !== undefined) want.minConfidence = minConfidence;
+    return proposeFusionEdit({ state, row: at("sufficientWhen"), value: want, summary: `${row.nodePath ?? row.fusionId} gate set` });
+  };
+  const clearGate = () =>
+    proposeFusionEdit({
+      state,
+      row: at("sufficientWhen"),
+      action: "delete",
+      offset: 0,
+      summary: `${row.nodePath ?? row.fusionId} gate cleared`,
+    });
+  const confidence = () =>
+    askLine(
+      { ...next, picker: null },
+      `${row.nodePath}: minConfidence`,
+      "a number in 0..1 · enter applies · esc discards",
+      String(row.sufficientWhen?.minConfidence ?? ""),
+      (text) => {
+        const n = Number(text);
+        if (text !== "" && !(Number.isFinite(n) && n >= 0 && n <= 1)) return { error: "minConfidence must be a number in 0..1" };
+        return gate(undefined, text === "" ? undefined : n);
+      },
+    );
+  const choiceIs = () =>
+    menu(
+      { ...next, picker: null },
+      `${row.nodePath}: sufficient when`,
+      ["(any answer)", ...Object.keys(row.criteria ?? row.decide?.criteria ?? {})],
+      (want) => gate(want.startsWith("(any") ? undefined : [want]),
+    );
+
+  if (row.kind === "choice") {
+    return menu(next, `${row.option}: branch`, ["(no branch)", ...ids, "another decision"], (chosen) => {
+      if (chosen === "(no branch)")
+        return proposeFusionEdit({ state, row: at("then"), action: "delete", offset: 0, summary: `${row.option} → nothing` });
+      if (chosen === "another decision")
+        return {
+          modal: {
+            title: `${row.option}: asks…`,
+            lines: [""],
+            row: 0,
+            col: 0,
+            hint: "the nested question · esc done",
+            back: next?.back ?? null,
+            apply: (text) =>
+              proposeFusionEdit({
+                state,
+                row: at("then"),
+                value: { decide: { instructions: text, criteria: { a: { description: "" }, b: { description: "" } } } },
+                summary: `${row.option} → another decision`,
+              }),
+          },
+        };
+      const then = chain ? chosen : { run: chosen };
+      return proposeFusionEdit({ state, row: at("then"), value: then, summary: `${row.option} → ${branchName(then)}` });
+    });
+  }
+  if (row.kind === "decision") {
+    return menu(
+      next,
+      `${row.nodePath}: edit`,
+      ["instructions…", "gate: choiceIs…", "gate: minConfidence…", "clear the gate", "add a choice…"],
+      (chosen) => {
+        if (chosen === "instructions…")
+          return {
+            modal: {
+              title: `${row.nodePath}: instructions`,
+              lines: String(row.decide?.instructions ?? "").split("\n"),
+              row: 0,
+              col: 0,
+              hint: "type the question · esc done",
+              back: next?.back ?? null,
+              apply: (text) =>
+                proposeFusionEdit({ state, row: at("instructions"), value: text, summary: `${row.nodePath} asks differently` }),
+            },
+          };
+        if (chosen === "gate: choiceIs…") return choiceIs();
+        if (chosen === "gate: minConfidence…") return confidence();
+        if (chosen === "clear the gate") return clearGate();
+        return askLine({ ...next, picker: null }, `${row.nodePath}: new option`, "the option id · enter adds · esc discards", "", (id) =>
+          id
+            ? proposeFusionEdit({ state, row: at("criteria", id), value: { description: "" }, summary: `${row.nodePath} gains "${id}"` })
+            : { error: "an option needs an id" },
+        );
+      },
+    );
+  }
+  if (row.kind === "gate") {
+    return menu(next, `${row.nodePath}: gate`, ["gate: choiceIs…", "gate: minConfidence…", "clear the gate"], (chosen) =>
+      chosen === "clear the gate" ? clearGate() : chosen === "gate: choiceIs…" ? choiceIs() : confidence(),
+    );
+  }
+  if (row.kind === "candidate") {
+    return menu(next, `${row.fusionId}.${row.persona}: point at`, ids, (chosen) =>
+      proposeFusionEdit({
+        state,
+        row,
+        value: chosen,
+        summary: `${row.fusionId}.${row.persona} candidate ${row.entryIndex + 1} → ${chosen}`,
+      }),
+    );
+  }
+  if (row.kind === "seat") {
+    return menu(next, `${row.fusionId}.${row.persona}: edit`, ["thinking…", "prompt override…", "clear the prompt"], (chosen) => {
+      const knob = (path) => ({ fusionId: row.fusionId, editPath: path });
+      if (chosen === "thinking…")
+        return menu({ ...next, picker: null }, `${row.persona}: thinking`, ["(inherit)", ...THINKING_LEVELS], (want) =>
+          proposeFusionEdit({
+            state,
+            row: knob(["thinking", row.persona]),
+            value: want.startsWith("(inherit") ? undefined : want,
+            summary: `${row.persona} thinks ${want}`,
+          }),
+        );
+      if (chosen === "clear the prompt")
+        return proposeFusionEdit({
+          state,
+          row: knob(["prompts", row.persona]),
+          action: "delete",
+          offset: 0,
+          summary: `${row.persona} prompt override cleared`,
+        });
+      return {
+        modal: {
+          title: `${row.persona}: prompt override`,
+          lines: String(deepGet(state.config.fusions?.[row.fusionId], ["prompts", row.persona]) ?? "").split("\n"),
+          row: 0,
+          col: 0,
+          hint: "type the override · esc done",
+          back: next?.back ?? null,
+          apply: (text) =>
+            proposeFusionEdit({ state, row: knob(["prompts", row.persona]), value: text, summary: `${row.persona} prompt overridden` }),
+        },
+      };
+    });
+  }
+  if (row.kind === "fusion") {
+    return menu(next, `${row.fusionId}: edit`, ["mode…", "name…", "execute…", "maxAdvance…"], (chosen) => {
+      if (chosen === "mode…")
+        return menu({ ...next, picker: null }, `${row.fusionId}: mode`, Object.keys(state.config.modes ?? {}).sort(), (want) =>
+          proposeFusionEdit({ state, row: at("mode"), value: want, summary: `${row.fusionId} runs ${want}` }),
+        );
+      if (chosen === "name…")
+        return askLine(
+          { ...next, picker: null },
+          `${row.fusionId}: name`,
+          "the picker label · enter applies · esc discards",
+          String(row.name ?? ""),
+          (text) =>
+            proposeFusionEdit({
+              state,
+              row: at("name"),
+              value: text || undefined,
+              summary: `${row.fusionId} named ${text || "(default)"}`,
+            }),
+        );
+      if (chosen === "execute…")
+        return menu({ ...next, picker: null }, `${row.fusionId}: execute`, ["true", "false"], (want) =>
+          proposeFusionEdit({ state, row: at("execute"), value: want === "true", summary: `${row.fusionId} execute ${want}` }),
+        );
+      return askLine(
+        { ...next, picker: null },
+        `${row.fusionId}: maxAdvance`,
+        "a positive integer · enter applies · esc discards",
+        String(deepGet(state.config.fusions?.[row.fusionId], ["maxAdvance"]) ?? ""),
+        (text) => {
+          const n = Number(text);
+          if (text !== "" && !(Number.isInteger(n) && n >= 1)) return { error: "maxAdvance must be a positive integer" };
+          return proposeFusionEdit({
+            state,
+            row: at("maxAdvance"),
+            value: text === "" ? undefined : n,
+            summary: `${row.fusionId} advances ${text === "" ? "by default" : text}×`,
+          });
+        },
+      );
+    });
+  }
+  return { error: "a result row is history — read here, not edited" };
+}
+
+/** What `n` adds on a tree row: a sibling fusion, a choice, or a candidate. */
+function treeAdd(state, row, next) {
+  const at = (...suffix) => ({ ...row, editPath: [...(row.editPath ?? []), ...suffix] });
+  if (row.kind === "fusion") {
+    return askLine(next, "new fusion", "the fusion id · enter continues · esc discards", "", (id) => {
+      if (!id) return { error: "a fusion needs a name" };
+      if (state.config.fusions?.[id]) return { error: `${id} already exists` };
+      return {
+        modal: {
+          title: `${id}: mode`,
+          options: Object.keys(state.config.modes ?? {}).sort(),
+          cursor: 0,
+          back: null,
+          pending: (want) =>
+            proposeFusionEdit({ state, row: { fusionId: id, editPath: [] }, value: { mode: want }, summary: `${id} runs ${want}` }),
+        },
+      };
+    });
+  }
+  if (row.kind === "decision" || row.kind === "choice") {
+    const node = row.kind === "choice" ? { ...row, editPath: (row.editPath ?? []).slice(0, -2), nodePath: row.nodePath } : row;
+    return askLine(next, `${node.nodePath}: new option`, "the option id · enter adds · esc discards", "", (id) =>
+      id
+        ? proposeFusionEdit({
+            state,
+            row: { ...node, editPath: [...(node.editPath ?? []), "criteria", id] },
+            value: { description: "" },
+            summary: `${node.nodePath} gains "${id}"`,
+          })
+        : { error: "an option needs an id" },
+    );
+  }
+  if (row.kind === "seat") {
+    const ids = Object.keys(state.config.aliases ?? {}).sort();
+    if (ids.length === 0) return { error: "no aliases to add" };
+    return menu(next, `${row.fusionId}.${row.persona}: add`, ids, (chosen) =>
+      proposeFusionEdit({
+        state,
+        row: at(),
+        action: "insert",
+        offset: row.childCount ?? 0,
+        value: chosen,
+        summary: `${row.persona} gains ${chosen}`,
+      }),
+    );
+  }
+  return { error: "n adds a fusion, a choice, or a candidate" };
+}
+
+const TREE_KEYS = "⏎ open · e edit · n add · d drop · K/J move";
 
 /* -------------------------------------------------------------- proposing */
 
@@ -1301,6 +1714,63 @@ export function detailFor(state, row) {
   if (row.kind === "route") {
     return `${row.parent} · route ${row.index + 1}/${row.count}: ${row.provider} → ${row.model} · seats ${row.seats} · kept ${row.kept}/${row.raised} · located ${row.located}, unlocated ${row.unlocated}`;
   }
+  if (row.id !== undefined) {
+    // A tree row (the fusions tab): its node path is its usage context, and a decision says what it
+    // asked, what its gate needs, and what it last answered.
+    if (row.kind === "decision") {
+      const result = row.result;
+      return `${row.nodePath} · ${String(row.decide?.instructions ?? "").slice(0, 80)} · gate ${
+        row.sufficientWhen
+          ? Object.entries(row.sufficientWhen)
+              .map(([k, v]) => `${k} ${Array.isArray(v) ? v.join("|") : v}`)
+              .join(" ")
+          : "none"
+      } · answered ${result ? `${result.sufficient}/${result.total}, last ${result.latest?.choice ?? "?"}` : "nothing yet"}`;
+    }
+    if (row.kind === "choice") {
+      return `${row.nodePath} · option "${row.option}" → ${row.then === undefined ? "no branch (this " + (row.level === "route" ? "fusion" : "chain") + ")" : typeof row.then === "string" ? row.then : (row.then?.run ?? row.then?.alias ?? "another decision")}${row.last ? ` · ${row.last}` : ""}`;
+    }
+    if (row.kind === "gate") {
+      return `${row.nodePath} · sufficient when ${
+        row.sufficientWhen
+          ? Object.entries(row.sufficientWhen)
+              .map(([k, v]) => `${k} ${Array.isArray(v) ? v.join("|") : v}`)
+              .join(" and ")
+          : "anything (no gate)"
+      }`;
+    }
+    if (row.kind === "result") {
+      const latest = row.result?.latest;
+      return `${row.nodePath} · ${row.result.sufficient}/${row.result.sufficient + (row.result.total - row.result.sufficient)} sufficient · last ${latest?.choice ?? "?"}${latest?.confidence != null ? ` conf ${latest.confidence}` : ""}${
+        latest?.probabilities
+          ? ` · ${Object.entries(latest.probabilities)
+              .map(([o, p]) => `${o} ${p.toFixed(2)}`)
+              .join(" ")}`
+          : ""
+      } · at ${row.last}`;
+    }
+    if (row.kind === "stage") {
+      return `${row.label.trim()} · of mode (shared — its seats are read here, edited in the mode)`;
+    }
+    if (row.kind === "seat") {
+      return `${row.fusionId}.${row.persona} · walks the candidates below · answered ${row.answered || "nothing"} · refused ${row.refusals || "nothing"} · seats ${row.seats}, degraded ${row.degraded}`;
+    }
+    if (row.kind === "candidate") {
+      return `${row.fusionId}.${row.persona} candidate ${row.entryIndex + 1}: ${String(row.label).trim()} · answered ${row.answered || "nothing"} · refused ${row.refusals || "nothing"}`;
+    }
+    if (row.kind === "fusion") {
+      const stats = state.stats.fusionStats.find((entry) => entry.fusion === row.fusionId);
+      const verdicts = stats
+        ? Object.entries(stats.verdicts)
+            .map(([verdict, n]) => `${verdict}×${n}`)
+            .join(" ")
+        : "";
+      const work = stats ? Object.keys(stats.workItems).join(" ") : "";
+      const decision = stats ? stats.decisionTokens : 0;
+      return `${row.fusionId} · ${row.name ?? ""} · mode ${row.mode} · ${row.face} · runs ${row.runs}, failures ${row.failures} · cascades ${row.sufficient} sufficient · verdicts ${verdicts || "none"} · work items ${work || "none"} · verify ${row.verify} checks · decision tokens ${decision}`;
+    }
+    return `${row.fusionId ?? ""} · ${row.label ?? row.name ?? ""}`;
+  }
   if (state.tab === "aliases") {
     return `${row.alias} → ${row.model} · routes: ${row.routeDetail || "none"} · seats ${row.seats} · kept ${row.kept}/${row.raised} · located ${row.located}, unlocated ${row.unlocated}${row.noRate ? ` · ${row.noRate} seat(s) with no rate` : ""}`;
   }
@@ -1446,13 +1916,20 @@ export async function loadWorld({
   const layer = readLayer(target);
   const layerConfig = layer.ok ? layer.config : {};
   const sqlite = await loadSqlite();
-  let stats = { modelStats: [], fusionStats: [], seatStats: [], storeTotals: null, note: "" };
+  let stats = { modelStats: [], fusionStats: [], seatStats: [], decideRows: [], storeTotals: null, note: "" };
   if (!sqlite) stats.note = "no node:sqlite: the numbers are missing here, not zero";
   else if (!fs.existsSync(dbPath)) stats.note = `no store at ${String(dbPath).replace(process.env.HOME ?? "~", "~")} — press R to build it`;
   else {
     try {
       const db = openStore(dbPath, { sqlite });
-      stats = { modelStats: byModel(db), fusionStats: byFusion(db), seatStats: byFusionSeat(db), storeTotals: totals(db), note: "" };
+      stats = {
+        modelStats: byModel(db),
+        fusionStats: byFusion(db),
+        seatStats: byFusionSeat(db),
+        decideRows: decideResults(db).rows,
+        storeTotals: totals(db),
+        note: "",
+      };
       db.close();
     } catch (error) {
       stats.note = `the store could not be read: ${error?.message ?? String(error)}`;
@@ -1475,6 +1952,7 @@ export async function loadWorld({
     modelStats: stats.modelStats,
     fusionStats: stats.fusionStats,
     seatStats: stats.seatStats,
+    decideRows: stats.decideRows,
     storeTotals: stats.storeTotals,
   });
   return { state, paths };
@@ -1523,7 +2001,18 @@ export const adopt = (current, reloaded) => {
   // Which aliases and personas are open is view state too, so both row lists are rebuilt around it
   // exactly as a key that changes them rebuilds them — before the cursors are clamped into what is
   // actually there.
-  state.rows = { ...state.rows, aliases: aliasesView(state), personas: personasView(state) };
+  state.rows = {
+    ...state.rows,
+    aliases: aliasesView(state),
+    personas: personasView(state),
+    fusions: fusionTree({
+      config: state.config,
+      fusionStats: state.stats.fusionStats,
+      seatStats: state.stats.seatStats,
+      decideRows: state.decideRows ?? [],
+      expanded: state.expanded,
+    }),
+  };
   for (const tab of TABS) state.cursors[tab] = clamp(state.cursors[tab] ?? 0, 0, Math.max(0, state.rows[tab].length - 1));
   return state;
 };

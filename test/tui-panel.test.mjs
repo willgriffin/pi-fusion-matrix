@@ -127,8 +127,8 @@ test("keys move the reader and the toggles; unknown keys are inert", async (t) =
     assert.equal(panel.state.tab, startTab, `${JSON.stringify(key)} moves within the tab — it never switches`);
   }
   panel.handleInput("3");
-  assert.equal(panel.state.tab, "routes", "a number keys the tab directly");
-  assert.ok(shows(panel.render(100), "routes*"), "the tab is visible in the frame");
+  assert.equal(panel.state.tab, "personas", "a number keys the tab directly");
+  assert.ok(shows(panel.render(100), "personas"), "the tab is visible in the frame");
   panel.handleInput("1");
   assert.equal(panel.state.tab, "aliases", "…and one returns to the first");
   panel.handleInput("a");
@@ -189,8 +189,8 @@ test("a proposal names its layer file, and save writes the reordered routes thro
 });
 
 test("a named tab opens there, and both close paths close exactly once", async (t) => {
-  const { panel, calls } = await mountPanel(t, "routes");
-  assert.equal(panel.state.tab, "routes", "/matrix routes opens on routes");
+  const { panel, calls } = await mountPanel(t, "personas");
+  assert.equal(panel.state.tab, "personas", "/matrix personas opens on personas");
   panel.handleInput("1");
   assert.equal(panel.state.tab, "aliases", "…and a number walks it back to the first tab");
   panel.handleInput(ESC);
@@ -211,18 +211,19 @@ test("a named tab opens there, and both close paths close exactly once", async (
 });
 
 test("esc is back: it closes a modal, never the matrix", async (t) => {
-  const { panel, calls } = await mountPanel(t, "routes");
+  const { panel, calls } = await mountPanel(t);
+  panel.handleInput("2");
   panel.handleInput("e");
-  assert.ok(panel.state.picker, "e opens a picker to point the seat at another alias");
+  assert.ok(panel.state.picker, "e opens a fusion row's editor dropdown");
   panel.handleInput(ESC);
   assert.equal(panel.state.picker, null, "esc closes the modal it is in");
   assert.equal(calls.done, 0, "…and leaves the matrix standing");
-  panel.handleInput("1");
-  const found = findRow(panel, (providers) => providers.length > 0);
-  assert.ok(found, "the config carries a parent alias to sit the cursor on");
-  assert.equal(found.row.expanded, false, "…and its routes are tucked away");
+  panel.handleInput("g");
+  const row = panel.state.rows.fusions[panel.state.cursors.fusions];
+  assert.equal(row.kind, "fusion", "the cursor sits on a fusion row");
+  assert.equal(row.expanded, false, "…and its tree is tucked away");
   panel.handleInput(ESC);
-  assert.equal(panel.state.pending, null, "esc on a collapsed parent is inert — there is nothing to discard");
+  assert.equal(panel.state.pending, null, "esc on a collapsed row is inert — there is nothing to discard");
   assert.equal(calls.done, 0, "…and an inert esc is still not a way out");
   panel.handleInput("q");
   assert.equal(calls.done, 1, "only q closes the matrix");
@@ -408,7 +409,7 @@ test("the clock asks the host for frames through its scheduler", async (t) => {
 
 test("the personas tab makes, retunes and drops one end to end — and a seat's e points it at an alias", async (t) => {
   const { panel, calls, layerFile } = await mountPanel(t);
-  panel.handleInput("4");
+  panel.handleInput("3");
   assert.equal(panel.state.tab, "personas", "the number keys reach the personas tab");
 
   // Walk the personas rows to a target parent and leave the cursor on it. Nothing here names a
@@ -510,5 +511,40 @@ test("the personas tab makes, retunes and drops one end to end — and a seat's 
   assert.equal(panel.state.picker ?? null, null, "esc closes the dropdown");
   assert.equal(panel.state.pending ?? null, null, "…and stages nothing");
   assert.equal(calls.done, 0, "…and the whole walk never closed the matrix");
+  panel.dispose();
+});
+
+test("the fusion tree opens its decision and takes a nested branch", async (t) => {
+  const { panel, calls, layerFile } = await mountPanel(t);
+  panel.handleInput("2");
+  const goto = (pred) => {
+    panel.handleInput("g");
+    for (let i = 0; i < panel.state.rows.fusions.length; i += 1) {
+      const row = panel.state.rows.fusions[panel.state.cursors.fusions];
+      if (pred(row)) return row;
+      panel.handleInput("j");
+    }
+    return null;
+  };
+  // Whatever routed fusion this machine's config carries — found at runtime, never hardcoded.
+  const fusion = goto((row) => row.kind === "fusion" && panel.state.config.fusions?.[row.fusionId]?.route);
+  assert.ok(fusion, "the config carries a fusion with a route");
+  panel.handleInput("\r");
+  const decision = goto((row) => row.kind === "decision");
+  assert.ok(decision, "its route opens to a decision");
+  panel.handleInput("\r");
+  const choice = goto((row) => row.kind === "choice");
+  panel.handleInput("e");
+  assert.ok(panel.state.picker, "the branch dropdown opens");
+  for (let i = 0; i < panel.state.picker.options.length - 1; i += 1) panel.handleInput("j");
+  panel.handleInput("\r");
+  assert.ok(panel.state.textarea, "another decision asks its question before it exists");
+  panel.handleInput("and is it risky?");
+  panel.handleInput(ESC); // esc is done with the question — and the submit writes it
+  await until(() => panel.state.pending === null, "the nested branch to be written");
+  const written = JSON.parse(fs.readFileSync(layerFile, "utf8"));
+  const then = written.fusions[choice.fusionId].route.criteria[choice.option].then;
+  assert.equal(then.decide.instructions, "and is it risky?", "the nested decision is on disk");
+  assert.equal(calls.done, 0, "and the matrix never closed");
   panel.dispose();
 });

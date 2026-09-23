@@ -432,6 +432,104 @@ check(
   JSON.stringify(unsure.routing),
 );
 
+// 6b. decisions in routes in decisions: a branch may be another decision, at any depth, and every
+// step is recorded under the node it happened at and the node it hangs under.
+config.fusions.target2 = { mode: "single", candidates: { technical: ["glm"] } };
+config.fusions.deep = {
+  id: "deep",
+  mode: "single",
+  candidates: { technical: ["glm"] },
+  route: {
+    instructions: "how deep does this go?",
+    sufficientWhen: { minConfidence: 0.5 },
+    criteria: {
+      deeper: {
+        description: "ask again",
+        then: {
+          decide: {
+            instructions: "and now?",
+            criteria: { deeper: { description: "on to the target", then: "target2" }, stop: { description: "stay" } },
+          },
+          sufficientWhen: { minConfidence: 0.95 },
+        },
+      },
+      stop: { description: "stay here" },
+    },
+  },
+};
+const deepWalk = await routeFusion({ config, fusion: config.fusions.deep, prompt: "x", decide: decideAs("deeper", 0.99), emit: silent });
+check(
+  "route: a branch may be another decision, and the walk records both nodes with their parents",
+  deepWalk.routing?.routedTo === "target2" &&
+    deepWalk.fusion.id === "target2" &&
+    deepWalk.routing.walk.length === 2 &&
+    deepWalk.routing.walk[0].path === "deep.route" &&
+    deepWalk.routing.walk[0].parent === "deep" &&
+    deepWalk.routing.walk[1].path === "deep.route/deeper" &&
+    deepWalk.routing.walk[1].parent === "deep.route" &&
+    deepWalk.routing.walk[1].branch === "then",
+  JSON.stringify(deepWalk.routing?.walk),
+);
+const deepDecline = await routeFusion({ config, fusion: config.fusions.deep, prompt: "x", decide: decideAs("deeper", 0.9), emit: silent });
+check(
+  "route: a decline at depth two falls to this fusion, at the node that declined",
+  deepDecline.fusion.id === "deep" &&
+    String(deepDecline.routing?.declined).includes("confidence") &&
+    deepDecline.routing.walk.length === 2 &&
+    deepDecline.routing.walk[1].path === "deep.route/deeper" &&
+    deepDecline.routing.walk[1].branch === "declined",
+  JSON.stringify(deepDecline.routing?.walk),
+);
+
+// 6c. the same at chain level: a decision's option may name where the chain continues — another
+// decision — and both entries are recorded under their parents.
+const chained = await runPipeline({
+  config,
+  sources,
+  fusion: {
+    id: "chained",
+    mode: "single",
+    candidates: {
+      technical: [
+        {
+          decide: {
+            instructions: "mechanical?",
+            criteria: {
+              go: {
+                description: "look closer",
+                then: {
+                  decide: { instructions: "again?", criteria: { go: { description: "yes", then: "glm" }, stop: { description: "no" } } },
+                  sufficientWhen: { choiceIs: ["go"] },
+                },
+              },
+              stop: { description: "stop" },
+            },
+          },
+          sufficientWhen: { choiceIs: ["stop"] },
+        },
+        "glm",
+      ],
+    },
+  },
+  prompt: "chain this",
+  callModel,
+  decide: decideAs("go", 0.9),
+  emit: silent,
+  registry,
+});
+const chainNodes = chained.details.cascades;
+check(
+  "chain: an option's continuation may be another decision, recorded under its parent",
+  chainNodes.length === 2 &&
+    chainNodes[0].path === "chained.technical#0" &&
+    chainNodes[0].parent === "chained.technical" &&
+    chainNodes[0].branch === "then:go" &&
+    chainNodes[1].path === "chained.technical#0/go" &&
+    chainNodes[1].parent === "chained.technical#0" &&
+    chainNodes[1].sufficient === true,
+  JSON.stringify(chainNodes.map((c) => ({ path: c.path, parent: c.parent, branch: c.branch }))),
+);
+
 // The gate that makes a reviewer pinnable: `execute: false` means a *tool-bearing* turn runs the pipeline
 // instead of proxying. Without it a task agent pinned to this rung would get its writer and no panel.
 calls.length = 0;

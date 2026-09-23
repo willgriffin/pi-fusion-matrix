@@ -58,6 +58,8 @@ import {
   proposeRouteList,
   proposeRouteMove,
   proposeSeatAlias,
+  proposeFusionEdit,
+  proposeFusionDelete,
   selected,
   validateAgainst,
 } from "../scripts/matrix-tui.mjs";
@@ -903,7 +905,7 @@ test("keys move the cursor, switch tabs by number, and never run off a table", (
   // The numbers are the whole way between tabs; everything that looks like one walks the rows.
   assert.equal(applyKey(world, "1").state.tab, "aliases");
   assert.equal(applyKey(world, "2").state.tab, "fusions");
-  assert.equal(applyKey(world, "3").state.tab, "routes");
+  assert.equal(applyKey(world, "3").state.tab, "personas");
   assert.equal(applyKey(applyKey(world, "3").state, "1").state.tab, "aliases", "and back to the first");
   for (const key of ["tab", "shift-tab", "h", "l", "left", "right"]) {
     assert.equal(applyKey(world, key).state.tab, "aliases", `${key} walks the rows, not the tabs`);
@@ -917,8 +919,9 @@ test("keys move the cursor, switch tabs by number, and never run off a table", (
   assert.notEqual(applyKey(world, "escape").effect, "quit", "escape is a way back, never a way out");
   assert.equal(applyKey(world, "r").effect, "reload");
   assert.equal(applyKey(world, "R").effect, "reingest");
-  assert.equal(applyKey({ ...state(), tab: "routes" }, "e").effect, "propose", "e still proposes on the routes tab");
-  assert.equal(applyKey({ ...state(), tab: "fusions" }, "e").effect, "propose");
+  const treeEdit = applyKey({ ...state(), tab: "fusions" }, "e");
+  assert.equal(treeEdit.effect, "none", "the fusions tab opens its row's editor");
+  assert.ok(treeEdit.state.picker, "a fusion row edits through its own dropdown");
   const guided = applyKey(world, "e");
   assert.equal(guided.effect, "none", "on the aliases tab the list keys are their own instructions");
   assert.equal(guided.state.pending, null);
@@ -958,26 +961,26 @@ test("numbers switch tabs; arrows, h/l and the tab key walk one tab's rows", () 
   }
 
   // And none of them reach past the tab they are on.
-  const routes = applyKey(open, "3").state;
+  const elsewhere = applyKey(open, "3").state;
   for (const key of ["tab", "shift-tab", "h", "l", "left", "right"]) {
-    const same = applyKey(routes, key).state;
-    assert.equal(same.tab, "routes", `${key} keeps its hands off the tab`);
-    assert.equal(same.cursors.routes, routes.cursors.routes, "and the routes list is flat");
+    const same = applyKey(elsewhere, key).state;
+    assert.equal(same.tab, "personas", `${key} keeps its hands off the tab`);
+    assert.equal(same.cursors.personas, elsewhere.cursors.personas, "and the persona rows stay put");
   }
 });
 
-test("the numbers 1-4 name the four tabs, and the row keys never hop between them", () => {
-  assert.deepEqual(TABS, ["aliases", "fusions", "routes", "personas"]);
+test("the numbers 1-3 name the three tabs, and the row keys never hop between them", () => {
+  assert.deepEqual(TABS, ["aliases", "fusions", "personas"]);
   const world = editState();
   for (const [index, tab] of TABS.entries()) {
     assert.equal(applyKey(world, String(index + 1)).state.tab, tab, `${index + 1} opens ${tab}`);
   }
-  assert.equal(applyKey(applyKey(world, "4").state, "1").state.tab, "aliases", "and back to the first");
+  assert.equal(applyKey(applyKey(world, "3").state, "1").state.tab, "aliases", "and back to the first");
 
   // The personas tab takes its own row keys and nothing that walks between tabs.
   const personas = { ...world, tab: "personas" };
   assert.equal(applyKey(personas, "j").state.cursors.personas, 1, "j walks the persona rows");
-  assert.equal(applyKey(personas, "5").state.tab, "personas", "there is no fifth tab");
+  assert.equal(applyKey(personas, "4").state.tab, "personas", "there is no fourth tab");
   for (const key of ["tab", "shift-tab", "h", "l", "left", "right"]) {
     assert.equal(applyKey(personas, key).state.tab, "personas", `${key} walks the rows, not the tabs`);
   }
@@ -1092,8 +1095,7 @@ test("a proposal changes one path, and the loader's verdict travels with it", ()
     fusionStats,
     seatStats,
   });
-  const row = world.rows.routes.find((entry) => entry.fusion === "review-check" && entry.seat === "review-skeptic");
-  assert.ok(row, "the packaged roster has the seat the smoke test re-pointed");
+  const row = { fusion: "review-check", seat: "review-skeptic", candidates: "muse" };
   const pending = proposeSeatAlias({ state: world, row, alias: "muse" });
   assert.deepEqual(
     pending.patch,
@@ -1115,9 +1117,7 @@ test("a proposal changes one path, and the loader's verdict travels with it", ()
 });
 
 test("the picker proposes, and escape or q steps back out of it", () => {
-  let world = { ...state(), tab: "routes" };
-  world = applyKey(world, "e").state;
-  assert.equal(world.picker, null, "applyKey only reports the intent; the driver opens the picker");
+  const world = { ...state(), tab: "fusions" };
   const opened = { ...world, picker: { title: "t", options: ["a", "b"], cursor: 0, pending: (alias) => ({ summary: alias, patch: {} }) } };
   const moved = applyKey(opened, "j").state;
   assert.equal(moved.picker.cursor, 1);
@@ -1132,7 +1132,7 @@ test("the picker proposes, and escape or q steps back out of it", () => {
   assert.notEqual(backedOut.effect, "quit", "…not a quit");
   const untouched = applyKey(opened, "2");
   assert.equal(untouched.state.picker.cursor, 0, "nothing else is handled while the picker is open");
-  assert.equal(untouched.state.tab, "routes", "not even the tab keys");
+  assert.equal(untouched.state.tab, "fusions", "not even the tab keys");
   assert.equal(applyKey({ ...world, pending: { summary: "x", errors: [] } }, "escape").state.pending, null);
   assert.equal(applyKey({ ...world, pending: { summary: "x", errors: [] } }, "escape").state.message, "change discarded");
   const withErrors = { ...world, pending: { summary: "x", errors: ["boom"] } };
@@ -1181,7 +1181,12 @@ test("the route keys name themselves and do nothing when the cursor is not on a 
   // `n` left this company: on the aliases tab it names a sibling at the cursor's own level — the name
   // prompt and then the route builder (its own tests are below). K, J and d still need a route row —
   // and name themselves when the cursor is not on one.
-  for (const world of [expandedOn(editState(), "trio"), { ...editState(), tab: "routes" }]) {
+  const flatWorld = (() => {
+    const base = applyKey({ ...editState(), tab: "fusions" }, "return").state;
+    const at = base.rows.fusions.findIndex((row) => row.id !== undefined && !["candidate", "fusion", "choice"].includes(row.kind));
+    return { ...base, cursors: { ...base.cursors, fusions: at } };
+  })();
+  for (const world of [expandedOn(editState(), "trio"), flatWorld]) {
     for (const key of ["K", "J", "d"]) {
       const result = applyKey(world, key);
       assert.equal(result.effect, "none", `${key} proposes nothing here`);
@@ -1192,16 +1197,12 @@ test("the route keys name themselves and do nothing when the cursor is not on a 
     }
   }
 
-  // The flat tabs have no route list to name a route for, so there `n` is still just the words — and
-  // neither half of the route builder opens.
-  for (const tab of ["fusions", "routes"]) {
-    const flat = applyKey({ ...editState(), tab }, "n");
-    assert.equal(flat.effect, "none");
-    assert.equal(flat.state.input, null, `${tab} has no name prompt`);
-    assert.equal(flat.state.builder, null, `${tab} has no route builder`);
-    assert.equal(flat.state.pending, null);
-    assert.match(flat.state.message, /K\/J/);
-  }
+  // On a tree row with nothing to add, `n` is just the words — and no prompt opens.
+  const flat = applyKey(flatWorld, "n");
+  assert.equal(flat.effect, "none");
+  assert.equal(flat.state.input, null, "a stage row has no name prompt");
+  assert.equal(flat.state.pending, null);
+  assert.match(flat.state.message, /adds a fusion, a choice, or a candidate/);
 });
 
 test("d drops the cursor's route, and the loader refuses the alias it would empty", () => {
@@ -2234,12 +2235,13 @@ test("on the personas tab enter opens a persona's seats, e edits it, and a seat 
   });
   assert.match(chosen.state.pending.summary, /quick\.technical walks muse \(was kimi\)/);
 
-  // …and it is exactly the proposal the routes tab stages for the same seat.
-  const routesWorld = { ...personaState(), tab: "routes" };
-  const route = routesWorld.rows.routes.find((row) => row.fusion === "quick" && row.seat === "technical");
-  const onRoute = { ...routesWorld, cursors: { ...routesWorld.cursors, routes: routesWorld.rows.routes.indexOf(route) } };
-  const viaRoutes = pick(proposeFor(applyKey(onRoute, "e").state), "muse");
-  assert.deepEqual(chosen.state.pending, viaRoutes.state.pending, "the same proposal — the seats re-use the routes picker whole");
+  // …and it is exactly the proposal the seat's own proposer stages for the same seat.
+  const direct = proposeSeatAlias({
+    state: personaState(),
+    row: { fusion: "quick", seat: "technical", candidates: "kimi" },
+    alias: "muse",
+  });
+  assert.deepEqual(chosen.state.pending.patch, direct.patch, "the same proposal — the seats re-use the proposer whole");
 
   // `d` on a parent stages its removal — the two-step, gated by the loader's verdict — and on a seat
   // row it names `e` instead.
@@ -2522,15 +2524,13 @@ test("the detail line names the selected row's own numbers", () => {
   assert.match(aliases, /kept 7\/7/);
   const fusions = detailFor(
     { ...world, tab: "fusions" },
-    world.rows.fusions.find((row) => row.fusion === "review"),
+    world.rows.fusions.find((row) => row.kind === "fusion" && row.fusionId === "review"),
   );
   assert.match(fusions, /verdicts clean×1 findings×4/);
   assert.match(fusions, /work items #25/);
-  const routes = detailFor(
-    { ...world, tab: "routes" },
-    world.rows.routes.find((row) => row.seat === "skeptic"),
-  );
-  assert.match(routes, /refused: opencode-go quota×1/);
+  const seatDetail = detailFor({ ...personaState(), tab: "personas" }, { kind: "seat", fusion: "review", seat: "skeptic" });
+  assert.match(seatDetail, /review\.skeptic/);
+  assert.match(seatDetail, /refused: opencode-go quota×1/);
   assert.equal(detailFor(world, undefined), "");
 });
 
@@ -2547,8 +2547,8 @@ test("the detail line under a route names its parent, its place in the list, and
 test("a reload keeps your place: the tab, the cursors and the toggles survive it", () => {
   const before = {
     ...state(),
-    tab: "routes",
-    cursors: { aliases: 0, fusions: 1, routes: 4 },
+    tab: "personas",
+    cursors: { aliases: 0, fusions: 1, personas: 4 },
     rain: false,
     color: false,
     picker: { title: "open", options: [] },
@@ -2557,11 +2557,11 @@ test("a reload keeps your place: the tab, the cursors and the toggles survive it
     catalogue: [{ provider: "session-known", models: ["kept-from-the-session"] }],
   };
   const after = adopt(before, { state: state() });
-  assert.equal(after.tab, "routes", "the tab is the view's, not the world's");
-  const routes = after.rows.routes.length;
+  assert.equal(after.tab, "personas", "the tab is the view's, not the world's");
+  const people = after.rows.personas.length;
   assert.deepEqual(
     after.cursors,
-    { aliases: 0, fusions: 1, routes: Math.min(4, routes - 1), personas: 0 },
+    { aliases: 0, fusions: 1, personas: Math.min(4, people - 1) },
     "a cursor past the reloaded rows is clamped onto the last one",
   );
   assert.equal(selected(after) !== undefined, true, "so the selection still points at a row");
@@ -2571,7 +2571,7 @@ test("a reload keeps your place: the tab, the cursors and the toggles survive it
   assert.equal(after.input, null, "and so is the half-typed name prompt");
   assert.equal(after.builder, null, "and the route builder with it");
   assert.deepEqual(after.catalogue, before.catalogue, "the provider/model list is session-known: the session's, not the reloaded world's");
-  assert.equal(after.rows.routes.length, before.rows.routes.length, "the rows are the reloaded world's");
+  assert.equal(after.rows.personas.length, before.rows.personas.length, "the rows are the reloaded world's");
 });
 
 test("each money column is one basis, and the store row a config no longer names is still placed", () => {
@@ -2755,7 +2755,7 @@ test("a proposal writes only its own path into the layer it names", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tui-layer-"));
   const file = path.join(dir, "pi-fusion-matrix.json");
   const world = { ...state(), layerFile: file };
-  const row = world.rows.routes.find((entry) => entry.fusion === "quick" && entry.seat === "technical");
+  const row = { fusion: "quick", seat: "technical", candidates: "kimi" };
   const pending = proposeSeatAlias({ state: world, row, alias: "muse" });
   fs.writeFileSync(file, `${JSON.stringify(pending.patch, null, 2)}\n`);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { fusions: { quick: { candidates: { technical: ["muse"] } } } });
@@ -2819,4 +2819,226 @@ test("a moved, dropped or rebuilt route list is what the layer file comes to hol
   });
 
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+/* ---------------------------------------------------------------- the fusion tree */
+
+/** A fusion whose route branches into a nested decision — the map the tree is made of. */
+const treeConfig = {
+  personas: { technical: { prompt: "x" } },
+  aliases: { kimi: { model: "kimi-k3", providers: ["opencode-go"] }, muse: { model: "m", providers: ["zai"] } },
+  backends: { stub: { kind: "typesafe", url: "http://127.0.0.1:1/v1/systemone", apiKeyEnv: "TYPESAFE_API_KEY", model: "stub-model" } },
+  decide: { defaultBackend: "stub" },
+  modes: { single: { stages: [{ single: "technical", input: "prompt" }] } },
+  fusions: {
+    quickish: { mode: "single", candidates: { technical: ["kimi"] } },
+    routed: {
+      mode: "single",
+      candidates: { technical: ["kimi"] },
+      route: {
+        instructions: "how much?",
+        sufficientWhen: { minConfidence: 0.4 },
+        criteria: { cheap: { description: "c", then: "quickish" }, high: { description: "h" } },
+      },
+    },
+  },
+};
+
+const treeState = (over = {}) =>
+  buildState({
+    config: treeConfig,
+    baseConfig: {},
+    layerConfig: treeConfig,
+    layerFile: "/tmp/tree-layer.json",
+    decideRows: [
+      {
+        fusion: "routed",
+        path: "routed.route",
+        parent: "routed",
+        total: 2,
+        sufficient: 1,
+        tallies: { cheap: 1, high: 1 },
+        latest: { at: "2026-09-22T10:00:00Z", choice: "cheap", confidence: 0.9 },
+      },
+    ],
+    ...over,
+  });
+const walkKeys = (state, keys) => keys.reduce((s, k) => applyKey(s, k).state, state);
+const cursorRow = (state) => state.rows.fusions[state.cursors.fusions];
+const toRow = (state, pred) => ({ ...state, cursors: { ...state.cursors, fusions: state.rows.fusions.findIndex(pred) } });
+
+test("the fusion tree opens its decision with its choices, its gate and its result underneath", () => {
+  let s = toRow({ ...treeState(), tab: "fusions" }, (r) => r.kind === "fusion" && r.fusionId === "routed");
+  s = walkKeys(s, ["return"]);
+  s = toRow(s, (r) => r.kind === "decision");
+  assert.match(cursorRow(s).label, /◆ route/);
+  assert.equal(cursorRow(s).result.total, 2, "the store's row binds by the node's own path");
+  s = walkKeys(s, ["return"]);
+  const subtree = s.rows.fusions.filter((r) => r.depth === 2).map((r) => r.kind);
+  assert.deepEqual(subtree, ["choice", "choice", "gate", "result"]);
+  const result = s.rows.fusions.find((r) => r.kind === "result");
+  assert.match(result.label, /result: cheap conf 0\.9/);
+  assert.equal(result.result.parent, "routed", "and it carries the context it was used in");
+});
+
+test("a choice's branch is a dropdown, and 'another decision' asks its question", () => {
+  let s = toRow({ ...treeState(), tab: "fusions" }, (r) => r.kind === "fusion" && r.fusionId === "routed");
+  s = walkKeys(s, ["return"]);
+  s = toRow(s, (r) => r.kind === "decision");
+  s = walkKeys(s, ["return"]);
+  s = toRow(s, (r) => r.kind === "choice" && r.option === "cheap");
+  s = walkKeys(s, ["e"]);
+  assert.deepEqual(s.picker.options, ["(no branch)", "quickish", "routed", "another decision"], "fusions are the branches at route level");
+  const chained = s.picker.pending("another decision");
+  assert.ok(chained.modal, "another decision chains into the question it must ask");
+  assert.deepEqual(chained.modal.apply("and is it risky?").errors, [], "the loader takes the nested map");
+  assert.equal(
+    chained.modal.apply("and is it risky?").patch.fusions.routed.route.criteria.cheap.then.decide.instructions,
+    "and is it risky?",
+  );
+  assert.equal(s.picker.pending("(no branch)").patch.fusions.routed.route.criteria.cheap.then, undefined, "(no branch) drops the branch");
+});
+
+test("tree edits are one proposer: set, insert, move, delete — and a named refusal", () => {
+  const owned = treeState({ baseConfig: {}, layerConfig: { fusions: treeConfig.fusions } });
+  assert.equal(
+    proposeFusionEdit({ state: owned, row: { fusionId: "routed", editPath: ["maxAdvance"] }, value: 2, summary: "…" }).patch.fusions.routed
+      .maxAdvance,
+    2,
+  );
+  const list = { fusionId: "routed", editPath: ["candidates", "technical"] };
+  assert.equal(
+    proposeFusionEdit({ state: owned, row: list, action: "insert", offset: 1, value: "muse", summary: "…" }).patch.fusions.routed.candidates
+      .technical[1],
+    "muse",
+  );
+  assert.equal(
+    proposeFusionEdit({ state: owned, row: list, action: "move", offset: 1, to: 0, summary: "…" }).patch.fusions.routed.candidates
+      .technical[0],
+    "kimi",
+  );
+  assert.equal(
+    proposeFusionEdit({ state: owned, row: list, action: "delete", offset: 0, summary: "…" }).patch.fusions.routed.candidates.technical
+      .length,
+    0,
+  );
+  const refused = proposeFusionEdit({
+    state: treeState({ baseConfig: treeConfig }),
+    row: { fusionId: "routed", editPath: ["mode"] },
+    action: "delete",
+    offset: 0,
+    summary: "…",
+  });
+  assert.equal(refused.saveable, false, "what a base layer declares is not this layer's to drop");
+  assert.match(refused.summary, /this layer can only override it/);
+  assert.equal(proposeFusionDelete({ state: treeState(), row: { fusionId: "routed" } }).patch.fusions.routed, undefined);
+  assert.equal(proposeFusionDelete({ state: treeState({ baseConfig: treeConfig }), row: { fusionId: "routed" } }).saveable, false);
+});
+
+test("the tree's keys act at the cursor's level", () => {
+  let s = toRow({ ...treeState(), tab: "fusions" }, (r) => r.kind === "fusion" && r.fusionId === "routed");
+  const asked = walkKeys(s, ["n"]);
+  assert.equal(asked.input.title, "new fusion", "n on a fusion is a sibling fusion");
+  const staged = asked.input.submit("fresh");
+  assert.ok(staged.modal, "a name chains into its mode");
+  assert.equal(staged.modal.pending("single").patch.fusions.fresh.mode, "single");
+  const backedOut = walkKeys(asked, ["escape"]); // back out of the name ask — nothing staged
+  assert.equal(backedOut.pending, null, "backing out stages nothing");
+  s = toRow({ ...treeState(), tab: "fusions" }, (r) => r.kind === "fusion" && r.fusionId === "routed");
+  s = walkKeys(s, ["return"]);
+  s = toRow(s, (r) => r.kind === "stage");
+  s = walkKeys(s, ["return"]);
+  s = toRow(s, (r) => r.kind === "seat");
+  s = walkKeys(s, ["return"]);
+  s = toRow(s, (r) => r.kind === "candidate");
+  s = walkKeys(s, ["K"]);
+  assert.match(s.pending?.summary ?? "", /moves/, "K stages the move");
+  s = walkKeys(s, ["d"]);
+  assert.match(s.pending?.summary ?? "", /drops/, "d stages the drop");
+});
+
+test("every tree editor speaks through one modal, and every path one proposer", () => {
+  const s0 = { ...treeState(), tab: "fusions" };
+  const edit = (s, pred) => walkKeys(toRow(s, pred), ["e"]);
+  const at = (outcome) => outcome.patch.fusions.routed;
+
+  // A fusion row's knobs: two dropdowns, two prompts — all four land at their own path.
+  const fusion = edit(s0, (r) => r.kind === "fusion" && r.fusionId === "routed");
+  assert.equal(at(fusion.picker.pending("mode…").modal.pending("single")).mode, "single");
+  assert.equal(at(fusion.picker.pending("name…").modal.submit("Faster")).name, "Faster");
+  assert.equal(at(fusion.picker.pending("execute…").modal.pending("false")).execute, false);
+  assert.equal(at(fusion.picker.pending("maxAdvance…").modal.submit("2")).maxAdvance, 2);
+  assert.match(fusion.picker.pending("maxAdvance…").modal.submit("two").error, /positive integer/);
+
+  // A seat row: its thinking knob, its prompt override, and clearing it again.
+  let open = walkKeys(
+    toRow(s0, (r) => r.kind === "fusion" && r.fusionId === "routed"),
+    ["return"],
+  );
+  open = walkKeys(
+    toRow(open, (r) => r.kind === "stage"),
+    ["return"],
+  );
+  const seat = edit(open, (r) => r.kind === "seat");
+  assert.equal(at(seat.picker.pending("thinking…").modal.pending("low")).thinking.technical, "low");
+  assert.equal(at(seat.picker.pending("prompt override…").modal.apply("be brief")).prompts.technical, "be brief");
+  assert.equal(at(seat.picker.pending("clear the prompt")).prompts?.technical, undefined);
+
+  // A decision row: its question, a new choice — and the gate beneath it, set or cleared.
+  const expanded = walkKeys(
+    toRow(s0, (r) => r.kind === "fusion" && r.fusionId === "routed"),
+    ["return"],
+  );
+  const wide = walkKeys(
+    toRow(expanded, (r) => r.kind === "decision"),
+    ["return"],
+  );
+  const decision = edit(expanded, (r) => r.kind === "decision");
+  assert.equal(at(decision.picker.pending("instructions…").modal.apply("less?")).route.instructions, "less?");
+  assert.equal(at(decision.picker.pending("add a choice…").modal.submit("extra")).route.criteria.extra.description, "");
+  const gate = edit(wide, (r) => r.kind === "gate");
+  assert.deepEqual(at(gate.picker.pending("gate: choiceIs…").modal.pending("cheap")).route.sufficientWhen.choiceIs, ["cheap"]);
+  assert.equal(at(gate.picker.pending("gate: minConfidence…").modal.submit("0.7")).route.sufficientWhen.minConfidence, 0.7);
+  assert.equal(at(gate.picker.pending("clear the gate")).route.sufficientWhen, undefined);
+
+  // A choice row leads somewhere concrete: a fusion as a {run} node, or nothing at all.
+  const choice = edit(wide, (r) => r.kind === "choice" && r.option === "high");
+  assert.equal(at(choice.picker.pending("quickish")).route.criteria.high.then.run, "quickish");
+  assert.equal(at(choice.picker.pending("(no branch)")).route.criteria.high.then, undefined);
+
+  // And n adds at each level it names: a seat's chain gains an alias from the dropdown.
+  const add = walkKeys(
+    toRow({ ...s0, ...{ rows: open.rows } }, (r) => r.kind === "seat"),
+    ["n"],
+  );
+  assert.equal(at(add.picker.pending("muse")).candidates.technical[1], "muse");
+});
+
+test("the frame paints the editor and the textarea over the table", () => {
+  const world = treeState();
+  const editor = {
+    ...world,
+    editor: {
+      title: "nova",
+      fields: [],
+      draft: { text: "hi", promptFile: "", temperature: 0.5, thinking: "low", output: "text" },
+      originalText: "hi",
+      cursor: 0,
+      commit: () => ({}),
+      back: null,
+    },
+  };
+  const painted = Array.from({ length: 20 }, (_, i) =>
+    gridLine(frameFor({ width: 100, height: 20, state: { ...editor, tab: "fusions" }, palette: paletteFor({ color: false }) }), i),
+  ).join("\n");
+  assert.match(painted, /nova/, "the editor's title is over the table");
+  const typing = {
+    ...world,
+    textarea: { title: "nova: prompt", lines: ["alpha", "beta"], row: 1, col: 4, hint: "esc done", back: null, apply: () => ({}) },
+  };
+  const text = Array.from({ length: 20 }, (_, i) =>
+    gridLine(frameFor({ width: 100, height: 20, state: { ...typing, tab: "fusions" }, palette: paletteFor({ color: false }) }), i),
+  ).join("\n");
+  assert.match(text, /alpha/);
+  assert.match(text, /beta▌/, "and the caret sits where the typing is");
 });

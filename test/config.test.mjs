@@ -10,7 +10,15 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadMatrixConfig, mergeConfig, validateConfig, executorOf, executorThinking } from "../extensions/pi-fusion-matrix/config.js";
+import {
+  loadMatrixConfig,
+  mergeConfig,
+  validateConfig,
+  executorOf,
+  executorThinking,
+  nodeParent,
+  optionThen,
+} from "../extensions/pi-fusion-matrix/config.js";
 
 const { config: packaged } = loadMatrixConfig({ cwd: process.cwd(), layers: ["packaged"] });
 const deep = (value) => JSON.parse(JSON.stringify(value));
@@ -237,4 +245,173 @@ test("the thinking level a proxied turn runs at is decided by declaration, then 
   assert.equal(executorThinking(packaged, { ...fusion, thinking: { synth: "harness" } }), undefined);
   // No executor, no level to resolve.
   assert.equal(executorThinking(packaged, packaged.fusions["review-check"]), undefined);
+});
+
+test("a route nests decisions in routes in decisions, and the walk stays acyclic", () => {
+  // A branch is a fusion id, {run: <fusion>}, or a nested decision whose own options branch again.
+  const nested = {
+    fusions: {
+      "default-smrt": {
+        route: {
+          criteria: {
+            cheap: {
+              description: "small",
+              then: {
+                decide: {
+                  instructions: "how much room does the answer need?",
+                  criteria: {
+                    brief: { description: "one line", then: { run: "cheap" } },
+                    full: { description: "an essay", then: "good" },
+                  },
+                },
+                otherwise: { run: "quick" },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+  assert.deepEqual(errorsFor(nested), [], "a nested decision is legal, and options without then stay legal");
+
+  // The same shape closing a loop is refused by name — here the cycle runs *through* an inline node.
+  const cyclical = {
+    fusions: {
+      quick: {
+        route: {
+          instructions: "how deep?",
+          criteria: {
+            deeper: {
+              description: "d",
+              then: {
+                decide: { instructions: "again?", criteria: { x: { description: "x", then: "default-smrt" }, y: { description: "y" } } },
+              },
+            },
+            stop: { description: "s", then: "cheap" },
+          },
+        },
+      },
+    },
+  };
+  assert.match(
+    errorsFor(cyclical).join("\n"),
+    /route cycle: (quick → default-smrt → quick|default-smrt → quick → default-smrt)/,
+    "the error names the cycle it found",
+  );
+
+  // A route targeting itself keeps its own name.
+  const selfish = {
+    fusions: { "default-smrt": { route: { criteria: { cheap: { description: "x", then: "default-smrt" } } } } },
+  };
+  assert.match(errorsFor(selfish).join("\n"), /routes to this fusion/);
+
+  // A branch that is neither a fusion name nor a decision node says so.
+  const shapeless = {
+    fusions: { "default-smrt": { route: { criteria: { cheap: { description: "x", then: { alias: "kimi" } } } } } },
+  };
+  assert.match(errorsFor(shapeless).join("\n"), /must be a fusion id, \{run: <fusion>\}, or a decision node/);
+});
+
+test("a cascade's decision names where the chain continues — an alias or another decision", () => {
+  const patch = {
+    fusions: {
+      quick: {
+        candidates: {
+          technical: [
+            {
+              decide: {
+                instructions: "is it mechanical?",
+                criteria: {
+                  yes: { description: "y", then: "kimi" },
+                  deeper: {
+                    description: "d",
+                    then: {
+                      decide: { instructions: "again?", criteria: { a: { description: "a" }, b: { description: "b", then: "glm-flash" } } },
+                      otherwise: "kimi",
+                    },
+                  },
+                },
+              },
+            },
+            "deepseek-flash",
+          ],
+        },
+      },
+    },
+  };
+  assert.deepEqual(errorsFor(patch), [], "continuations may nest decisions and may fall through to the next entry");
+
+  // A chain branch is looked up among aliases: a bare fusion name is not a candidate.
+  const wrongLevel = {
+    fusions: {
+      quick: {
+        candidates: {
+          technical: [
+            { decide: { instructions: "x", criteria: { a: { description: "a", then: "default-smrt" }, b: { description: "b" } } } },
+            "deepseek-flash",
+          ],
+        },
+      },
+    },
+  };
+  assert.match(errorsFor(wrongLevel).join("\n"), /unknown alias "default-smrt"/);
+  const wrongShape = {
+    fusions: {
+      quick: {
+        candidates: {
+          technical: [
+            { decide: { instructions: "x", criteria: { a: { description: "a", then: { run: "quick" } }, b: { description: "b" } } } },
+            "deepseek-flash",
+          ],
+        },
+      },
+    },
+  };
+  assert.match(errorsFor(wrongShape).join("\n"), /must set exactly one of alias\/decide/);
+});
+
+test("nothing is required of a map — except that it can fire at all", () => {
+  // Options without `then`, a node without `otherwise`, implicit leaves that decline to this fusion: all legal.
+  const leafy = {
+    fusions: {
+      probe: {
+        mode: "single",
+        candidates: { technical: ["kimi"] },
+        route: { instructions: "x", criteria: { a: { description: "a" }, b: { description: "b", then: "cheap" } } },
+      },
+    },
+  };
+  assert.deepEqual(errorsFor(leafy), []);
+  // …but a route that can never fire is dead config, and says so.
+  const dead = {
+    fusions: {
+      probe: {
+        mode: "single",
+        candidates: { technical: ["kimi"] },
+        route: { instructions: "x", criteria: { a: { description: "a" }, b: { description: "b" } } },
+      },
+    },
+  };
+  assert.match(errorsFor(dead).join("\n"), /no option carries then and there is no otherwise, so the route can never fire/);
+  // An `otherwise` alone is enough to fire.
+  const rescued = {
+    fusions: {
+      probe: {
+        mode: "single",
+        candidates: { technical: ["kimi"] },
+        route: { instructions: "x", criteria: { a: { description: "a" }, b: { description: "b" } }, otherwise: "cheap" },
+      },
+    },
+  };
+  assert.deepEqual(errorsFor(rescued), []);
+});
+
+test("optionThen reads the branch an option leads to, and nodeParent derives a recorded parent", () => {
+  const spec = { criteria: { a: { description: "a", then: { run: "cheap" } }, b: { description: "b" } }, otherwise: { run: "quick" } };
+  assert.deepEqual(optionThen(spec, "a"), { run: "cheap" });
+  assert.deepEqual(optionThen(spec, "b"), { run: "quick" }, "an option without then falls to otherwise");
+  assert.equal(nodeParent("default-smrt.route"), "default-smrt", "the route root belongs to its fusion");
+  assert.equal(nodeParent("default-smrt.route/cheap"), "default-smrt.route");
+  assert.equal(nodeParent("review.skeptic#0"), "review.skeptic", "a chain entry belongs to its chain");
+  assert.equal(nodeParent("review.skeptic#0/unclear"), "review.skeptic#0");
 });

@@ -20,7 +20,7 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { resolveCandidates, seatRequest, label, isObject } from "./resolve.js";
 import { runPipeline, freshUsage, accumulateUsage, isSufficient, isThinkingRefusal } from "./pipeline.js";
-import { harnessName, executorOf, executorThinking } from "./config.js";
+import { harnessName, executorOf, executorThinking, routeTarget } from "./config.js";
 
 /**
  * pi-ai's `Tool` shape. `parameters` arrives ready-made from the caller, because the schema builder is
@@ -199,50 +199,100 @@ export function makeCallModel(getPi) {
 /* ------------------------------------------------------------------- route */
 
 /**
- * `route` runs before the first stage. Its sufficiency is the same predicate as a seat cascade: an
- * option carrying `then`, at or above the threshold. Not routing is the safe outcome — unsure means
- * spend, not gamble — and the decision is reported either way.
+ * `route` runs before the first stage: a walk over a decision map, where a branch may be another
+ * decision at any depth — decisions in routes in decisions. Every step is recorded under the node it
+ * happened at (`path`) and the node it hangs under (`parent`), because the same decision reached
+ * under a different parent is a different usage and keeps its own stats. Not routing is the safe
+ * outcome — unsure means spend, not gamble — and that is today's rule applied at every depth: a step
+ * whose gate does not hold, or whose option names no branch and whose node declares no `otherwise`,
+ * runs THIS fusion. One decision call per node visited; the walk is as deep as the map and no deeper.
  */
 export async function routeFusion({ config, fusion, prompt, decide, emit, signal }) {
   const route = fusion.route;
   if (!route) return { fusion, routing: undefined };
 
-  const { answer, error } = await decideOverRoute({ route, prompt, decide, signal });
+  const walk = [];
+  const threshold = route.sufficientWhen?.minConfidence ?? 0.5;
+  const outcome = await walkRoute({
+    spec: route,
+    sufficientWhen: route.sufficientWhen,
+    otherwiseNode: route.otherwise,
+    config,
+    fusionId: fusion.id,
+    path: `${fusion.id}.route`,
+    parent: fusion.id,
+    prompt,
+    decide,
+    signal,
+    walk,
+  });
+  const answer = walk[0]?.answer ?? null;
+
+  if (outcome.error) {
+    const routing = { walk, answer, threshold, declined: `decision unavailable: ${outcome.error}` };
+    emit.delta(` ├─ ↪ route declined (${outcome.error.slice(0, 120)}); running ${fusion.id}\n`);
+    return { fusion, routing };
+  }
+  if (outcome.run && outcome.run !== fusion.id) {
+    emit.delta(` ├─ ↪ routed to ${outcome.run} (${walk[0]?.option ?? "—"}, conf ${(answer?.confidence ?? 0).toFixed(2)})\n`);
+    return { fusion: { ...config.fusions[outcome.run], id: outcome.run }, routing: { walk, answer, threshold, routedTo: outcome.run } };
+  }
+  if (outcome.escalated !== undefined) {
+    // An option that matches but names no branch (and whose node declares no `otherwise`) is a *choice
+    // to run this fusion* — the review router's `high` class, and the escalation a route takes when the
+    // strongest rung is its own. Calling that a decline would misdescribe a deliberate decision in
+    // `details.routing`, which the report reads.
+    const routing = { walk, answer, threshold, escalated: outcome.escalated };
+    emit.delta(` ├─ ↪ "${outcome.escalated}" runs ${fusion.id} (the option declares no target)\n`);
+    return { fusion, routing };
+  }
+  const routing = { walk, answer, threshold, declined: outcome.reason };
+  emit.delta(` ├─ ↪ route declined (${walk[0]?.option ?? "no answer"}, ${outcome.reason}); running ${fusion.id}\n`);
+  return { fusion, routing };
+}
+
+/**
+ * One node of the walk: ask its decision, take the branch its option names (or the node's own
+ * `otherwise`), and stop at a fusion — this one, or one the branch names. A nested decision recurses
+ * with its own gate; a decline at any depth falls to THIS fusion, at the node that declined.
+ */
+async function walkRoute({ spec, sufficientWhen, otherwiseNode, config, fusionId, path, parent, prompt, decide, signal, walk }) {
+  const { answer, error } = await decideOverRoute({ route: spec, prompt, decide, signal });
   const option = answer?.choice;
-  const entry = route.criteria?.[option];
-  // The default gate is `{ minConfidence: 0.5 }` — unsure means spend, not gamble — and it is recorded
-  // in `details.routing` so the effective threshold is visible rather than implied.
-  const sufficientWhen = route.sufficientWhen ?? { minConfidence: 0.5 };
-  const threshold = sufficientWhen.minConfidence ?? 0.5;
-  const target = isObject(entry) ? entry.then : undefined;
+  const matched = option !== undefined && spec.criteria?.[option] !== undefined;
+  const named = matched && isObject(spec.criteria[option]) ? spec.criteria[option].then : undefined;
+  const branchNode = named ?? (matched ? otherwiseNode : undefined);
+  const gate = sufficientWhen ?? { minConfidence: 0.5 };
+  const threshold = gate.minConfidence ?? 0.5;
 
   if (error) {
-    const routing = { answer, threshold, declined: `decision unavailable: ${error}` };
-    emit.delta(` ├─ ↪ route declined (${error.slice(0, 120)}); running ${fusion.id}\n`);
-    return { fusion, routing };
+    walk.push({ path, parent, answer: null, option: null, branch: "declined" });
+    return { error };
   }
-  if (!target) {
-    // An option that matches but carries no `then` is a *choice to run this fusion* — the review router's
-    // `high` class, and the escalation a route takes when the strongest rung is its own. Calling that a decline
-    // would misdescribe a deliberate decision in `details.routing`, which the report reads.
-    const matched = option !== undefined && route.criteria?.[option] !== undefined;
-    const routing = matched ? { answer, threshold, escalated: option } : { answer, threshold, declined: "no option matched" };
-    emit.delta(
-      matched
-        ? ` ├─ ↪ "${option}" runs ${fusion.id} (the option declares no target)\n`
-        : ` ├─ ↪ route declined (${option ?? "no answer"}); running ${fusion.id}\n`,
-    );
-    return { fusion, routing };
+  if (!branchNode) {
+    walk.push({ path, parent, answer, option: option ?? null, branch: matched ? "escalated" : "declined" });
+    return matched ? { escalated: option } : { reason: "no option matched" };
   }
-  if (!isSufficient(answer, sufficientWhen)) {
-    const routing = { answer, threshold, declined: `confidence ${(answer?.confidence ?? 0).toFixed(2)} below ${threshold}` };
-    emit.delta(` ├─ ↪ route declined (${option}, conf ${(answer?.confidence ?? 0).toFixed(2)} < ${threshold}); running ${fusion.id}\n`);
-    return { fusion, routing };
+  if (!isSufficient(answer, gate)) {
+    walk.push({ path, parent, answer, option: option ?? null, branch: "declined" });
+    return { reason: `confidence ${(answer?.confidence ?? 0).toFixed(2)} below ${threshold}` };
   }
-
-  const target_ = config.fusions[target];
-  emit.delta(` ├─ ↪ routed to ${target} (${option}, conf ${(answer?.confidence ?? 0).toFixed(2)})\n`);
-  return { fusion: { ...target_, id: target }, routing: { answer, threshold, routedTo: target } };
+  walk.push({ path, parent, answer, option: option ?? null, branch: named !== undefined ? "then" : "otherwise" });
+  const target = routeTarget(branchNode);
+  if (target !== null) return { run: target };
+  return walkRoute({
+    spec: branchNode.decide,
+    sufficientWhen: branchNode.sufficientWhen,
+    otherwiseNode: branchNode.otherwise,
+    config,
+    fusionId,
+    path: `${path}${named !== undefined ? `/${option}` : "/~"}`,
+    parent: path,
+    prompt,
+    decide,
+    signal,
+    walk,
+  });
 }
 
 async function decideOverRoute({ route, prompt, decide, signal }) {

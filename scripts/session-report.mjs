@@ -214,6 +214,28 @@ function invokedTool(part, harness) {
 // `shipped` would count an outcome nobody defined.
 import { isOutcome } from "../extensions/pi-fusion-matrix/labels.js";
 /** Keys that only ever appear in a fusion run record: a shape carrying one of these is ours to explain. */
+/**
+ * A run's decision nodes as lines, in their usage context: each node's path names the parent it hangs
+ * under and the line indents by depth — the same decision reached under a different parent is its own
+ * line rather than a pooled count. A record from before node paths contributes nothing and renders
+ * exactly as it always did.
+ */
+export function decisionLines(details) {
+  const lines = [];
+  const at = (p) => "  ".repeat(Math.max(0, String(p ?? "").split("/").length - 1) + (String(p ?? "").includes("#") ? 1 : 0));
+  for (const step of details?.routing?.walk ?? []) {
+    lines.push(`${at(step.path)}↪ ${step.path} · ${step.option ?? "—"} · ${step.branch ?? "—"}`);
+  }
+  if (details?.routing?.routedTo) lines.push(`→ routed to ${details.routing.routedTo}`);
+  for (const cascade of details?.cascades ?? []) {
+    if (!cascade?.path) continue;
+    lines.push(
+      `${at(cascade.path)}⚖ ${cascade.path} · ${cascade.seat ?? "—"} · ${cascade.branch ?? (cascade.sufficient ? "answer" : "next")}`,
+    );
+  }
+  return lines;
+}
+
 const RECORD_KEYS = ["fusion", "proxied", "cascades", "seats", "seatErrors"];
 
 const args = process.argv.slice(2);
@@ -1553,6 +1575,7 @@ async function main() {
               ? `proxy ${record.fusion} → ${record.details.alias} @${Object.hasOwn(record.details, "thinking") ? (record.details.thinking ?? "no level") : "unrecorded"} (${record.details.attempts?.length ?? 0} attempt(s))`
               : `deliberation ${record.fusion} via ${record.carrier} (${record.details.cascades?.length ?? 0} cascade(s), ${record.details.seatErrors?.length ?? 0} seat error(s))`;
           console.log(`  ${String(session.file).split("/").at(-1).slice(0, 28).padEnd(29)} ${record.at ?? ""} ${label}`);
+          for (const line of decisionLines(record.details)) console.log(`  ${"".padEnd(29)} ${line}`);
         }
       }
     }
