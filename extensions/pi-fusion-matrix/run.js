@@ -205,50 +205,65 @@ export function makeCallModel(getPi) {
  * under a different parent is a different usage and keeps its own stats. Not routing is the safe
  * outcome — unsure means spend, not gamble — and that is today's rule applied at every depth: a step
  * whose gate does not hold, or whose option names no branch and whose node declares no `otherwise`,
- * runs THIS fusion. One decision call per node visited; the walk is as deep as the map and no deeper.
+ * runs the fusion that owns the node. A branch naming another fusion is followed to *its* route before
+ * anything runs — one walk per hop, so a named target's own gate is never silently skipped — and the
+ * loader's acyclicity check is what bounds the hops. One decision call per node visited.
  */
 export async function routeFusion({ config, fusion, prompt, decide, emit, signal }) {
-  const route = fusion.route;
-  if (!route) return { fusion, routing: undefined };
-
   const walk = [];
-  const threshold = route.sufficientWhen?.minConfidence ?? 0.5;
-  const outcome = await walkRoute({
-    spec: route,
-    sufficientWhen: route.sufficientWhen,
-    otherwiseNode: route.otherwise,
-    config,
-    fusionId: fusion.id,
-    path: `${fusion.id}.route`,
-    parent: fusion.id,
-    prompt,
-    decide,
-    signal,
-    walk,
-  });
-  const answer = walk[0]?.answer ?? null;
+  let current = fusion;
+  let headline = null;
+  for (;;) {
+    const route = current.route;
+    if (!route) {
+      return headline === null
+        ? { fusion: current, routing: undefined }
+        : { fusion: current, routing: { walk, ...headline, routedTo: current.id } };
+    }
+    const threshold = route.sufficientWhen?.minConfidence ?? 0.5;
+    const hop = walk.length;
+    const outcome = await walkRoute({
+      spec: route,
+      sufficientWhen: route.sufficientWhen,
+      otherwiseNode: route.otherwise,
+      config,
+      fusionId: current.id,
+      path: `${current.id}.route`,
+      parent: current.id,
+      prompt,
+      decide,
+      signal,
+      walk,
+    });
+    // The record's headline stays the entry decision; each hop's own nodes ride the walk. The stream
+    // line quotes the hop's top option — the same words a single-hop walk always printed.
+    const answer = walk[0]?.answer ?? null;
+    headline ??= { answer, threshold };
+    const top = walk[hop];
 
-  if (outcome.error) {
-    const routing = { walk, answer, threshold, declined: `decision unavailable: ${outcome.error}` };
-    emit.delta(` ├─ ↪ route declined (${outcome.error.slice(0, 120)}); running ${fusion.id}\n`);
-    return { fusion, routing };
+    if (outcome.error) {
+      const routing = { walk, ...headline, declined: `decision unavailable: ${outcome.error}` };
+      emit.delta(` ├─ ↪ route declined (${outcome.error.slice(0, 120)}); running ${current.id}\n`);
+      return { fusion: current, routing };
+    }
+    if (outcome.run && outcome.run !== current.id) {
+      emit.delta(` ├─ ↪ routed to ${outcome.run} (${top?.option ?? "—"}, conf ${(top?.answer?.confidence ?? 0).toFixed(2)})\n`);
+      current = { ...config.fusions[outcome.run], id: outcome.run };
+      continue;
+    }
+    if (outcome.escalated !== undefined) {
+      // An option that matches but names no branch (and whose node declares no `otherwise`) is a *choice
+      // to run this fusion* — the review router's `high` class, and the escalation a route takes when the
+      // strongest rung is its own. Calling that a decline would misdescribe a deliberate decision in
+      // `details.routing`, which the report reads.
+      const routing = { walk, ...headline, escalated: outcome.escalated };
+      emit.delta(` ├─ ↪ "${outcome.escalated}" runs ${current.id} (the option declares no target)\n`);
+      return { fusion: current, routing };
+    }
+    const routing = { walk, ...headline, declined: outcome.reason };
+    emit.delta(` ├─ ↪ route declined (${top?.option ?? "no answer"}, ${outcome.reason}); running ${current.id}\n`);
+    return { fusion: current, routing };
   }
-  if (outcome.run && outcome.run !== fusion.id) {
-    emit.delta(` ├─ ↪ routed to ${outcome.run} (${walk[0]?.option ?? "—"}, conf ${(answer?.confidence ?? 0).toFixed(2)})\n`);
-    return { fusion: { ...config.fusions[outcome.run], id: outcome.run }, routing: { walk, answer, threshold, routedTo: outcome.run } };
-  }
-  if (outcome.escalated !== undefined) {
-    // An option that matches but names no branch (and whose node declares no `otherwise`) is a *choice
-    // to run this fusion* — the review router's `high` class, and the escalation a route takes when the
-    // strongest rung is its own. Calling that a decline would misdescribe a deliberate decision in
-    // `details.routing`, which the report reads.
-    const routing = { walk, answer, threshold, escalated: outcome.escalated };
-    emit.delta(` ├─ ↪ "${outcome.escalated}" runs ${fusion.id} (the option declares no target)\n`);
-    return { fusion, routing };
-  }
-  const routing = { walk, answer, threshold, declined: outcome.reason };
-  emit.delta(` ├─ ↪ route declined (${walk[0]?.option ?? "no answer"}, ${outcome.reason}); running ${fusion.id}\n`);
-  return { fusion, routing };
 }
 
 /**
