@@ -1751,6 +1751,204 @@ check(
     : JSON.stringify(hangingSeats.map((s) => ({ persona: s.persona, reason: s.reason, degraded: s.degraded }))),
 );
 
+/* ------------------------------------------------------------- shipped shapes */
+
+// 14. Chained named routes: a routed-to fusion's own route is walked before its stages run — one hop
+// at a time, every hop's node on the walk — so a configured gate is never silently skipped. (The
+// loader's acyclicity check is what makes the hops finite; this pins the walk the check is for.)
+config.fusions.hopC = { mode: "single", candidates: { technical: ["mimo"] } };
+config.fusions.hopB = {
+  mode: "single",
+  candidates: { technical: ["glm"] },
+  route: {
+    instructions: "where next?",
+    criteria: { onward: { description: "on", then: "hopC" }, hold: { description: "hold" } },
+  },
+};
+config.fusions.hopA = {
+  mode: "single",
+  candidates: { technical: ["glm"] },
+  route: {
+    instructions: "where to?",
+    criteria: { forward: { description: "fwd", then: "hopB" }, here: { description: "here" } },
+  },
+};
+const decideSeq = (...answers) => {
+  let at = 0;
+  return async () => {
+    const { choice, confidence = 0.99 } = answers[Math.min(at++, answers.length - 1)];
+    return {
+      model: "canned",
+      answers: { choice: { choice, confidence } },
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    };
+  };
+};
+const chainWalk = await routeFusion({
+  config,
+  fusion: { ...config.fusions.hopA, id: "hopA" },
+  prompt: "x",
+  decide: decideSeq({ choice: "forward" }, { choice: "onward" }),
+  emit: silent,
+});
+check(
+  "route: a named target's own route is walked before anything runs",
+  chainWalk.fusion.id === "hopC" &&
+    chainWalk.routing.routedTo === "hopC" &&
+    chainWalk.routing.walk.length === 2 &&
+    chainWalk.routing.walk[0].path === "hopA.route" &&
+    chainWalk.routing.walk[1].path === "hopB.route",
+  JSON.stringify(chainWalk.routing),
+);
+const chainHold = await routeFusion({
+  config,
+  fusion: { ...config.fusions.hopA, id: "hopA" },
+  prompt: "x",
+  decide: decideSeq({ choice: "forward" }, { choice: "hold" }),
+  emit: silent,
+});
+check(
+  "route: a hop's own gate holds the run at that hop, recorded as a choice",
+  chainHold.fusion.id === "hopB" &&
+    chainHold.routing.escalated === "hold" &&
+    chainHold.routing.walk.length === 2 &&
+    chainHold.routing.declined === undefined,
+  JSON.stringify(chainHold.routing),
+);
+
+// 15. The handoff shape the operator asked for: the cheap seat works, the expensive one takes the
+// draft over and answers — two calls, and the takeover's input carries the worker's answer.
+const handoffSeats = [];
+run = await runPipeline({
+  config,
+  sources,
+  fusion: { ...config.fusions.good, id: "good" },
+  prompt: "ship it",
+  callModel: async (args) => {
+    handoffSeats.push({ persona: args.persona?.name, messages: JSON.stringify(args.messages ?? []), text: "" });
+    const text = args.persona?.name === "synth" ? "shipped: the takeover's final answer" : "DRAFT-WORKER-ANSWER";
+    handoffSeats[handoffSeats.length - 1].text = text;
+    return {
+      text,
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      toolCalls: [],
+    };
+  },
+  decide,
+  emit: silent,
+  registry,
+});
+check(
+  "handoff: two calls, and the takeover's input carries the worker's draft",
+  handoffSeats.length === 2 &&
+    handoffSeats[0].persona === "technical" &&
+    handoffSeats[1].persona === "synth" &&
+    handoffSeats[1].messages.includes("DRAFT-WORKER-ANSWER") &&
+    run.text === "shipped: the takeover's final answer",
+  JSON.stringify(handoffSeats.map((seat) => seat.persona)),
+);
+
+// 16. The pair shape: three calls, and the merge reads both seats and answers as itself.
+const pairSeats = [];
+run = await runPipeline({
+  config,
+  sources,
+  fusion: { ...config.fusions.genius, id: "genius" },
+  prompt: "weigh it",
+  callModel: async (args) => {
+    const text = args.persona?.name === "merge" ? "MERGED-SYNTHESIS" : `ANSWER-OF-${args.persona?.name}`;
+    pairSeats.push({ persona: args.persona?.name, messages: JSON.stringify(args.messages ?? []), text });
+    return {
+      text,
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      toolCalls: [],
+    };
+  },
+  decide,
+  emit: silent,
+  registry,
+});
+check(
+  "pair: three calls, and the merge answers as itself after both seats",
+  pairSeats.length === 3 &&
+    pairSeats.map((seat) => seat.persona).join(",") === "technical,skeptic,merge" &&
+    pairSeats[2].messages.includes("ANSWER-OF-technical") &&
+    pairSeats[2].messages.includes("ANSWER-OF-skeptic") &&
+    run.text === "MERGED-SYNTHESIS" &&
+    run.text !== pairSeats[0].text &&
+    run.text !== pairSeats[1].text,
+  JSON.stringify(pairSeats.map((seat) => seat.persona)),
+);
+
+// 17. The committee shape: five calls — panel, judge, synthesis.
+const committeeSeats = [];
+run = await runPipeline({
+  config,
+  sources,
+  fusion: { ...config.fusions.plan, id: "plan" },
+  prompt: "plan it",
+  callModel: async (args) => {
+    const name = args.persona?.name;
+    committeeSeats.push(name);
+    return {
+      text: `ANSWER-OF-${name}`,
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      toolCalls: [],
+    };
+  },
+  decide,
+  emit: silent,
+  registry,
+});
+check(
+  "committee: five calls — panel, judge, synthesis",
+  committeeSeats.length === 5 && committeeSeats.join(",") === "technical,skeptic,systems,judge,synth" && run.text === "ANSWER-OF-synth",
+  `${committeeSeats.join(",")} · ${JSON.stringify(run.text)}`,
+);
+
+// 18. The interface's headless refusal: named, and nothing mounts.
+const matrixNotices = [];
+await commands.get("matrix").handler("", {
+  hasUI: false,
+  ui: { notify: (text) => matrixNotices.push(String(text)) },
+});
+check(
+  "command: the interface refuses headless by name, and never mounts",
+  matrixNotices.some((notice) => notice.includes("the interface needs the interactive TUI")),
+  JSON.stringify(matrixNotices),
+);
+
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 process.exit(failed.length ? 1 : 0);
