@@ -1335,6 +1335,17 @@ export function proposeAliasCreate({ state, name, model, routes }) {
 }
 
 /**
+ * The source a patch's own keys are declared by: the file the proposal would write. Its kind decides
+ * trust exactly as the loader's does (`kind !== "cwd"` — a packaged or machine layer may point
+ * anywhere, a session directory may not), and the prompt-file write resolves against this same
+ * source, so what the save writes is what the loader will later resolve.
+ */
+export function layerSource(state) {
+  const kind = state.layerFile === configPaths({ cwd: process.cwd() }).machine ? "machine" : "cwd";
+  return { file: state.layerFile, dir: path.dirname(state.layerFile), kind, trusted: kind !== "cwd" };
+}
+
+/**
  * The loader's `sources` for a validation of `patch`: everything the load saw, plus this layer's own
  * declaration for every key the patch carries — a key's source is the last layer that declared it, and
  * for a proposal that is the file it would write. Without this the loader's prompt-path rule (which
@@ -1346,7 +1357,7 @@ export function sourcesForPatch(state, patch, baseSources = state.sources) {
   for (const section of ["personas", "fusions"]) {
     const declared = { ...(sources[section] ?? {}) };
     for (const name of Object.keys(patch?.[section] ?? {})) {
-      declared[name] = { file: state.layerFile, dir: path.dirname(state.layerFile), kind: "cwd", trusted: false };
+      declared[name] = layerSource(state);
     }
     sources[section] = declared;
   }
@@ -1388,8 +1399,12 @@ export function proposePersonaSave({ state, name, draft, originalText }) {
   // call that carries none — the prompt file's own content, the same `resolvePrompt` read.
   const before = originalText ?? state.editor?.originalText ?? resolvePrompt(prompt, state.sources?.personas?.[name]) ?? "";
   const promptWrites = [];
-  if (draft.promptFile && draft.text !== before) {
-    const file = promptPath(draft.promptFile, state.sources?.personas?.[name]);
+  if (draft.promptFile) {
+    // The save's prompt file lands beside the layer it writes — the persona's new declaring layer is
+    // where the loader will resolve its prompt path — and a write is planned when the text moved or
+    // when the file is not there yet, so a knob-only restatement of a path-backed persona is as
+    // saveable as an edit. This is the same source the validation resolves against.
+    const file = promptPath(draft.promptFile, layerSource(state));
     if (!file) {
       return {
         listOf,
@@ -1400,7 +1415,7 @@ export function proposePersonaSave({ state, name, draft, originalText }) {
         saveable: false,
       };
     }
-    promptWrites.push({ file, text: draft.text });
+    if (draft.text !== before || !fs.existsSync(file)) promptWrites.push({ file, text: draft.text });
   }
   const lines = lineCount(draft.text);
   const what = draft.promptFile ? `prompt file ${draft.promptFile} · ${lines} lines` : `inline prompt · ${lines} lines`;
@@ -1538,7 +1553,6 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
     const helpRows = [
       "aliases — the alias, the model it names, its routes, and what the store saw it do",
       "fusions — mode and face, then runs, failures, degraded seats, cascades, verify, findings, cost",
-      "routes  — per fusion and seat: the ordered candidates from config, which alias answered, what refused",
       "personas — the prompt behind every face (its text or its file), the knobs, and the seats that walk it",
       "keys — 1-3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same",
       "       K/J move route · n route builder · d drop route · e edit · s save · esc back/discard · R reingest",

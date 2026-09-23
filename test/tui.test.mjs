@@ -1150,6 +1150,39 @@ test("a prompt that reads as a bad path is refused by the loader's own rule", ()
   assert.ok(!inline.some((error) => /ghost/.test(error)), JSON.stringify(inline));
 });
 
+test("a base persona's prompt file lands beside the layer it saves, and the save validates it there", () => {
+  // The write and the validation resolve one directory: the layer being written is the persona's new
+  // declaring layer, so its prompt path resolves beside it — and a planned write counts as existing.
+  // A knob-only restatement plans the write too (the file is not there yet), so it is saveable.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tui-base-persona-"));
+  const world = {
+    ...personaState({ layerFile: path.join(dir, "pi-fusion-matrix.json"), layerConfig: {}, baseConfig: personaConfig }),
+    sources: { personas: { technical: { file: "/packaged/matrix.json", dir: "/packaged", kind: "packaged", trusted: true } } },
+  };
+  const moved = proposePersonaSave({
+    state: world,
+    name: "technical",
+    draft: draftFor("technical", { promptFile: "prompts/technical.md", text: "moved\nhere" }),
+    originalText: "as loaded",
+  });
+  assert.deepEqual(moved.promptWrites, [{ file: path.join(dir, "prompts", "technical.md"), text: "moved\nhere" }]);
+  assert.deepEqual(moved.errors, [], JSON.stringify(moved.errors));
+
+  const knobbed = proposePersonaSave({
+    state: world,
+    name: "technical",
+    draft: draftFor("technical", { promptFile: "prompts/technical.md", text: "as loaded" }),
+    originalText: "as loaded",
+  });
+  assert.deepEqual(
+    knobbed.promptWrites,
+    [{ file: path.join(dir, "prompts", "technical.md"), text: "as loaded" }],
+    "a knob-only restatement still lands the file beside the layer",
+  );
+  assert.deepEqual(knobbed.errors, [], JSON.stringify(knobbed.errors));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("the picker proposes, and escape or q steps back out of it", () => {
   const world = { ...state(), tab: "fusions" };
   const opened = { ...world, picker: { title: "t", options: ["a", "b"], cursor: 0, pending: (alias) => ({ summary: alias, patch: {} }) } };
@@ -2513,7 +2546,11 @@ test("a frame keeps the table inside its panel and the detail under it", () => {
   // The selected row is painted to the panel edge, and every line is exactly the width asked for.
   for (const line of lines) assert.equal([...line].length, width);
   const withHelp = frameFor({ width, height, state: { ...world, help: true }, palette: paletteFor({ color: false }) });
-  assert.match(Array.from({ length: height }, (_, row) => gridLine(withHelp, row)).join("\n"), /routes {2}— per fusion and seat/);
+  const helpText = Array.from({ length: height }, (_, row) => gridLine(withHelp, row)).join("\n");
+  assert.match(helpText, /aliases — the alias/);
+  assert.match(helpText, /fusions — mode and face/);
+  assert.match(helpText, /personas — the prompt/);
+  assert.doesNotMatch(helpText, /routes {2}—/, "the help names the three tabs it has");
 });
 
 test("the keys hint shows the rain state and that the numbers pick the tabs", () => {
