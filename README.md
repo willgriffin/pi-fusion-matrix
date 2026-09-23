@@ -8,13 +8,13 @@ stack — for multi-model deliberation. One codebase, both harnesses. It owns re
 execution: which model chain answers each seat, whether a cheap decision can answer instead of a model
 call, which shape a run takes, which fusion a request should even use in the first place, and whether a
 coding turn deliberates at all or goes to one model. It
-registers one model per fusion (`fusion-matrix/best`, `fusion-matrix/cheap`, …), runs each seat
+registers one model per fusion (`fusion-matrix/genius`, `fusion-matrix/cheap`, …), runs each seat
 through the harness's own provider runtime and credential store, and returns a normal
 assistant-message stream. Providers, endpoints, credentials, transport, and accounting stay the
 harness's.
 
-Status: implemented and verified on both harnesses — eight fusions register and run on pi
-0.84.2/0.85.1 and on omp 18.2.6, from one codebase, and a pinned rung answers agent turns with the
+Status: implemented and verified on both harnesses — the fusions register and run on pi
+0.84.2/0.85.1 and on omp 18.2.6 (eight at those revisions; six ship today), from one codebase, and a pinned rung answers agent turns with the
 harness's own tools. The twenty-five verification items in
 [`docs/plan.md`](docs/plan.md) carry their evidence inline, and the repository's own offline contracts
 (`scripts/interp-check.mjs`, `scripts/doctor.mjs`, both probes) pass with no keys and no network.
@@ -326,18 +326,17 @@ another one:
 ```json
 {
   "fusions": {
-    "best": {
-      "mode": "pair-judged",
-      "proxy": { "alias": "gpt" },
-      "candidates": { "technical": ["deepseek-pro"], "skeptic": ["glm"], "judge": ["deepseek-flash"], "synth": ["glm-flash"] }
+    "genius": {
+      "proxy": { "alias": "glm" },
+      "thinking": { "merge": "harness" }
     }
   }
 }
 ```
 
 `proxy` and `route` on one fusion is a load error — a proxied turn runs no pipeline, so the route could
-never fire — and `thinking: { "synth": "harness" }` is legal for the writing seat alone, since no other
-seat has a harness level to inherit.
+never fire — and `thinking: { …: "harness" }` is legal for the writing seat alone (the example's
+`merge` is `genius`'s writing seat), since no other seat has a harness level to inherit.
 
 ### `candidate` — one slot in a roster, three forms
 
@@ -464,7 +463,7 @@ Tune thresholds from that data, not intuition. Thresholds live in `sufficientWhe
   "route": {
     "instructions": "How much deliberation does this request need?",
     "criteria": {
-      "trivial":       { "description": "A direct factual or mechanical question", "then": "quick" },
+      "trivial":       { "description": "A direct factual or mechanical question", "then": "cheap" },
       "architectural": "System-level tradeoffs with long-lived consequences"
     }
   }
@@ -530,7 +529,7 @@ difference between a classifier's label and a review that found nothing.
 ### `fileAgent` — files out of a synthesis
 
 ```json
-{ "fusions": { "best": { "fileAgent": { "alias": "deepseek-flash" } } } }
+{ "fusions": { "genius": { "fileAgent": { "alias": "deepseek-flash" } } } }
 ```
 
 One cheap seat, after the synthesis, decides whether the answer contains files worth saving and asks
