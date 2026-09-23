@@ -810,7 +810,7 @@ a different parent is different usage, and the store keeps one row per (fusion, 
 `parent` is recorded explicitly; the derivation `path` minus its last segment is only the fallback for
 records that predate it.
 
-`/matrix` with no arguments — or with exactly one that names a tab (`aliases`, `fusions`, `personas`) —
+`/matrix` with no arguments — or with exactly one that names a tab (`fusions`, `aliases`, `personas`) —
 opens the interface as a mounted component (`scripts/tui-panel.mjs`) and runs nothing (the `routes` tab
 folded into `fusions`: a fusion's rows are its seats' routes, with what the store saw beside them).
 Otherwise the

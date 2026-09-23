@@ -139,7 +139,7 @@ export function buildState({
   sources = {},
 } = {}) {
   const state = {
-    tab: "aliases",
+    tab: TABS[0],
     cursors: { aliases: 0, fusions: 0, personas: 0 },
     expanded: {},
     decideRows: decideRows ?? [],
@@ -608,6 +608,7 @@ export function applyKey(state, key) {
       next.rows = { ...next.rows, fusions: fusionView(next) };
     } else if (row?.kind === "alias" && row.expanded) setExpanded(row.alias, false);
     else if (row?.kind === "persona" && row.expanded) setExpanded(row.persona, false);
+    else return { state: next, effect: "quit" };
   } else if (key === "j" || key === "down") move(1);
   else if (key === "k" || key === "up") move(-1);
   else if (key === "g") next.cursors[tab] = 0;
@@ -1507,9 +1508,9 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
   // two things a reader would otherwise never discover (`1`-`4`, and that `a` is a toggle at all).
   const rainState = state.rain ? "rain:ON" : "rain:OFF";
   const keys =
-    "1-4 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same · K/J move route · n route builder · " +
+    "1-3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same · K/J move route · n route builder · " +
     `d drop route · e edit · s save · esc back/discard · R reingest · r reload · a ${rainState} · c colour · ? help · q quit`;
-  const keysShort = `1-4 tabs · j/k rows · n new · e edit · d drop · ⏎ open · K/J move · a ${rainState} · ? help · q quit`;
+  const keysShort = `1-3 tabs · j/k rows · n new · e edit · d drop · ⏎ open · K/J move · a ${rainState} · ? help · q quit`;
   const hint = width > keys.length + 12 ? keys : keysShort;
   put(grid, height - 1, Math.max(1, width - hint.length - 1), truncate(hint, width - 2), palette.dim);
   put(grid, height - 1, 1, clock, palette.dim);

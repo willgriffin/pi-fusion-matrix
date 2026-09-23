@@ -193,7 +193,7 @@ const catalogue = [
   { provider: "opencode-go", models: ["glm-5", "kimi-k3"] },
 ];
 
-const state = () =>
+const stateWorld = () =>
   buildState({
     config,
     modelStats,
@@ -224,7 +224,9 @@ const editConfig = {
   aliases: { ...config.aliases, trio: { model: "kimi-k3", providers: ["opencode-go", "kimi-code", "cline-pass"] } },
 };
 
-const editState = () =>
+const state = () => ({ ...stateWorld(), tab: "aliases" });
+
+const editStateWorld = () =>
   buildState({
     config: editConfig,
     modelStats,
@@ -243,7 +245,7 @@ const editState = () =>
  */
 const soloConfig = { ...editConfig, aliases: { ...editConfig.aliases, solo: { model: "kimi-k3", providers: [] } } };
 
-const soloState = () =>
+const soloStateWorld = () =>
   buildState({
     config: soloConfig,
     modelStats,
@@ -254,6 +256,10 @@ const soloState = () =>
     layerConfig: {},
     layerFile: "/tmp/nowhere/pi-fusion-matrix.json",
   });
+
+const soloState = () => ({ ...soloStateWorld(), tab: "aliases" });
+
+const editState = () => ({ ...editStateWorld(), tab: "aliases" });
 
 /** The cursor onto one exact row of the aliases list. */
 const cursorOn = (world, row) => ({ ...world, cursors: { ...world.cursors, aliases: world.rows.aliases.indexOf(row) } });
@@ -903,10 +909,10 @@ test("keys move the cursor, switch tabs by number, and never run off a table", (
   assert.equal(applyKey(world, "j").state.cursors.aliases, world.rows.aliases.length - 1, "and at the bottom");
 
   // The numbers are the whole way between tabs; everything that looks like one walks the rows.
-  assert.equal(applyKey(world, "1").state.tab, "aliases");
-  assert.equal(applyKey(world, "2").state.tab, "fusions");
+  assert.equal(applyKey(world, "1").state.tab, "fusions");
+  assert.equal(applyKey(world, "2").state.tab, "aliases");
   assert.equal(applyKey(world, "3").state.tab, "personas");
-  assert.equal(applyKey(applyKey(world, "3").state, "1").state.tab, "aliases", "and back to the first");
+  assert.equal(applyKey(applyKey(world, "3").state, "2").state.tab, "aliases", "and back to the first");
   for (const key of ["tab", "shift-tab", "h", "l", "left", "right"]) {
     assert.equal(applyKey(world, key).state.tab, "aliases", `${key} walks the rows, not the tabs`);
   }
@@ -916,7 +922,7 @@ test("keys move the cursor, switch tabs by number, and never run off a table", (
   assert.equal(applyKey(world, "c").state.color, false);
   assert.equal(applyKey(world, "?").state.help, true);
   assert.equal(applyKey(world, "q").effect, "quit");
-  assert.notEqual(applyKey(world, "escape").effect, "quit", "escape is a way back, never a way out");
+  assert.equal(applyKey(world, "escape").effect, "quit", "escape at the root is the way out");
   assert.equal(applyKey(world, "r").effect, "reload");
   assert.equal(applyKey(world, "R").effect, "reingest");
   const treeEdit = applyKey({ ...state(), tab: "fusions" }, "e");
@@ -970,12 +976,13 @@ test("numbers switch tabs; arrows, h/l and the tab key walk one tab's rows", () 
 });
 
 test("the numbers 1-3 name the three tabs, and the row keys never hop between them", () => {
-  assert.deepEqual(TABS, ["aliases", "fusions", "personas"]);
+  assert.deepEqual(TABS, ["fusions", "aliases", "personas"]);
   const world = editState();
+  assert.equal(treeState().tab, "fusions", "the reader starts on the first tab");
   for (const [index, tab] of TABS.entries()) {
     assert.equal(applyKey(world, String(index + 1)).state.tab, tab, `${index + 1} opens ${tab}`);
   }
-  assert.equal(applyKey(applyKey(world, "3").state, "1").state.tab, "aliases", "and back to the first");
+  assert.equal(applyKey(applyKey(world, "3").state, "2").state.tab, "aliases", "and back to the second");
 
   // The personas tab takes its own row keys and nothing that walks between tabs.
   const personas = { ...world, tab: "personas" };
@@ -1036,7 +1043,7 @@ test("a terminal chunk becomes one key name", () => {
   assert.equal(applyKey(typing, "ctrl-c").effect, "quit");
 });
 
-test("escape is the way back — a picker, a proposal, a child row, an open list — and never a way out", () => {
+test("escape is the way back — a picker, a proposal, a child row, an open list — and at the root it is the way out", () => {
   const open = expandedOn(editState(), "trio");
 
   // (1) a picker is closed and nothing else happens: the ladder is not reached past it.
@@ -1057,18 +1064,20 @@ test("escape is the way back — a picker, a proposal, a child row, an open list
   assert.equal(selected(climbed).kind, "alias");
   assert.equal(selected(climbed).alias, "trio");
 
-  // (4) an open list under the cursor is closed; (5) a closed one has nothing to escape from.
+  // (4) an open list under the cursor is closed; (5) a closed one has nothing left to step back
+  // through — so at the root, back is out.
   const closed = applyKey(open, "escape").state;
   assert.equal(selected(closed).expanded, false);
   assert.equal(closed.cursors.aliases, open.cursors.aliases, "the cursor stays on the alias");
-  const inert = applyKey(closed, "escape").state;
-  assert.deepEqual(inert.rows.aliases, closed.rows.aliases);
-  assert.deepEqual(inert.expanded, closed.expanded);
-  assert.equal(inert.message, closed.message);
+  assert.equal(applyKey(closed, "escape").effect, "quit", "at the root, back is out");
 
   // Whatever else it means, escape never means quit — and `q`, outside a picker, still does.
-  for (const s of [editState(), open, proposed, climbed, closed, picker, { ...editState(), help: true }]) {
-    assert.notEqual(applyKey(s, "escape").effect, "quit");
+  // Somewhere to go is never a quit — and at the root, back is out.
+  for (const s of [open, proposed, climbed, picker, { ...editState(), help: true }]) {
+    assert.notEqual(applyKey(s, "escape").effect, "quit", "a step back is not a quit");
+  }
+  for (const s of [editState(), closed]) {
+    assert.equal(applyKey(s, "escape").effect, "quit", "at the root, back is out");
   }
   assert.equal(applyKey(editState(), "q").effect, "quit", "q is still the way out");
 
@@ -1517,12 +1526,15 @@ test("with no provider/model list to choose from, `n` names it and opens nothing
   assert.equal(onRoute.state.builder, null);
 
   // A state built without the field at all is the same empty: the default catalogue is no catalogue.
-  const defaultless = buildState({
-    config: editConfig,
-    baseConfig: editConfig,
-    layerConfig: {},
-    layerFile: "/tmp/nowhere/pi-fusion-matrix.json",
-  });
+  const defaultless = {
+    ...buildState({
+      config: editConfig,
+      baseConfig: editConfig,
+      layerConfig: {},
+      layerFile: "/tmp/nowhere/pi-fusion-matrix.json",
+    }),
+    tab: "aliases",
+  };
   assert.deepEqual(defaultless.catalogue, []);
   assert.equal(applyKey(defaultless, "n").state.message, "no provider/model list to choose from");
 });
@@ -2461,7 +2473,7 @@ test("a frame keeps the table inside its panel and the detail under it", () => {
   const frame = frameFor({ width, height, state: world, palette: paletteFor({ color: false }), clock: "00:00:00" });
   const lines = Array.from({ length: height }, (_, row) => gridLine(frame, row));
   assert.match(lines[0], /FUSION MATRIX/);
-  assert.match(lines[0], /1:aliases\*/);
+  assert.match(lines[0], /2:aliases\*/);
   assert.match(lines[0], /store · 69 sessions/);
   assert.match(lines[2], /^│alias/, "the table header is inside the panel");
 
@@ -2485,7 +2497,7 @@ test("the keys hint shows the rain state and that the numbers pick the tabs", ()
   const on = hint(state());
   assert.match(on, /rain:ON/);
   assert.match(hint({ ...state(), rain: false }), /rain:OFF/, "and says so when it is off");
-  for (const digit of ["1", "4"]) assert.ok(on.includes(digit), `the hint names tab key ${digit}`);
+  for (const digit of ["1", "3"]) assert.ok(on.includes(digit), `the hint names tab key ${digit}`);
   assert.ok(on.includes("tab"), "the numbers are named as tabs");
 });
 
@@ -2780,7 +2792,7 @@ test("a moved, dropped or rebuilt route list is what the layer file comes to hol
       fusionStats: [],
       seatStats: [],
     });
-  const onKimi = expandedOn(world(), "kimi");
+  const onKimi = expandedOn({ ...world(), tab: "aliases" }, "kimi");
   const route = (provider) => routeRow(onKimi, "kimi", provider);
 
   // Reordered: the first route becomes the second, and the layer holds exactly that.

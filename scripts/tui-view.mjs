@@ -16,9 +16,9 @@
 
 import { promptPath } from "../extensions/pi-fusion-matrix/config.js";
 
-/** The closed tab list, in display order. The routes tab folded into fusions: a fusion's rows are its
- * seats' routes, with what the store saw beside them. */
-export const TABS = ["aliases", "fusions", "personas"];
+/** The closed tab list, in display order — fusions first, where the reader starts. The routes tab
+ * folded into fusions: a fusion's rows are its seats' routes, with what the store saw beside them. */
+export const TABS = ["fusions", "aliases", "personas"];
 
 const BOX = { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│", tee: "├", teeR: "┤" };
 

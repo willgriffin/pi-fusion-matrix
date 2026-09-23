@@ -39,7 +39,7 @@ export function styledLine(grid, row, palette) {
 }
 
 /** The three tabs, in display order — the set `/matrix <tab>` accepts. */
-export const TAB_NAMES = ["aliases", "fusions", "personas"];
+export const TAB_NAMES = ["fusions", "aliases", "personas"];
 
 /**
  * The interface as a `Component`: `render(width)` gives width-safe lines, `handleInput(data)` takes

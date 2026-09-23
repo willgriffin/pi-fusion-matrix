@@ -130,7 +130,7 @@ test("keys move the reader and the toggles; unknown keys are inert", async (t) =
   assert.equal(panel.state.tab, "personas", "a number keys the tab directly");
   assert.ok(shows(panel.render(100), "personas"), "the tab is visible in the frame");
   panel.handleInput("1");
-  assert.equal(panel.state.tab, "aliases", "…and one returns to the first");
+  assert.equal(panel.state.tab, "fusions", "…and one goes to the first");
   panel.handleInput("a");
   assert.equal(panel.state.rain, false, "rain toggles");
   panel.handleInput("a");
@@ -150,7 +150,7 @@ test("keys move the reader and the toggles; unknown keys are inert", async (t) =
 });
 
 test("moving a one-route alias's only route is a named refusal, and save writes nothing", async (t) => {
-  const { panel, layerFile } = await mountPanel(t);
+  const { panel, layerFile } = await mountPanel(t, "aliases");
   const found = findRow(panel, (providers) => providers.length === 1);
   assert.ok(found, "the config carries an alias with a single route");
   panel.handleInput("\r"); // expand it
@@ -168,7 +168,7 @@ test("moving a one-route alias's only route is a named refusal, and save writes 
 });
 
 test("a proposal names its layer file, and save writes the reordered routes through to disk", async (t) => {
-  const { panel, layerFile } = await mountPanel(t);
+  const { panel, layerFile } = await mountPanel(t, "aliases");
   const found = findRow(panel, (providers) => providers.length >= 2);
   assert.ok(found, "the config carries an alias with two routes to reorder");
   panel.handleInput("\r"); // expand it
@@ -192,13 +192,11 @@ test("a named tab opens there, and both close paths close exactly once", async (
   const { panel, calls } = await mountPanel(t, "personas");
   assert.equal(panel.state.tab, "personas", "/matrix personas opens on personas");
   panel.handleInput("1");
-  assert.equal(panel.state.tab, "aliases", "…and a number walks it back to the first tab");
+  assert.equal(panel.state.tab, "fusions", "…and a number walks it to the first tab");
   panel.handleInput(ESC);
-  assert.equal(calls.done, 0, "esc is back, not out — it never closes the matrix");
-  panel.handleInput("q");
-  assert.equal(calls.done, 1, "q closes the panel once");
+  assert.equal(calls.done, 1, "at the root, esc is out — it closes the matrix");
   assert.equal(calls.value, undefined, "…with nothing to report");
-  panel.handleInput("q");
+  panel.handleInput(ESC);
   assert.equal(calls.done, 1, "a closed panel ignores further keys");
   panel.dispose();
 
@@ -210,23 +208,20 @@ test("a named tab opens there, and both close paths close exactly once", async (
   second.panel.dispose();
 });
 
-test("esc is back: it closes a modal, never the matrix", async (t) => {
+test("esc is back through the modals — and at the root it is out", async (t) => {
   const { panel, calls } = await mountPanel(t);
-  panel.handleInput("2");
+  panel.handleInput("1");
   panel.handleInput("e");
   assert.ok(panel.state.picker, "e opens a fusion row's editor dropdown");
   panel.handleInput(ESC);
   assert.equal(panel.state.picker, null, "esc closes the modal it is in");
   assert.equal(calls.done, 0, "…and leaves the matrix standing");
   panel.handleInput("g");
-  const row = panel.state.rows.fusions[panel.state.cursors.fusions];
-  assert.equal(row.kind, "fusion", "the cursor sits on a fusion row");
-  assert.equal(row.expanded, false, "…and its tree is tucked away");
+  panel.handleInput("\r");
   panel.handleInput(ESC);
-  assert.equal(panel.state.pending, null, "esc on a collapsed row is inert — there is nothing to discard");
-  assert.equal(calls.done, 0, "…and an inert esc is still not a way out");
-  panel.handleInput("q");
-  assert.equal(calls.done, 1, "only q closes the matrix");
+  assert.equal(calls.done, 0, "esc steps back first — the collapse, not the close");
+  panel.handleInput(ESC);
+  assert.equal(calls.done, 1, "and at the root, back is out — esc closes the matrix");
   panel.dispose();
 });
 
@@ -515,8 +510,7 @@ test("the personas tab makes, retunes and drops one end to end — and a seat's 
 });
 
 test("the fusion tree opens its decision and takes a nested branch", async (t) => {
-  const { panel, calls, layerFile } = await mountPanel(t);
-  panel.handleInput("2");
+  const { panel, calls, layerFile } = await mountPanel(t, "fusions");
   const goto = (pred) => {
     panel.handleInput("g");
     for (let i = 0; i < panel.state.rows.fusions.length; i += 1) {
