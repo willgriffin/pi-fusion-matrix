@@ -3,11 +3,11 @@
  * matrix-tui.mjs — a terminal interface for the fusion matrix: the roster, the rungs, and the routes,
  * with the rain behind them.
  *
- * Four tabs, and each one joins the configuration to the metrics store (#14) rather than restating
- * it: **aliases** (what each alias names, the routes it may walk, and what the store saw it do),
- * **fusions** (how each rung runs, how it ended, what it cost, what its reviews produced), and
- * **routes** (per fusion and seat: what the config offers, which alias actually answered, and every
- * route that refused it), and **personas** (the prompt behind every face — its text or its file and
+ * Three tabs, and each one joins the configuration to the metrics store (#14) rather than restating
+ * it: **fusions** (how each rung runs, how it ended, what it cost, what its reviews produced — with
+ * its routes as rows underneath: what the config offers, which alias actually answered, and every
+ * route that refused it), **aliases** (what each alias names, the routes it may walk, and what the
+ * store saw it do), and **personas** (the prompt behind every face — its text or its file and
  * the sampling knobs — plus the seats that walk it). A column that only repeats the config would be a
  * decoration, so every one carries a number the store answered.
  *
@@ -1334,10 +1334,29 @@ export function proposeAliasCreate({ state, name, model, routes }) {
   };
 }
 
+/**
+ * The loader's `sources` for a validation of `patch`: everything the load saw, plus this layer's own
+ * declaration for every key the patch carries — a key's source is the last layer that declared it, and
+ * for a proposal that is the file it would write. Without this the loader's prompt-path rule (which
+ * resolves against the owning layer's directory) has no source to resolve against and never runs, so
+ * a single-line prompt that is really a bad path validates clean here and breaks every later load.
+ */
+export function sourcesForPatch(state, patch, baseSources = state.sources) {
+  const sources = { ...(baseSources ?? {}) };
+  for (const section of ["personas", "fusions"]) {
+    const declared = { ...(sources[section] ?? {}) };
+    for (const name of Object.keys(patch?.[section] ?? {})) {
+      declared[name] = { file: state.layerFile, dir: path.dirname(state.layerFile), kind: "cwd", trusted: false };
+    }
+    sources[section] = declared;
+  }
+  return sources;
+}
+
 /** What the loader says about the config this patch would produce — the loader's own answer, not ours. */
-export function validateAgainst(state, patch) {
+export function validateAgainst(state, patch, plannedFiles) {
   try {
-    return validateConfig(mergeConfig(state.baseConfig, patch), {}).map((error) =>
+    return validateConfig(mergeConfig(state.baseConfig, patch), { sources: sourcesForPatch(state, patch), plannedFiles }).map((error) =>
       typeof error === "string" ? error : JSON.stringify(error),
     );
   } catch (error) {
@@ -1392,7 +1411,7 @@ export function proposePersonaSave({ state, name, draft, originalText }) {
     layerFile: state.layerFile,
     patch,
     summary: `${name} saved (${what})${overrides}`,
-    errors: validateAgainst(state, patch),
+    errors: validateAgainst(state, patch, new Set(promptWrites.map((write) => write.file))),
     ...(promptWrites.length > 0 ? { promptWrites } : {}),
   };
 }
@@ -1505,7 +1524,7 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
   }
 
   // The key map, as much of it as fits. Even the short form names the tabs and the rain toggle — the
-  // two things a reader would otherwise never discover (`1`-`4`, and that `a` is a toggle at all).
+  // the two things a reader would otherwise never discover (the tab numbers, and that `a` is a toggle at all).
   const rainState = state.rain ? "rain:ON" : "rain:OFF";
   const keys =
     "1-3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same · K/J move route · n route builder · " +
@@ -1521,7 +1540,7 @@ export function frameFor({ width, height, state, palette, clock = "" }) {
       "fusions — mode and face, then runs, failures, degraded seats, cascades, verify, findings, cost",
       "routes  — per fusion and seat: the ordered candidates from config, which alias answered, what refused",
       "personas — the prompt behind every face (its text or its file), the knobs, and the seats that walk it",
-      "keys — 1-4 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same",
+      "keys — 1-3 tabs · j/k or ↓/↑ rows · enter expand/collapse · ← back · → forward · tab/shift-tab same",
       "       K/J move route · n route builder · d drop route · e edit · s save · esc back/discard · R reingest",
       "       r reload · a rain · c colour · q quit",
       "personas — n new · e edit · d drop · ⏎ open",
@@ -2050,14 +2069,18 @@ export async function commitProposal(state, { dbPath, cwd = process.cwd() } = {}
   }
 
   let base;
+  let baseSources;
   try {
-    base = loadMatrixConfig({ cwd, layers: ["packaged", "cwd"] }).config;
+    const loaded = loadMatrixConfig({ cwd, layers: ["packaged", "cwd"] });
+    base = loaded.config;
+    baseSources = loaded.sources;
   } catch (error) {
     return { state: { ...state, message: `refused: the base config no longer loads: ${error?.message ?? String(error)}` }, wrote: false };
   }
-  const errors = validateConfig(mergeConfig(base, pending.patch), {}).map((error) =>
-    typeof error === "string" ? error : JSON.stringify(error),
-  );
+  const errors = validateConfig(mergeConfig(base, pending.patch), {
+    sources: sourcesForPatch(state, pending.patch, baseSources),
+    plannedFiles: new Set((pending.promptWrites ?? []).map((write) => write.file)),
+  }).map((error) => (typeof error === "string" ? error : JSON.stringify(error)));
   if (errors.length > 0) return { state: { ...state, message: `refused: ${errors[0]}` }, wrote: false };
 
   // A proposal's prompt files are written before the layer — and a prompt file that will not write

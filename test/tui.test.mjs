@@ -220,9 +220,9 @@ const stateWorld = () =>
 const editConfig = {
   ...config,
   personas: {
-    technical: { prompt: "reason about the change" },
-    skeptic: { prompt: "find the flaw in it" },
-    judge: { prompt: "pick the better answer" },
+    technical: { prompt: "reason about the change\nand what it can break" },
+    skeptic: { prompt: "find the flaw in it\nand name it plainly" },
+    judge: { prompt: "pick the better answer\nand say why" },
   },
   decide: { defaultBackend: "local" },
   backends: { local: { kind: "typesafe", url: "http://127.0.0.1:8080", apiKeyEnv: "TYPESAFE_API_KEY", model: "judge-1" } },
@@ -303,6 +303,10 @@ const builderOn = (world, over = {}) => ({
  * each persona's winning declaration lives, which is what a prompt path resolves against.
  */
 const personaLayerFile = "/tmp/persona-layer/pi-fusion-matrix.json";
+// The prompt file the layer's path-backed persona points at — beside the layer, as an earlier save
+// would have left it: the loader resolves a layer persona's prompt against the layer's own directory.
+fs.mkdirSync(path.join(path.dirname(personaLayerFile), "prompts"), { recursive: true });
+fs.writeFileSync(path.join(path.dirname(personaLayerFile), "prompts", "technical.md"), "");
 const personaConfig = {
   ...editConfig,
   personas: {
@@ -1128,6 +1132,22 @@ test("a proposal changes one path, and the loader's verdict travels with it", ()
   // And the validation is the loader's, not a second opinion: a patch that breaks a rule reports it.
   assert.ok(validateAgainst(world, { fusions: { "review-check": { candidates: { "review-skeptic": ["ghost"] } } } }).length > 0);
   assert.deepEqual(validateAgainst(world, {}), []);
+});
+
+test("a prompt that reads as a bad path is refused by the loader's own rule", () => {
+  // A single-line prompt is path-shaped; one that resolves to nothing is a load error the editor must
+  // surface — before this, both TUI gates dropped the loader's `sources` and the rule never ran, so a
+  // poison layer wrote clean and broke every later load.
+  const world = { ...state(), layerFile: "/tmp/tui-prompt/pi-fusion-matrix.json" };
+  const errors = validateAgainst(world, { personas: { ghost: { prompt: "does-not-exist.md" } } });
+  assert.ok(
+    errors.some((error) => /ghost/.test(error) && /does-not-exist\.md/.test(error)),
+    JSON.stringify(errors),
+  );
+  // Multi-line is inline text and stays legal (the fixture config carries unrelated gaps of its own,
+  // so the assertion is about this persona's errors only).
+  const inline = validateAgainst(world, { personas: { ghost: { prompt: "line one\nline two" } } });
+  assert.ok(!inline.some((error) => /ghost/.test(error)), JSON.stringify(inline));
 });
 
 test("the picker proposes, and escape or q steps back out of it", () => {
@@ -2842,7 +2862,7 @@ test("a moved, dropped or rebuilt route list is what the layer file comes to hol
 
 /** A fusion whose route branches into a nested decision — the map the tree is made of. */
 const treeConfig = {
-  personas: { technical: { prompt: "x" } },
+  personas: { technical: { prompt: "x\ny" } },
   aliases: { kimi: { model: "kimi-k3", providers: ["opencode-go"] }, muse: { model: "m", providers: ["zai"] } },
   backends: { stub: { kind: "typesafe", url: "http://127.0.0.1:1/v1/systemone", apiKeyEnv: "TYPESAFE_API_KEY", model: "stub-model" } },
   decide: { defaultBackend: "stub" },

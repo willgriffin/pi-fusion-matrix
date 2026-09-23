@@ -291,7 +291,7 @@ export function executorThinking(config, fusion) {
  * Every rule from the spec's Step 1 list, as a list of human-readable errors. Empty means valid.
  * `sources` may be omitted (the doctor passes it; a bare config still validates structurally).
  */
-export function validateConfig(config, { sources } = {}) {
+export function validateConfig(config, { sources, plannedFiles } = {}) {
   const errors = [];
   const err = (m) => errors.push(m);
 
@@ -347,7 +347,7 @@ export function validateConfig(config, { sources } = {}) {
             ? `persona "${name}" prompt path must be relative and inside ${source.dir} when it comes from the session directory`
             : `persona "${name}" prompt path does not exist: ${persona.prompt}`,
         );
-      } else if (resolvePrompt(persona.prompt, source) === null) {
+      } else if (resolvePrompt(persona.prompt, source) === null && !plannedFiles?.has(promptPath(persona.prompt, source))) {
         err(`persona "${name}" prompt path does not exist: ${persona.prompt}`);
       }
     }
