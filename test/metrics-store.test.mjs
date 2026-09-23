@@ -988,3 +988,33 @@ test("decideResults: one row per usage context, with the parent it was used unde
   assert.equal(at("decision"), undefined, "a kind word is not a node");
   assert.notEqual(root.parent, chain.parent, "distinct contexts stay distinct rows");
 });
+
+test("decideResults: a redirected walk binds each hop to the fusion that owns its node", { skip: noSqlite }, async () => {
+  // A routed run executes as its final fusion, but its walk's steps belong to the routes that made
+  // them: the tree binds a node's results by the fusion that owns the node, so a hop recorded under
+  // the run's final fusion would never join its own route row.
+  const { db } = await openFixture();
+  db.prepare(`INSERT INTO run (id, session_id, seq, at, kind, carrier, fusion, routing_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    999,
+    db.prepare(`SELECT id FROM session LIMIT 1`).get().id,
+    9,
+    1700000000000,
+    "deliberation",
+    "toolResult",
+    "hopC",
+    JSON.stringify({
+      walk: [
+        { path: "hopA.route", parent: "hopA", answer: { choice: "forward", confidence: 0.9 }, option: "forward", branch: "then" },
+        { path: "hopB.route", parent: "hopB", answer: { choice: "onward", confidence: 0.8 }, option: "onward", branch: "then" },
+      ],
+    }),
+  );
+  const { rows } = decideResults(db);
+  const hopA = rows.find((row) => row.path === "hopA.route");
+  const hopB = rows.find((row) => row.path === "hopB.route");
+  assert.equal(hopA.fusion, "hopA", "the entry hop binds to the fusion that owns its route");
+  assert.equal(hopB.fusion, "hopB", "and so does every later hop");
+  assert.equal(hopA.total, 1);
+  assert.equal(hopA.sufficient, 1);
+  db.close();
+});
