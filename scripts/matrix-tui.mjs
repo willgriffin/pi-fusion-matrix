@@ -190,7 +190,12 @@ export function displayConfig(state) {
 
 /** The aliases tab as its flat row list: parents in view order, each open one followed by its routes. */
 export const aliasesView = (state) =>
-  aliasRows({ config: displayConfig(state), modelStats: state.stats.modelStats, expanded: state.expanded });
+  aliasRows({
+    config: displayConfig(state),
+    modelStats: state.stats.modelStats,
+    expanded: state.expanded,
+    hasStore: state.storeTotals != null,
+  });
 
 /** The personas tab as its flat row list: parents in name order, each open one followed by its seats. */
 export const personasView = (state) =>
@@ -1807,7 +1812,7 @@ export function detailFor(state, row) {
             .join(" ")
         : "";
       const work = stats ? Object.keys(stats.workItems).join(" ") : "";
-      const decision = stats ? stats.decisionTokens : 0;
+      const decision = stats ? stats.decisionTokens : state.storeTotals != null ? 0 : "—";
       return `${row.fusionId} · ${row.name ?? ""} · mode ${row.mode} · ${row.face} · runs ${row.runs}, failures ${row.failures} · cascades ${row.sufficient} sufficient · verdicts ${verdicts || "none"} · work items ${work || "none"} · verify ${row.verify} checks · decision tokens ${decision}`;
     }
     return `${row.fusionId ?? ""} · ${row.label ?? row.name ?? ""}`;

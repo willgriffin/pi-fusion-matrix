@@ -256,22 +256,24 @@ const sumStats = (rows) => {
  * refusal tally. Shared by alias and route rows so both answer with the same fields — the parent is
  * just the aggregate over exactly the store rows its children each hold one of.
  */
-const statFields = (stats) => ({
-  seats: stats.seats,
-  raised: stats.findings,
-  kept: stats.kept,
-  located: stats.located,
-  unlocated: stats.unlocated,
+const statFields = (stats, hasStore = true) => ({
+  seats: seen(hasStore, stats.seats),
+  raised: seen(hasStore, stats.findings),
+  kept: seen(hasStore, stats.kept),
+  located: seen(hasStore, stats.located),
+  unlocated: seen(hasStore, stats.unlocated),
   reportedUsd: stats.pricedSeats > 0 ? stats.reportedUsd : null,
-  pricedSeats: stats.pricedSeats,
+  pricedSeats: seen(hasStore, stats.pricedSeats),
   // One basis per field: a column that added `estimated` into `list` would overstate list-basis money
   // with no denominator for the folded part, and no reader could tell the two apart afterwards.
-  listUsd: stats.listUsd,
-  estimatedUsd: stats.estimatedUsd,
-  noRate: stats.noRate,
-  refusals: Object.entries(stats.attempts)
-    .map(([reason, n]) => `${reason}×${n}`)
-    .join(" "),
+  listUsd: seen(hasStore, stats.listUsd),
+  estimatedUsd: seen(hasStore, stats.estimatedUsd),
+  noRate: seen(hasStore, stats.noRate),
+  refusals: hasStore
+    ? Object.entries(stats.attempts)
+        .map(([reason, n]) => `${reason}×${n}`)
+        .join(" ")
+    : "—",
   last: stats.lastSeatAt ? String(stats.lastSeatAt).slice(0, 16).replace("T", " ") : "—",
 });
 
@@ -285,7 +287,7 @@ const statFields = (stats) => ({
  * the parent sort: that order IS the data being edited (K/J moves a route within it), so a sorted
  * child list would display a position no key could reproduce.
  */
-export function aliasRows({ config, modelStats, expanded = {} }) {
+export function aliasRows({ config, modelStats, expanded = {}, hasStore = true }) {
   const groups = [];
   for (const [alias, spec] of Object.entries(config.aliases ?? {})) {
     const providers = spec.providers ?? [];
@@ -307,7 +309,7 @@ export function aliasRows({ config, modelStats, expanded = {} }) {
             model,
             alias: `  ${index === providers.length - 1 ? "└" : "├"} ${provider}`,
             routes: `${index + 1}/${providers.length}`,
-            ...statFields(sumStats([statsFor(model, provider, modelStats)])),
+            ...statFields(sumStats([statsFor(model, provider, modelStats)]), hasStore),
           };
         })
       : [];
@@ -318,14 +320,14 @@ export function aliasRows({ config, modelStats, expanded = {} }) {
         model: spec.model,
         routes: routeNames(spec).length,
         routeDetail: routeDetail(spec),
-        ...statFields(stats),
+        ...statFields(stats, hasStore),
         expanded: open,
         childCount: providers.length,
       },
       children,
     });
   }
-  groups.sort((a, b) => b.parent.seats - a.parent.seats || a.parent.alias.localeCompare(b.parent.alias));
+  groups.sort((a, b) => (Number(b.parent.seats) || 0) - (Number(a.parent.seats) || 0) || a.parent.alias.localeCompare(b.parent.alias));
   return groups.flatMap(({ parent, children }) => [parent, ...children]);
 }
 
@@ -522,21 +524,21 @@ export function personaRows({ config, seatStats = [], sources = {}, expanded = {
 }
 
 /** Every tree row carries every column: a row that lacked one would read as an empty cell, not a dash. */
-const treeRow = (fields) => ({
+const treeRow = ({ hasStore = true, ...fields }) => ({
   mode: "—",
   face: "—",
-  runs: 0,
-  failures: 0,
-  seats: 0,
-  degraded: 0,
+  runs: seen(hasStore, 0),
+  failures: seen(hasStore, 0),
+  seats: seen(hasStore, 0),
+  degraded: seen(hasStore, 0),
   sufficient: "—",
-  verify: 0,
-  malformed: 0,
-  located: 0,
-  unlocated: 0,
+  verify: seen(hasStore, 0),
+  malformed: seen(hasStore, 0),
+  located: seen(hasStore, 0),
+  unlocated: seen(hasStore, 0),
   reportedUsd: null,
-  estimatedUsd: 0,
-  listUsd: 0,
+  estimatedUsd: seen(hasStore, 0),
+  listUsd: seen(hasStore, 0),
   last: "—",
   answered: "",
   refusals: "",
@@ -578,6 +580,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
     const result = resultAt(fusion, nodePath);
     rows.push(
       treeRow({
+        hasStore,
         kind: "decision",
         fusionId: fusion,
         id,
@@ -602,6 +605,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
       const choiceId = `${id}/${option}`;
       rows.push(
         treeRow({
+          hasStore,
           kind: "choice",
           fusionId: fusion,
           id: choiceId,
@@ -638,6 +642,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
     if (otherwiseNode !== undefined) {
       rows.push(
         treeRow({
+          hasStore,
           kind: "choice",
           fusionId: fusion,
           id: `${id}/~`,
@@ -656,6 +661,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
     const gate = sufficientWhen ?? (level === "route" ? { minConfidence: 0.5 } : undefined);
     rows.push(
       treeRow({
+        hasStore,
         kind: "gate",
         fusionId: fusion,
         id: `${id}/gate`,
@@ -680,6 +686,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
     if (result) {
       rows.push(
         treeRow({
+          hasStore,
           kind: "result",
           fusionId: fusion,
           id: `${id}/result`,
@@ -730,6 +737,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
     const seatsHere = seatRows.filter((row) => row.fusion === fusion);
     rows.push(
       treeRow({
+        hasStore,
         ...parent,
         kind: "fusion",
         fusionId: fusion,
@@ -765,6 +773,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
       const stageOpen = Boolean(expanded[stageId]);
       rows.push(
         treeRow({
+          hasStore,
           kind: "stage",
           fusionId: fusion,
           id: stageId,
@@ -800,6 +809,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
         const chain = spec.candidates?.[persona] ?? [];
         rows.push(
           treeRow({
+            hasStore,
             kind: "seat",
             fusionId: fusion,
             id: seatId,
@@ -809,8 +819,8 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
             persona,
             editPath: ["candidates", persona],
             face: "seat",
-            answered: seat?.answered ?? "",
-            refusals: seat?.refusals ?? "",
+            answered: seat?.answered ?? (hasStore ? "" : "—"),
+            refusals: seat?.refusals ?? (hasStore ? "" : "—"),
             seats: seen(hasStore, seat?.seats),
             degraded: seen(hasStore, seat?.degraded),
             expanded: seatOpen,
@@ -841,6 +851,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
           const aliasName = typeof entry === "string" ? entry : (entry?.alias ?? "?");
           rows.push(
             treeRow({
+              hasStore,
               kind: "candidate",
               fusionId: fusion,
               id: entryId,

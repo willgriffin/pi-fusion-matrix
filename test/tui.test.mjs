@@ -21,6 +21,7 @@ import {
   TABS,
   aliasRows,
   clamp,
+  fusionTree,
   columnWidths,
   columnsFor,
   compact,
@@ -676,6 +677,20 @@ test("a store that cannot load is named in the rows, never zeroed", () => {
   assert.equal(rows[0].reportedUsd, null);
   const loaded = fusionRows({ config, fusionStats: [], seatStats: [] });
   assert.equal(loaded[0].runs, 0, "a loaded store that never saw the rung is an honest zero");
+
+  // The whole surface, not one tab: the aliases rows name it, a structural tree row names it, and the
+  // money/compact formatters read the marker as a marker (they guard non-finite — pinned here so a
+  // formatter rewrite cannot quietly print $NaN in exactly the missing-store case).
+  const alias = aliasRows({ config, modelStats: [], hasStore: false })[0];
+  assert.equal(alias.seats, "—", "the aliases tab names it too");
+  assert.equal(alias.refusals, "—");
+  const folded = fusionTree({ config, fusionStats: [], seatStats: [], decideRows: [], hasStore: false });
+  const expanded = Object.fromEntries(folded.filter((row) => row.kind === "fusion").map((row) => [row.id, true]));
+  const open = fusionTree({ config, fusionStats: [], seatStats: [], decideRows: [], expanded, hasStore: false });
+  const stageRow = open.find((row) => row.kind === "stage");
+  assert.equal(stageRow.runs, "—", "a structural row cannot disagree with its fusion parent");
+  const moneyColumn = columnsFor("fusions").find((column) => column.key === "listUsd");
+  assert.equal(moneyColumn.format(rows[0]), "—", "the money formatter reads the marker as a marker");
 });
 
 test("the routes table shows what the config offers beside what the store saw", () => {
