@@ -1004,8 +1004,22 @@ test("decideResults: a redirected walk binds each hop to the fusion that owns it
     "hopC",
     JSON.stringify({
       walk: [
-        { path: "hopA.route", parent: "hopA", answer: { choice: "forward", confidence: 0.9 }, option: "forward", branch: "then" },
-        { path: "hopB.route", parent: "hopB", answer: { choice: "onward", confidence: 0.8 }, option: "onward", branch: "then" },
+        {
+          path: "hopA.route",
+          parent: "hopA",
+          fusion: "hopA",
+          answer: { choice: "forward", confidence: 0.9 },
+          option: "forward",
+          branch: "then",
+        },
+        {
+          path: "hopB.route",
+          parent: "hopB",
+          fusion: "hopB",
+          answer: { choice: "onward", confidence: 0.8 },
+          option: "onward",
+          branch: "then",
+        },
       ],
     }),
   );
@@ -1016,5 +1030,33 @@ test("decideResults: a redirected walk binds each hop to the fusion that owns it
   assert.equal(hopB.fusion, "hopB", "and so does every later hop");
   assert.equal(hopA.total, 1);
   assert.equal(hopA.sufficient, 1);
+
+  // A dotted fusion id is legal (only `:` and `/` are refused), and its owner rides the step —
+  // re-deriving the owner from the path would key this row to a phantom `hop`.
+  db.prepare(`INSERT INTO run (id, session_id, seq, at, kind, carrier, fusion, routing_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    1000,
+    db.prepare(`SELECT id FROM session LIMIT 1`).get().id,
+    10,
+    1700000000001,
+    "deliberation",
+    "toolResult",
+    "finale",
+    JSON.stringify({
+      walk: [
+        {
+          path: "hop.v2.route",
+          parent: "hop.v2",
+          fusion: "hop.v2",
+          answer: { choice: "go", confidence: 0.9 },
+          option: "go",
+          branch: "then",
+        },
+      ],
+    }),
+  );
+  const again = decideResults(db);
+  const dotted = again.rows.find((row) => row.path === "hop.v2.route");
+  assert.equal(dotted.fusion, "hop.v2", "a dotted id binds whole — the step records its owner");
+  assert.equal(again.rows.find((row) => row.path === "hop.v2.route").total, 1);
   db.close();
 });

@@ -840,7 +840,9 @@ contain, or a gate that does not hold all mean the run proceeds as this fusion �
 means spend" rule as a slot cascade, applied at every depth and declining to the fusion that owns the
 route. A matched option with no branch and no `otherwise` is a *choice to run this fusion* and is
 recorded as `escalated`, not as a decline. Every step is recorded in `details.routing.walk` under the
-node it happened at (`path`) and the node it hangs under (`parent`), and the decision and the routing
+node it happened at (`path`), the node it hangs under (`parent`), and the fusion that owns the node
+(`fusion`, recorded at walk time — a fusion id may contain dots, so the path cannot name its owner
+exactly), and the decision and the routing
 are reported (` ├─ ↪ routed to flash (complexity=trivial, confidence 0.91)\n`), including when the
 gate declines to route.
 Routing may target a more expensive fusion — escalation on `"architectural"` is a normal use — so

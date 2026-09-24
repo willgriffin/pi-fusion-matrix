@@ -281,18 +281,18 @@ async function walkRoute({ spec, sufficientWhen, otherwiseNode, config, fusionId
   const threshold = gate.minConfidence ?? 0.5;
 
   if (error) {
-    walk.push({ path, parent, answer: null, option: null, branch: "declined" });
+    walk.push({ path, parent, fusion: fusionId, answer: null, option: null, branch: "declined" });
     return { error };
   }
   if (!branchNode) {
-    walk.push({ path, parent, answer, option: option ?? null, branch: matched ? "escalated" : "declined" });
+    walk.push({ path, parent, fusion: fusionId, answer, option: option ?? null, branch: matched ? "escalated" : "declined" });
     return matched ? { escalated: option } : { reason: "no option matched" };
   }
   if (!isSufficient(answer, gate)) {
-    walk.push({ path, parent, answer, option: option ?? null, branch: "declined" });
+    walk.push({ path, parent, fusion: fusionId, answer, option: option ?? null, branch: "declined" });
     return { reason: `confidence ${(answer?.confidence ?? 0).toFixed(2)} below ${threshold}` };
   }
-  walk.push({ path, parent, answer, option: option ?? null, branch: named !== undefined ? "then" : "otherwise" });
+  walk.push({ path, parent, fusion: fusionId, answer, option: option ?? null, branch: named !== undefined ? "then" : "otherwise" });
   const target = routeTarget(branchNode);
   if (target !== null) return { run: target };
   return walkRoute({

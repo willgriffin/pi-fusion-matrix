@@ -1514,11 +1514,12 @@ export function decideResults(db) {
     const routing = parseJson(r.routing_json);
     for (const step of routing?.walk ?? []) {
       if (!pathLike(step?.path)) continue;
-      // A node's results bind to the fusion that owns the node — the path's leading segment — not the
-      // run's final fusion: a redirected run records every hop's steps, and the tree reads each under
-      // its own route.
-      const owner = String(step.path).includes(".") ? String(step.path).split(".")[0] : (r.fusion ?? "(none)");
-      record(entry(owner, step.path, step.parent ?? null), {
+      // A node's results bind to the fusion that owns the node — recorded on the step at walk time,
+      // where the id is exact (a fusion id may contain dots, so re-deriving it from the path is
+      // approximate at best) — not the run's final fusion: a redirected run records every hop's
+      // steps, and the tree reads each under its own route. Walks recorded before the field existed
+      // fall back to the run's fusion, which is all they ever claimed.
+      record(entry(step.fusion ?? r.fusion ?? "(none)", step.path, step.parent ?? null), {
         at: r.at,
         answer: step.answer ?? null,
         option: step.option ?? null,
