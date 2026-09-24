@@ -797,7 +797,7 @@ type RunDetails = {
   substitutions: Substitution[];
   cascades: Cascade[];               // path, parent, branch, answer, sufficiency, prior, continuation
   routing?: {
-    walk: { path: string; parent: string; answer: DecideAnswer; option: string | null;
+    walk: { path: string; parent: string; fusion: string; answer: DecideAnswer; option: string | null;   // fusion: the node's owner, exact at walk time (an id may contain dots)
             branch: "then" | "otherwise" | "escalated" | "declined" }[];
     answer: DecideAnswer;            // the root decision's answer
     routedTo?: string;               // the fusion the walk ended at
