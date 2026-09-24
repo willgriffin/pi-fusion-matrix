@@ -145,7 +145,7 @@ export function buildState({
     decideRows: decideRows ?? [],
     rows: {
       aliases: [],
-      fusions: fusionTree({ config, fusionStats, seatStats, decideRows: decideRows ?? [] }),
+      fusions: fusionTree({ config, fusionStats, seatStats, decideRows: decideRows ?? [], hasStore: storeTotals != null }),
       personas: [],
     },
     stats: { modelStats, fusionStats, seatStats },
@@ -194,7 +194,13 @@ export const aliasesView = (state) =>
 
 /** The personas tab as its flat row list: parents in name order, each open one followed by its seats. */
 export const personasView = (state) =>
-  personaRows({ config: displayConfig(state), seatStats: state.stats.seatStats, sources: state.sources, expanded: state.expanded });
+  personaRows({
+    config: displayConfig(state),
+    seatStats: state.stats.seatStats,
+    sources: state.sources,
+    expanded: state.expanded,
+    hasStore: state.storeTotals != null,
+  });
 
 /** The row the cursor is on, or undefined on an empty tab. */
 export const selected = (state) => state.rows[state.tab][state.cursors[state.tab]];
@@ -829,6 +835,7 @@ function fusionView(state) {
     seatStats: state.stats.seatStats,
     decideRows: state.decideRows ?? [],
     expanded: state.expanded,
+    hasStore: state.storeTotals != null,
   });
 }
 
@@ -2045,6 +2052,7 @@ export const adopt = (current, reloaded) => {
       seatStats: state.stats.seatStats,
       decideRows: state.decideRows ?? [],
       expanded: state.expanded,
+      hasStore: state.storeTotals != null,
     }),
   };
   for (const tab of TABS) state.cursors[tab] = clamp(state.cursors[tab] ?? 0, 0, Math.max(0, state.rows[tab].length - 1));

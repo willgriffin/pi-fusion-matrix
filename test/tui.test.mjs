@@ -667,6 +667,17 @@ test("the fusion table carries how a rung ran, ended and cost", () => {
   assert.equal(quick.reportedUsd, null);
 });
 
+test("a store that cannot load is named in the rows, never zeroed", () => {
+  // The doctrine the store columns exist to keep: a rung the store saw zero times is `0`; a store
+  // that could not load at all is `—`. omp's Bun has no node:sqlite, and the rows used to read 0.
+  const rows = fusionRows({ config, fusionStats: [], seatStats: [], hasStore: false });
+  assert.equal(rows[0].runs, "—");
+  assert.equal(rows[0].seats, "—");
+  assert.equal(rows[0].reportedUsd, null);
+  const loaded = fusionRows({ config, fusionStats: [], seatStats: [] });
+  assert.equal(loaded[0].runs, 0, "a loaded store that never saw the rung is an honest zero");
+});
+
 test("the routes table shows what the config offers beside what the store saw", () => {
   const rows = routeRows({ config, seatStats });
   const skeptic = rows.find((row) => row.fusion === "review" && row.seat === "skeptic");

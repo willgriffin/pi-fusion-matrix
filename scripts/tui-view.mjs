@@ -329,8 +329,14 @@ export function aliasRows({ config, modelStats, expanded = {} }) {
   return groups.flatMap(({ parent, children }) => [parent, ...children]);
 }
 
+/**
+ * A store-derived number, honestly: a rung the store saw zero times is `0`; a store that could not
+ * load at all is `—`. Missing is named — never the silent zeros the store columns exist to avoid.
+ */
+const seen = (hasStore, value) => (hasStore ? (value ?? 0) : "—");
+
 /** The fusions tab: how each rung runs, how it ended, what it cost, and what its reviews produced. */
-export function fusionRows({ config, fusionStats, seatStats }) {
+export function fusionRows({ config, fusionStats, seatStats, hasStore = true }) {
   const rows = [];
   const byFusion = new Map(fusionStats.map((row) => [row.fusion, row]));
   for (const [fusion, spec] of Object.entries(config.fusions ?? {})) {
@@ -341,22 +347,22 @@ export function fusionRows({ config, fusionStats, seatStats }) {
       fusion,
       mode: spec.mode ?? "?",
       face: spec.proxy ? `proxy→${spec.proxy.alias}` : spec.route ? "routes" : spec.execute ? "answers" : "deliberates",
-      runs: stats?.runs ?? 0,
-      failures: stats?.failures ?? 0,
-      seats: stats?.seats ?? 0,
-      degraded,
+      runs: seen(hasStore, stats?.runs),
+      failures: seen(hasStore, stats?.failures),
+      seats: seen(hasStore, stats?.seats),
+      degraded: seen(hasStore, degraded),
       sufficient: stats ? `${stats.cascades.sufficient}/${stats.cascades.total}` : "—",
-      verify: stats?.verifyChecks ?? 0,
-      malformed: stats?.malformed ?? 0,
-      located: stats?.marked.located ?? 0,
-      unlocated: stats?.marked.unlocated ?? 0,
+      verify: seen(hasStore, stats?.verifyChecks),
+      malformed: seen(hasStore, stats?.malformed),
+      located: seen(hasStore, stats?.marked.located),
+      unlocated: seen(hasStore, stats?.marked.unlocated),
       reportedUsd: stats ? stats.cost.reported : null,
-      listUsd: stats ? stats.cost.list : 0,
-      estimatedUsd: stats ? stats.cost.estimated : 0,
+      listUsd: stats ? stats.cost.list : seen(hasStore, 0),
+      estimatedUsd: stats ? stats.cost.estimated : seen(hasStore, 0),
       last: stats?.lastRunAt ? String(stats.lastRunAt).slice(0, 16).replace("T", " ") : "—",
     });
   }
-  return rows.sort((a, b) => b.runs - a.runs || a.fusion.localeCompare(b.fusion));
+  return rows.sort((a, b) => (Number(b.runs) || 0) - (Number(a.runs) || 0) || a.fusion.localeCompare(b.fusion));
 }
 
 /** The seat names a mode actually runs, in stage order — the seats a fusion's candidates must cover. */
@@ -374,7 +380,7 @@ export function modeSeats(mode) {
  * is the ordered list the seat walks; `answered` and `refusals` come from the store, so a seat whose
  * first candidate never runs is visible as such.
  */
-export function routeRows({ config, seatStats }) {
+export function routeRows({ config, seatStats, hasStore = true }) {
   const rows = [];
   for (const [fusion, spec] of Object.entries(config.fusions ?? {})) {
     const mode = config.modes?.[spec.mode];
@@ -411,9 +417,9 @@ export function routeRows({ config, seatStats }) {
               .join(" ")
           : "",
         refusals,
-        seats: stat?.seats ?? 0,
-        degraded: stat?.degraded ?? 0,
-        tokens: stat?.tokens ?? 0,
+        seats: seen(hasStore, stat?.seats),
+        degraded: seen(hasStore, stat?.degraded),
+        tokens: seen(hasStore, stat?.tokens),
       });
     }
   }
@@ -450,9 +456,9 @@ const promptKindFor = (prompt, source) => {
  * A child's first column is its tree label (as an alias's routes are) and its `promptKind` holds the walk string
  * beside the parent's prompt; its numbers are the one matching store row's own, never the parent's totals again.
  */
-export function personaRows({ config, seatStats = [], sources = {}, expanded = {} }) {
+export function personaRows({ config, seatStats = [], sources = {}, expanded = {}, hasStore = true }) {
   const rows = [];
-  const seats = routeRows({ config, seatStats });
+  const seats = routeRows({ config, seatStats, hasStore });
   for (const name of Object.keys(config.personas ?? {}).sort((a, b) => a.localeCompare(b))) {
     const persona = config.personas[name] ?? {};
     const prompt = typeof persona.prompt === "string" ? persona.prompt : "";
@@ -476,7 +482,7 @@ export function personaRows({ config, seatStats = [], sources = {}, expanded = {
             temperature: "—",
             thinking: "—",
             output: "—",
-            runs: slice.length,
+            runs: seen(hasStore, slice.length),
             seats: row.seats,
             degraded: row.degraded,
             tokens: row.tokens,
@@ -492,10 +498,19 @@ export function personaRows({ config, seatStats = [], sources = {}, expanded = {
         temperature: persona.temperature ?? "—",
         thinking: persona.thinking ?? "—",
         output: persona.output ?? "—",
-        runs: mine.length,
-        seats: mine.reduce((n, stat) => n + stat.seats, 0),
-        degraded: mine.reduce((n, stat) => n + stat.degraded, 0),
-        tokens: mine.reduce((n, stat) => n + stat.tokens, 0),
+        runs: seen(hasStore, mine.length),
+        seats: seen(
+          hasStore,
+          mine.reduce((n, stat) => n + stat.seats, 0),
+        ),
+        degraded: seen(
+          hasStore,
+          mine.reduce((n, stat) => n + stat.degraded, 0),
+        ),
+        tokens: seen(
+          hasStore,
+          mine.reduce((n, stat) => n + stat.tokens, 0),
+        ),
         last: lastStamp(mine),
         expanded: open,
         childCount: under.length,
@@ -538,10 +553,10 @@ const treeRow = (fields) => ({
  * A row's `id` keys `expanded`, and its `editPath` is where in the fusion spec an edit lands — one
  * locator for every editor, from a choice's description to a branch's target.
  */
-export function fusionTree({ config, fusionStats = [], seatStats = [], decideRows = [], expanded = {} }) {
+export function fusionTree({ config, fusionStats = [], seatStats = [], decideRows = [], expanded = {}, hasStore = true }) {
   const rows = [];
-  const parents = fusionRows({ config, fusionStats, seatStats });
-  const seatRows = routeRows({ config, seatStats });
+  const parents = fusionRows({ config, fusionStats, seatStats, hasStore });
+  const seatRows = routeRows({ config, seatStats, hasStore });
   const resultAt = (fusion, path) => decideRows.find((row) => row.fusion === fusion && row.path === path) ?? null;
   const indent = (depth, mark = "") => `${"  ".repeat(Math.max(0, depth))}${mark}`;
 
@@ -796,8 +811,8 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
             face: "seat",
             answered: seat?.answered ?? "",
             refusals: seat?.refusals ?? "",
-            seats: seat?.seats ?? 0,
-            degraded: seat?.degraded ?? 0,
+            seats: seen(hasStore, seat?.seats),
+            degraded: seen(hasStore, seat?.degraded),
             expanded: seatOpen,
             childCount: chain.length,
           }),
