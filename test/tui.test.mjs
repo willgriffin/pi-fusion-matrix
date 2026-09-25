@@ -764,6 +764,40 @@ test("the fusion table carries how a rung ran, ended and cost", () => {
   assert.equal(quick.reportedUsd, null);
 });
 
+test("a rung the store saw but the config does not declare is named in the rows, never dropped", () => {
+  // The rule the seats already followed, at rung level: the review route's own rungs (smrt-review,
+  // review-quick, quick) live in the store, and a table built from the config alone reported their
+  // history as no history at all.
+  const stats = {
+    fusion: "smrt-review",
+    runs: 2,
+    failures: 0,
+    seats: 4,
+    cascades: { total: 2, sufficient: 0, advanced: 2 },
+    verifyChecks: 0,
+    malformed: 0,
+    marked: { located: 1, unlocated: 1 },
+    cost: { reported: null, list: 0, estimated: 0 },
+    lastRunAt: "2026-09-20T18:52:46",
+  };
+  const seat = { fusion: "smrt-review", persona: "judge", answered: {}, refusals: {}, degraded: 1, seats: 2, tokens: 10 };
+  const config = { fusions: {}, modes: {}, aliases: {}, personas: {} };
+  const rows = fusionRows({ config, fusionStats: [stats], seatStats: [], hasStore: true });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].fusion, "smrt-review");
+  assert.equal(rows[0].runs, 2, "its numbers are its numbers");
+  assert.equal(rows[0].unconfigured, true, "and the row says it is history, not a rung to run");
+
+  // The tree shows it as a parent like any other, and its seats ride the seat rows' own rule.
+  const tree = fusionTree({ config, fusionStats: [stats], seatStats: [seat], decideRows: [], hasStore: true });
+  const parent = tree.find((row) => row.kind === "fusion");
+  assert.equal(parent.runs, 2);
+  assert.equal(parent.unconfigured, true);
+  const seatRow = routeRows({ config, seatStats: [seat], hasStore: true }).find((row) => row.seat === "judge");
+  assert.ok(seatRow, "the seats under an undeclared rung are shown too");
+  assert.equal(seatRow.unconfigured, true);
+});
+
 test("a store that cannot load is named in the rows, never zeroed", () => {
   // The doctrine the store columns exist to keep: a rung the store saw zero times is `0`; a store
   // that could not load at all is `—`. omp's Bun has no node:sqlite, and the rows used to read 0.

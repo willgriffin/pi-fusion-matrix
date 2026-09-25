@@ -409,14 +409,12 @@ const seen = (hasStore, value) => (hasStore ? (value ?? 0) : "—");
 export function fusionRows({ config, fusionStats, seatStats, hasStore = true }) {
   const rows = [];
   const byFusion = new Map(fusionStats.map((row) => [row.fusion, row]));
-  for (const [fusion, spec] of Object.entries(config.fusions ?? {})) {
+  // What one rung's store numbers become on a row — shared by the declared and the undeclared, so a
+  // rung the config dropped reads exactly like one it still names, minus the name.
+  const runFields = (fusion) => {
     const stats = byFusion.get(fusion) ?? null;
-    const seats = seatStats.filter((row) => row.fusion === fusion);
-    const degraded = seats.reduce((n, row) => n + row.degraded, 0);
-    rows.push({
-      fusion,
-      mode: spec.mode ?? "?",
-      face: spec.proxy ? `proxy→${spec.proxy.alias}` : spec.route ? "routes" : spec.execute ? "answers" : "deliberates",
+    const degraded = seatStats.filter((row) => row.fusion === fusion).reduce((n, row) => n + row.degraded, 0);
+    return {
       runs: seen(hasStore, stats?.runs),
       failures: seen(hasStore, stats?.failures),
       seats: seen(hasStore, stats?.seats),
@@ -430,7 +428,23 @@ export function fusionRows({ config, fusionStats, seatStats, hasStore = true }) 
       listUsd: stats ? stats.cost.list : seen(hasStore, 0),
       estimatedUsd: stats ? stats.cost.estimated : seen(hasStore, 0),
       last: stats?.lastRunAt ? String(stats.lastRunAt).slice(0, 16).replace("T", " ") : "—",
+    };
+  };
+  for (const [fusion, spec] of Object.entries(config.fusions ?? {})) {
+    rows.push({
+      fusion,
+      mode: spec.mode ?? "?",
+      face: spec.proxy ? `proxy→${spec.proxy.alias}` : spec.route ? "routes" : spec.execute ? "answers" : "deliberates",
+      ...runFields(fusion),
     });
+  }
+  // A rung that *ran* is shown whether or not the config still names it — the same rule the seats
+  // under it already followed: a roster edited (or a rung renamed) leaves store rows behind, the
+  // review route's own rungs among them, and a table that silently dropped them would report a
+  // history it cannot place as no history at all. The face says so: this row is history.
+  for (const fusion of byFusion.keys()) {
+    if (config.fusions?.[fusion]) continue;
+    rows.push({ fusion, mode: "—", face: "history", unconfigured: true, ...runFields(fusion) });
   }
   return rows.sort((a, b) => (Number(b.runs) || 0) - (Number(a.runs) || 0) || a.fusion.localeCompare(b.fusion));
 }
@@ -452,7 +466,11 @@ export function modeSeats(mode) {
  */
 export function routeRows({ config, seatStats, hasStore = true }) {
   const rows = [];
-  for (const [fusion, spec] of Object.entries(config.fusions ?? {})) {
+  // The fusions, declared or not: a rung the store saw but the config dropped still has seats to
+  // report, exactly as a renamed seat under a declared rung does.
+  const fusions = [...new Set([...Object.keys(config.fusions ?? {}), ...seatStats.map((row) => row.fusion)])];
+  for (const fusion of fusions) {
+    const spec = config.fusions?.[fusion] ?? {};
     const mode = config.modes?.[spec.mode];
     const configured = [...new Set([...modeSeats(mode), ...Object.keys(spec.candidates ?? {})])];
     // A seat that *ran* is shown whether or not the config still names it: a roster edited (or a seat

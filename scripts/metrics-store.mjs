@@ -758,15 +758,58 @@ export function rowsForSession(session) {
 
 /* ------------------------------------------------------------------ sqlite */
 
-let cachedSqlite;
-export async function loadSqlite() {
-  if (cachedSqlite === undefined) {
+/**
+ * Bun's `Database` wearing the `DatabaseSync` surface the store speaks: the same constructor shape
+ * (`readOnly` mapped to the option Bun spells lowercase), `prepare` returning `all`/`get`/`run`, and
+ * `exec` as a multi-statement `run`. The interface runs inside the harness as well as under node, and
+ * the store should not have to know which runtime it is in.
+ */
+export function adaptDatabase(sqlite) {
+  return {
+    DatabaseSync: class DatabaseSync {
+      #db;
+      constructor(filename, options = {}) {
+        this.#db = new sqlite.Database(filename, options.readOnly ? { readonly: true } : {});
+      }
+      prepare(sql) {
+        const stmt = this.#db.prepare(sql);
+        return {
+          all: (...args) => stmt.all(...args),
+          get: (...args) => stmt.get(...args),
+          run: (...args) => stmt.run(...args),
+        };
+      }
+      exec(sql) {
+        this.#db.run(sql);
+      }
+      close() {
+        this.#db.close();
+      }
+    },
+  };
+}
+
+/**
+ * The store's sqlite driver: the runtime's own when it has one, Bun's `Database` worn through the
+ * adapter when it does not. A driver is only a driver if it speaks `DatabaseSync`; a runtime with
+ * neither gets `null`, which the caller names.
+ */
+export async function resolveSqlite(importer = (name) => import(name)) {
+  for (const name of ["node:sqlite", "bun:sqlite"]) {
     try {
-      cachedSqlite = await import("node:sqlite");
+      const sqlite = await importer(name);
+      if (sqlite?.DatabaseSync) return sqlite;
+      if (sqlite?.Database) return adaptDatabase(sqlite);
     } catch {
-      cachedSqlite = null;
+      // This runtime does not ship that driver; the next name gets its chance.
     }
   }
+  return null;
+}
+
+let cachedSqlite;
+export async function loadSqlite() {
+  if (cachedSqlite === undefined) cachedSqlite = await resolveSqlite();
   return cachedSqlite;
 }
 
@@ -777,7 +820,7 @@ export async function loadSqlite() {
  * without leaving the file.
  */
 export function openStore(dbPath, { sqlite = cachedSqlite, rebuild = false } = {}) {
-  if (!sqlite) throw new Error("openStore needs node:sqlite — call loadSqlite() first, or pass { sqlite }");
+  if (!sqlite) throw new Error("openStore needs a sqlite driver — call loadSqlite() first, or pass { sqlite }");
   const db = new sqlite.DatabaseSync(dbPath);
   let existing = null;
   try {

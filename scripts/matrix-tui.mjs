@@ -1815,7 +1815,7 @@ export function detailFor(state, row) {
         : "";
       const work = stats ? Object.keys(stats.workItems).join(" ") : "";
       const decision = stats ? stats.decisionTokens : state.storeTotals != null ? 0 : "—";
-      return `${row.fusionId} · ${row.name ?? ""} · mode ${row.mode} · ${row.face} · runs ${row.runs}, failures ${row.failures} · cascades ${row.sufficient} sufficient · verdicts ${verdicts || "none"} · work items ${work || "none"} · verify ${row.verify} checks · decision tokens ${decision}`;
+      return `${row.fusionId} · ${row.name ?? ""} · mode ${row.mode} · ${row.face} · runs ${row.runs}, failures ${row.failures} · cascades ${row.sufficient} sufficient · verdicts ${verdicts || "none"} · work items ${work || "none"} · verify ${row.verify} checks · decision tokens ${decision}${row.unconfigured ? " · not in the config any more (history only)" : ""}`;
     }
     return `${row.fusionId ?? ""} · ${row.label ?? row.name ?? ""}`;
   }
@@ -1831,7 +1831,7 @@ export function detailFor(state, row) {
       : "";
     const work = stats ? Object.keys(stats.workItems).join(" ") : "";
     const decision = stats ? stats.decisionTokens : 0;
-    return `${row.fusion} · ${row.mode} · ${row.face} · runs ${row.runs}, failures ${row.failures} · cascades ${row.sufficient} sufficient · verdicts ${verdicts || "none"} · work items ${work || "none"} · verify ${row.verify} checks · decision tokens ${decision}`;
+    return `${row.fusion} · ${row.mode} · ${row.face} · runs ${row.runs}, failures ${row.failures} · cascades ${row.sufficient} sufficient · verdicts ${verdicts || "none"} · work items ${work || "none"} · verify ${row.verify} checks · decision tokens ${decision}${row.unconfigured ? " · not in the config any more (history only)" : ""}`;
   }
   const stat = state.stats.seatStats.find((entry) => entry.fusion === row.fusion && entry.persona === row.seat);
   const refused =

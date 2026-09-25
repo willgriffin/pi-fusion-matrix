@@ -43,6 +43,8 @@ import {
   sanitiseDetails,
   totals,
   usageOf,
+  adaptDatabase,
+  resolveSqlite,
   verifyByQuestion,
 } from "../scripts/metrics-store.mjs";
 
@@ -890,6 +892,69 @@ test("one aliased route is named the same on both halves, and a hostile name is 
 
   db.close();
   fs.rmSync(dbPath, { force: true });
+});
+
+test("the store's sqlite driver comes from the runtime that has one", async () => {
+  const fake = { DatabaseSync: class {} };
+  assert.equal(
+    await resolveSqlite(async () => {
+      throw new Error("absent");
+    }),
+    null,
+    "a runtime with no driver is named, not guessed",
+  );
+  assert.equal(await resolveSqlite(async () => ({})), null, "a module that exports no DatabaseSync is not a driver");
+  assert.equal(
+    await resolveSqlite(async (name) => (name === "node:sqlite" ? fake : Promise.reject(new Error("absent")))),
+    fake,
+    "node's own driver comes first",
+  );
+  const bunOnly = await resolveSqlite(async (name) =>
+    name === "bun:sqlite" ? { Database: class {} } : Promise.reject(new Error("absent")),
+  );
+  assert.ok(bunOnly?.DatabaseSync, "and Bun's Database is adapted rather than refused — the harness panel's case");
+});
+
+test("Bun's Database is worn as the DatabaseSync surface the store speaks", () => {
+  const calls = [];
+  class FakeDatabase {
+    constructor(filename, options) {
+      calls.push(["open", filename, options]);
+    }
+    prepare(sql) {
+      calls.push(["prepare", sql]);
+      return {
+        all: (...args) => (calls.push(["all", sql, ...args]), []),
+        get: (...args) => (calls.push(["get", sql, ...args]), undefined),
+        run: (...args) => (calls.push(["run", sql, ...args]), { changes: 1, lastInsertRowid: 2 }),
+      };
+    }
+    run(sql) {
+      calls.push(["exec", sql]);
+      return { changes: 0 };
+    }
+    close() {
+      calls.push(["close"]);
+    }
+  }
+  const { DatabaseSync } = adaptDatabase({ Database: FakeDatabase });
+  const db = new DatabaseSync("/tmp/store.db", { readOnly: true });
+  assert.deepEqual(calls[0], ["open", "/tmp/store.db", { readonly: true }], "readOnly maps onto the option Bun spells lowercase");
+  db.prepare("SELECT 1").get();
+  db.exec("BEGIN");
+  db.close();
+  assert.ok(
+    calls.some((call) => call[0] === "get"),
+    "prepare answers get",
+  );
+  assert.ok(
+    calls.some((call) => call[0] === "exec" && call[1] === "BEGIN"),
+    "exec is the multi-statement run",
+  );
+  assert.ok(
+    calls.some((call) => call[0] === "close"),
+    "and the database closes",
+  );
 });
 
 test("a record's clock is a string or absent, whatever the harness wrote", () => {
