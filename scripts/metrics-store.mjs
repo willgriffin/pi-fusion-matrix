@@ -769,7 +769,9 @@ export function adaptDatabase(sqlite) {
     DatabaseSync: class DatabaseSync {
       #db;
       constructor(filename, options = {}) {
-        this.#db = new sqlite.Database(filename, options.readOnly ? { readonly: true } : {});
+        // No options means *no second argument*: Bun reads an empty object as open flags of zero and
+        // refuses to open at all (`flags must include SQLITE_OPEN_READONLY or SQLITE_OPEN_READWRITE`).
+        this.#db = new sqlite.Database(filename, options.readOnly ? { readonly: true } : undefined);
       }
       prepare(sql) {
         const stmt = this.#db.prepare(sql);

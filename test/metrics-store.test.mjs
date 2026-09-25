@@ -940,6 +940,12 @@ test("Bun's Database is worn as the DatabaseSync surface the store speaks", () =
   const { DatabaseSync } = adaptDatabase({ Database: FakeDatabase });
   const db = new DatabaseSync("/tmp/store.db", { readOnly: true });
   assert.deepEqual(calls[0], ["open", "/tmp/store.db", { readonly: true }], "readOnly maps onto the option Bun spells lowercase");
+  // A store's own open carries no options, and Bun refuses an empty object as open flags of zero — so
+  // the adapter must pass nothing at all. This is the case that kept the panel storeless under the
+  // harness while the read-only probe was green.
+  const writable = new DatabaseSync("/tmp/store.db");
+  assert.deepEqual(calls[1], ["open", "/tmp/store.db", undefined], "no options means no second argument");
+  writable.close();
   db.prepare("SELECT 1").get();
   db.exec("BEGIN");
   db.close();
