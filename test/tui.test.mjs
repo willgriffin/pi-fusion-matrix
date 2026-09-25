@@ -22,6 +22,7 @@ import {
   aliasRows,
   clamp,
   fusionTree,
+  SCHEMES,
   columnWidths,
   columnsFor,
   compact,
@@ -42,6 +43,7 @@ import {
   adopt,
   aliasesView,
   applyKey,
+  resolveScheme,
   buildState,
   catalogueFor,
   commitProposal,
@@ -525,6 +527,100 @@ test("column widths squeeze to the room available, and never below the identity 
   const narrow = columnWidths(columns, rows, 20);
   assert.equal(narrow[0], 10, "the minimum wins over the squeeze");
   assert.ok(narrow[1] >= 3);
+});
+
+test("every primitive wears its own colour, and the schemes are swappable", () => {
+  const ESC = String.fromCharCode(27);
+  const palette = paletteFor({ color: true });
+  for (const [name, scheme] of Object.entries(SCHEMES)) {
+    assert.deepEqual(Object.keys(scheme).sort(), Object.keys(SCHEMES.matrix).sort(), `${name} names the same primitives`);
+    assert.equal(
+      new Set(Object.values(scheme).map((rgb) => rgb.join())).size,
+      Object.keys(scheme).length,
+      `${name} gives each primitive its own hue`,
+    );
+  }
+  for (const style of Object.values(palette.kinds)) {
+    assert.ok(style.startsWith(ESC + "[38;2;") && style.endsWith("m"), "a tint is truecolour");
+  }
+  // A custom scheme lays over the default: the keys it names change, the rest keep the default.
+  const custom = paletteFor({ color: true, scheme: { parallel: [255, 0, 0] } });
+  assert.equal(custom.kinds.parallel, ESC + "[38;2;255;0;0m");
+  assert.equal(custom.kinds.single, palette.kinds.single);
+  // A name nobody knows is refused with the names it could have chosen, and NO_COLOR drops the map.
+  assert.throws(() => paletteFor({ color: true, scheme: "nope" }), /unknown scheme "nope"/);
+  assert.deepEqual(paletteFor({ color: false }).kinds, {});
+});
+
+test("a scheme is a name or a file, and a name nobody knows is refused at startup", () => {
+  assert.equal(resolveScheme(undefined), "matrix");
+  assert.equal(resolveScheme("ember"), "ember");
+  assert.throws(() => resolveScheme("nope"), /unknown scheme "nope"/);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tui-scheme-"));
+  const file = path.join(dir, "mine.json");
+  fs.writeFileSync(file, JSON.stringify({ parallel: [255, 0, 0] }));
+  assert.deepEqual(resolveScheme(file), { parallel: [255, 0, 0] });
+});
+
+test("the tree paints every primitive in its scheme's colour", () => {
+  // A shape with every stage kind, a route to walk and a candidate chain — so every row the tree can
+  // tint is on screen at once, and the rows that name no primitive keep the interface's ink.
+  const config = {
+    aliases: { alpha: { model: "m", providers: ["p"] } },
+    personas: { a: { prompt: "x" }, b: { prompt: "y" } },
+    fusions: {
+      one: {
+        mode: "shape",
+        route: { type: "noul", criteria: { yes: { then: "alpha" }, no: { then: "alpha" } } },
+        candidates: { a: ["alpha"], b: ["alpha"] },
+      },
+    },
+    modes: {
+      shape: {
+        stages: [
+          { parallel: ["a", "b"], input: "prompt" },
+          { single: "a", input: "previous" },
+          { decide: { type: "noul", criteria: { yes: { then: "a" } } }, input: "previous" },
+          { score: { type: "score", criteria: { low: {}, high: {} } }, input: "previous" },
+          { render: "a", input: "previous" },
+        ],
+      },
+    },
+  };
+  const palette = paletteFor({ color: true });
+  const build = (expanded) => fusionTree({ config, fusionStats: [], seatStats: [], decideRows: [], expanded, hasStore: false });
+  // Open every row the tree can open, keyed by its own ids — one pass per level of nesting
+  // (fusion → stage → seat → candidates), so the deepest rows are on screen too.
+  const expand = (rows) => Object.fromEntries(rows.map((row) => [row.id, true]));
+  let rows = build({});
+  for (let pass = 0; pass < 4; pass += 1) rows = build(expand(rows));
+  const grid = createGrid(160, rows.length + 4);
+  const at = paintTable(grid, {
+    columns: columnsFor("fusions"),
+    rows,
+    row: 1,
+    col: 0,
+    width: 160,
+    height: rows.length + 2,
+    cursor: 1,
+    palette,
+  });
+  rows.forEach((row, i) => {
+    if (i === 1) return; // the cursor row wears the selection, whatever it is
+    const style = grid.fg[at[i] * 160];
+    if (row.tint) assert.equal(style, palette.kinds[row.tint], `${row.tint} wears its scheme colour`);
+    else assert.equal(style, palette.ink, "a row that names no primitive keeps the ink");
+  });
+  for (const kind of ["parallel", "single", "decide", "score", "render"]) {
+    assert.ok(
+      rows.some((row) => row.tint === kind),
+      `the fixture shows a ${kind} stage`,
+    );
+  }
+  assert.ok(
+    rows.some((row) => row.tint === "alias"),
+    "and a candidate under its seat",
+  );
 });
 
 test("a table stays inside its panel, marks the cursor, and scrolls to keep it visible", () => {

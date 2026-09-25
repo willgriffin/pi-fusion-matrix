@@ -23,13 +23,61 @@ export const TABS = ["fusions", "aliases", "personas"];
 const BOX = { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│", tee: "├", teeR: "┤" };
 
 /**
+ * Colour schemes: what every primitive the tree shows wears, by the primitive's own name — the five
+ * stage kinds, the pieces a decision node walks (`decision`, `choice`, `gate`), and the `alias` a
+ * candidate row names. A scheme is a plain name → [r, g, b] map over exactly those keys; the driver
+ * takes one by name (`--scheme ember`) or as a JSON file laid over the default, and a key no scheme
+ * names falls back to the interface's own ink. Under `NO_COLOR` the map is empty and that fallback
+ * does the honest thing.
+ */
+export const SCHEMES = {
+  matrix: {
+    parallel: [120, 200, 255],
+    single: [255, 210, 120],
+    decide: [255, 130, 190],
+    score: [190, 140, 255],
+    render: [120, 255, 220],
+    decision: [255, 160, 100],
+    choice: [230, 220, 120],
+    gate: [140, 180, 255],
+    alias: [255, 120, 120],
+  },
+  ember: {
+    parallel: [255, 180, 120],
+    single: [255, 120, 90],
+    decide: [255, 100, 150],
+    score: [255, 200, 140],
+    render: [255, 150, 60],
+    decision: [240, 110, 70],
+    choice: [255, 225, 170],
+    gate: [220, 130, 90],
+    alias: [255, 80, 80],
+  },
+  glacier: {
+    parallel: [120, 220, 255],
+    single: [170, 195, 255],
+    decide: [130, 155, 255],
+    score: [200, 230, 255],
+    render: [100, 255, 245],
+    decision: [90, 175, 255],
+    choice: [185, 215, 255],
+    gate: [150, 125, 255],
+    alias: [255, 145, 165],
+  },
+};
+
+/**
  * The palette: the rain's three levels, the interface's own ink, and the selection. `NO_COLOR` (or
  * `--no-color`) drops every escape but keeps the selection readable with reverse video — the
  * interface is usable without colour, which is the only honest way to offer a colour-heavy one.
+ * `scheme` names one of the SCHEMES or carries a custom name → [r, g, b] map merged over the default.
  */
-export function paletteFor({ color = true } = {}) {
+export function paletteFor({ color = true, scheme = "matrix" } = {}) {
   const fg = (r, g, b) => `\x1b[38;2;${r};${g};${b}m`;
   const bg = (r, g, b) => `\x1b[48;2;${r};${g};${b}m`;
+  const named = typeof scheme === "string" ? SCHEMES[scheme] : { ...SCHEMES.matrix, ...scheme };
+  if (!named) throw new Error(`unknown scheme "${scheme}" — known schemes: ${Object.keys(SCHEMES).join(", ")}`);
+  const kinds = color ? Object.fromEntries(Object.entries(named).map(([name, [r, g, b]]) => [name, fg(r, g, b)])) : {};
   if (!color) {
     return {
       head: "",
@@ -40,6 +88,7 @@ export function paletteFor({ color = true } = {}) {
       box: "",
       title: "",
       accent: "",
+      kinds,
       selected: "\x1b[7m",
       reset: "\x1b[0m",
     };
@@ -53,6 +102,7 @@ export function paletteFor({ color = true } = {}) {
     box: fg(0, 190, 80),
     title: fg(0, 255, 140),
     accent: fg(255, 245, 150),
+    kinds,
     selected: bg(0, 190, 80) + fg(0, 20, 5),
     reset: "\x1b[0m",
   };
@@ -181,16 +231,34 @@ export function paintTable(grid, { columns, rows, row, col, width, height, curso
   }
   for (let i = first; i < rows.length && i - first < bodyRows; i += 1) {
     const selected = i === cursor;
-    const style = selected ? palette.selected : palette.ink;
-    const line = columns
-      .map((column, c) => pad(column.format ? column.format(rows[i]) : (rows[i][column.key] ?? ""), widths[c], column.align))
-      .join(" ".repeat(2));
+    const entry = rows[i];
+    const segments = columns.map((column, c) =>
+      pad(column.format ? column.format(entry) : (entry[column.key] ?? ""), widths[c], column.align),
+    );
     const y = row + 1 + (i - first);
-    put(grid, y, col, truncate(line, width), style);
+    // Painted column by column, because the identity column wears its row's primitive colour from
+    // the scheme while the numbers keep the interface's ink — and a selected row keeps the selection
+    // everywhere, so the cursor is still the loudest thing on screen.
+    let x = col;
+    for (let c = 0; c < segments.length; c += 1) {
+      const base = selected ? palette.selected : palette.ink;
+      if (c > 0) {
+        // The gap is painted like the row's own ink: an unstyled blank inside a data row would be a
+        // window onto the rain, and a row's background is not a window.
+        const room = Math.max(0, width - (x - col));
+        put(grid, y, x, " ".repeat(Math.min(2, room)), base);
+        x += 2;
+      }
+      const text = truncate(segments[c], width - (x - col));
+      if (!text) break;
+      const style = selected ? palette.selected : c === 0 ? (palette.kinds[entry.tint] ?? palette.ink) : base;
+      put(grid, y, x, text, style);
+      x += text.length;
+    }
     if (selected) {
       // The selection paints to the panel's edge, not just under the text: a highlighted row that
       // stops mid-width reads as a text style rather than as the cursor.
-      const used = Math.min(line.length, width);
+      const used = Math.min(segments.join("  ").length, width);
       fillRow(grid, y, col + used, width - used, " ", palette.selected);
     }
     at[i] = y;
@@ -582,6 +650,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
       treeRow({
         hasStore,
         kind: "decision",
+        tint: "decision",
         fusionId: fusion,
         id,
         depth,
@@ -607,6 +676,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
         treeRow({
           hasStore,
           kind: "choice",
+          tint: "choice",
           fusionId: fusion,
           id: choiceId,
           depth: depth + 1,
@@ -644,6 +714,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
         treeRow({
           hasStore,
           kind: "choice",
+          tint: "choice",
           fusionId: fusion,
           id: `${id}/~`,
           depth: depth + 1,
@@ -663,6 +734,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
       treeRow({
         hasStore,
         kind: "gate",
+        tint: "gate",
         fusionId: fusion,
         id: `${id}/gate`,
         depth: depth + 1,
@@ -775,6 +847,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
         treeRow({
           hasStore,
           kind: "stage",
+          tint: kind,
           fusionId: fusion,
           id: stageId,
           depth: 1,
@@ -853,6 +926,7 @@ export function fusionTree({ config, fusionStats = [], seatStats = [], decideRow
             treeRow({
               hasStore,
               kind: "candidate",
+              tint: "alias",
               fusionId: fusion,
               id: entryId,
               depth: 3,

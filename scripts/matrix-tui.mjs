@@ -13,6 +13,7 @@
  *
  *   node scripts/matrix-tui.mjs                      # the whole interface, rain and all
  *   node scripts/matrix-tui.mjs --plain              # one frame as text, for a pipe or a test
+ *   node scripts/matrix-tui.mjs --scheme ember       # the primitives' colours; or --scheme ./mine.json
  *   node scripts/matrix-tui.mjs --no-rain --no-color # quiet, and readable on a mono terminal
  *
  * Editing is deliberate. `⏎` expands an alias into the routes it walks, where `K`/`J` reorder them and
@@ -54,6 +55,7 @@ import {
   gridLine,
   paintTable,
   paletteFor,
+  SCHEMES,
   personaRows,
   put,
   truncate,
@@ -2145,19 +2147,38 @@ export async function commitProposal(state, { dbPath, cwd = process.cwd() } = {}
   }
 }
 
+/**
+ * A scheme is a name the interface knows or a path to a JSON one: `--scheme ember` picks a built-in,
+ * `--scheme ./mine.json` lays a custom name → [r, g, b] map over the default. A name nobody knows is
+ * refused here — a scheme that silently fell back would colour the tree with something nobody chose.
+ */
+export function resolveScheme(arg) {
+  const name = String(arg ?? "matrix");
+  if (SCHEMES[name]) return name;
+  if (fs.existsSync(name)) return { ...JSON.parse(fs.readFileSync(name, "utf8")) };
+  throw new Error(`unknown scheme "${name}" — known schemes: ${Object.keys(SCHEMES).join(", ")}, or a path to a JSON scheme file`);
+}
+
 export async function main() {
   const dbPath = value("db", DEFAULT_DB);
   const catalogue = value("catalogue", DEFAULT_CATALOGUE);
   const fps = Number(value("fps", "20"));
   const frames = value("frames", null);
   const plain = has("plain") || !process.stdout.isTTY;
+  let scheme;
+  try {
+    scheme = resolveScheme(value("scheme", "matrix"));
+  } catch (error) {
+    console.error(error.message);
+    return 1;
+  }
   // Which layer a change is written to: the harness's machine layer by default, or exactly the file
   // named here — the flag that lets a smoke test exercise the write path without touching an
   // operator's own overlay.
   const layerFile = value("layer", null) ?? undefined;
   const world = await loadWorld({ dbPath, layerFile, catalogue });
-  let state = { ...world.state, color: !has("no-color") && !process.env.NO_COLOR, rain: !has("no-rain") };
-  let palette = paletteFor({ color: state.color });
+  let state = { ...world.state, color: !has("no-color") && !process.env.NO_COLOR, rain: !has("no-rain"), scheme };
+  let palette = paletteFor({ color: state.color, scheme: state.scheme });
 
   if (plain) {
     const width = Number(value("width", "150"));
@@ -2216,7 +2237,7 @@ export async function main() {
     state = next;
     // The colour key has to rebuild the palette: a palette computed once meant `c` changed a flag
     // nobody read, and the toggle did nothing at all.
-    palette = paletteFor({ color: state.color });
+    palette = paletteFor({ color: state.color, scheme: state.scheme });
     if (effect === "quit") {
       cleanup();
       process.exit(0);

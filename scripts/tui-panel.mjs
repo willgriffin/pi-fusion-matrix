@@ -46,16 +46,17 @@ export const TAB_NAMES = ["fusions", "aliases", "personas"];
  * host key chunks, `dispose()` stops the rain clock (twice if it has to be).
  */
 export class MatrixPanel {
-  constructor({ tui, keybindings, done, ctx = null, dbPath = DEFAULT_DB, cwd = process.cwd(), layerFile, tab } = {}) {
+  constructor({ tui, keybindings, done, ctx = null, dbPath = DEFAULT_DB, cwd = process.cwd(), layerFile, tab, scheme } = {}) {
     this.tui = tui;
     this.keybindings = keybindings;
     this.done = done;
     this.dbPath = dbPath;
     this.cwd = cwd;
     this.layerFile = layerFile;
+    this.scheme = scheme;
     this.registry = ctx?.modelRegistry ?? null;
     this.state = null;
-    this.palette = paletteFor({ color: true });
+    this.palette = paletteFor({ color: true, scheme });
     this.rainField = null;
     this.width = 0;
     this.height = 0;
@@ -123,7 +124,7 @@ export class MatrixPanel {
       if (this.state?.rain && this.rainField) for (let i = 0; i < steps; i += 1) stepRain(this.rainField);
     }
     if (!this.state) return ["  loading the matrix…"];
-    this.palette = paletteFor({ color: this.state.color });
+    this.palette = paletteFor({ color: this.state.color, scheme: this.scheme });
     const grid = frameFor({
       width,
       height,
