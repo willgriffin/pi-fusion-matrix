@@ -143,7 +143,7 @@ test("keys move the reader and the toggles; unknown keys are inert", async (t) =
   panel.handleInput("1");
   assert.equal(panel.state.tab, "fusions", "…and one goes to the first");
   panel.handleInput("a");
-  assert.equal(panel.state.rain, false, "rain toggles");
+  assert.equal(panel.state.rain, true, "rain toggles on");
   panel.handleInput("a");
   panel.handleInput("c");
   assert.equal(panel.state.color, false, "colour toggles");
@@ -406,6 +406,7 @@ test("n opens the route builder — the tree picks the pairs, the list beside it
 test("the rain moves on a clock: renders apart in time differ with nothing driving them", async (t) => {
   const { panel } = await mountPanel(t);
   panel.render(80); // settle the field's dimensions
+  panel.handleInput("a"); // the rain starts off now — this check is about its motion, so ask for it
   // Its own seeded field: the motion must be observable no matter when the check runs.
   panel.rainField = createRain({ width: 80, height: panel.height, seed: 7, density: 0.8 });
   panel.dispose(); // the repaint driver is gone — any motion now owes to time alone

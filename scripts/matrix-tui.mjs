@@ -11,10 +11,11 @@
  * the sampling knobs — plus the seats that walk it). A column that only repeats the config would be a
  * decoration, so every one carries a number the store answered.
  *
- *   node scripts/matrix-tui.mjs                      # the whole interface, rain and all
+ *   node scripts/matrix-tui.mjs                      # the whole interface
  *   node scripts/matrix-tui.mjs --plain              # one frame as text, for a pipe or a test
+ *   node scripts/matrix-tui.mjs --rain               # the falling glyphs behind it (toggle: a)
  *   node scripts/matrix-tui.mjs --scheme ember       # the primitives' colours; or --scheme ./mine.json
- *   node scripts/matrix-tui.mjs --no-rain --no-color # quiet, and readable on a mono terminal
+ *   node scripts/matrix-tui.mjs --no-color           # readable on a mono terminal
  *
  * Editing is deliberate. `⏎` expands an alias into the routes it walks, where `K`/`J` reorder them and
  * `d` drops one — each staged as a two-step *proposal*: the status bar shows it, the layer it would be
@@ -165,7 +166,7 @@ export function buildState({
     editor: null,
     textarea: null,
     help: false,
-    rain: true,
+    rain: false,
     color: true,
     message: source,
     layerReadError,
@@ -2177,7 +2178,7 @@ export async function main() {
   // operator's own overlay.
   const layerFile = value("layer", null) ?? undefined;
   const world = await loadWorld({ dbPath, layerFile, catalogue });
-  let state = { ...world.state, color: !has("no-color") && !process.env.NO_COLOR, rain: !has("no-rain"), scheme };
+  let state = { ...world.state, color: !has("no-color") && !process.env.NO_COLOR, rain: has("rain"), scheme };
   let palette = paletteFor({ color: state.color, scheme: state.scheme });
 
   if (plain) {

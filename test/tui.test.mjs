@@ -1082,8 +1082,8 @@ test("keys move the cursor, switch tabs by number, and never run off a table", (
     assert.equal(applyKey(world, key).state.tab, "aliases", `${key} walks the rows, not the tabs`);
   }
 
-  assert.equal(applyKey(world, "a").state.rain, false, "the rain toggles off");
-  assert.equal(applyKey(applyKey(world, "a").state, "a").state.rain, true, "and on again");
+  assert.equal(applyKey(world, "a").state.rain, true, "the rain toggles on");
+  assert.equal(applyKey(applyKey(world, "a").state, "a").state.rain, false, "and off again");
   assert.equal(applyKey(world, "c").state.color, false);
   assert.equal(applyKey(world, "?").state.help, true);
   assert.equal(applyKey(world, "q").effect, "quit");
@@ -2006,7 +2006,7 @@ test("the name prompt takes text: letters one key at a time, a paste whole, back
   let world = open;
   for (const key of ["z", "a", "i"]) world = applyKey(world, key).state;
   assert.equal(world.input.value, "zai", "one key at a time");
-  assert.equal(world.rain, true, "`a` is a letter in a name here, not the rain switch");
+  assert.equal(world.rain, false, "`a` is a letter in a name here, not the rain switch");
   assert.equal(applyKey(world, "backspace").state.input.value, "za", "backspace takes the last letter back");
   assert.equal(applyKey(open, "backspace").state.input.value, "", "and a blank name has nothing to take");
 
@@ -2712,9 +2712,9 @@ test("a frame keeps the table inside its panel and the detail under it", () => {
 test("the keys hint shows the rain state and that the numbers pick the tabs", () => {
   const palette = paletteFor({ color: false });
   const hint = (world) => gridLine(frameFor({ width: 150, height: 20, state: world, palette, clock: "" }), 19);
-  const on = hint(state());
+  const on = hint({ ...state(), rain: true });
   assert.match(on, /rain:ON/);
-  assert.match(hint({ ...state(), rain: false }), /rain:OFF/, "and says so when it is off");
+  assert.match(hint(state()), /rain:OFF/, "and it starts off, which the hint says out loud");
   for (const digit of ["1", "3"]) assert.ok(on.includes(digit), `the hint names tab key ${digit}`);
   assert.ok(on.includes("tab"), "the numbers are named as tabs");
 });

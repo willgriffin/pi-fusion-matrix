@@ -794,8 +794,9 @@ the same records — `~/.omp/agent/matrix.db` by default — and the interface r
 ```bash
 node scripts/ingest-metrics.mjs                 # both harnesses' stores into the index
 node scripts/ingest-metrics.mjs --rebuild       # replace it (the `rm` of the recovery rule)
-node scripts/matrix-tui.mjs                     # the roster, the rungs and the routes, with rain
-node scripts/matrix-tui.mjs --plain --no-rain   # one frame as text
+node scripts/matrix-tui.mjs                     # the roster, the rungs and the routes
+node scripts/matrix-tui.mjs --rain              # with the rain behind it (toggle: a)
+node scripts/matrix-tui.mjs --plain             # one frame as text
 ```
 
 The JSONL stays authoritative and the index is rebuildable: ingesting twice is identical, `--rebuild`
