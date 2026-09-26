@@ -758,8 +758,8 @@ and a no-id `/matrix <prompt>`.
 
 ## Commands, the tool, and the doctor
 
-- `/matrix` — open the interface (the fusions / aliases / personas tabs over the metrics store, rain
-  included) as a mounted panel: the harness keeps its terminal, which is why it is a component and not
+- `/matrix` — open the interface (the fusions / aliases / personas tabs over the metrics store) as a
+  mounted panel: the harness keeps its terminal, which is why it is a component and not
   the standalone driver run underneath a full-screen host. `/matrix fusions|aliases|personas` opens on
   that tab.
 - `/matrix <id> <prompt>` — run a named fusion; a `/matrix <prompt>` with no id uses `defaultFusion`,
@@ -796,6 +796,7 @@ node scripts/ingest-metrics.mjs                 # both harnesses' stores into th
 node scripts/ingest-metrics.mjs --rebuild       # replace it (the `rm` of the recovery rule)
 node scripts/matrix-tui.mjs                     # the roster, the rungs and the routes
 node scripts/matrix-tui.mjs --rain              # with the rain behind it (toggle: a)
+node scripts/matrix-tui.mjs --scheme ember      # the primitives' colours (matrix|ember|glacier, or a JSON file)
 node scripts/matrix-tui.mjs --plain             # one frame as text
 ```
 
@@ -811,11 +812,20 @@ with the count of seats it covers.
 The interface joins that index to the configuration, three tabs at a time: **fusions** (how each rung
 runs, how it ended, what it cost, what its reviews produced — with its routes and personas as rows
 underneath), **aliases** (what each alias names, its routes, and what the store saw it do), and
-**personas** (the seats: their prompts, knobs, and the fusions that place them). `e` proposes a
+**personas** (the seats: their prompts, knobs, and the fusions that place them). Missing is named,
+never zeroed: a rung the store saw zero times is `0`, a store that could not load is `—`, and a rung
+the store saw but the config no longer declares is a row of its own, marked `history` — the index
+keeps the rungs the roster has forgotten, so the table never reports a history it cannot place as no
+history at all. `e` proposes a
 change — a seat's candidate alias, an alias's route order, a persona's prompt or knobs — and the
 status bar shows it, the layer it would be written to, and whether the config still validates; `s`
-writes it and `esc` discards it. The rain is a real field (`scripts/tui-rain.mjs`, seeded and stepped
-by frame), drawn under the panels, and `a` turns it off; `c` drops the colour entirely, and `NO_COLOR`
+writes it and `esc` discards it. Every row that names a primitive wears that primitive's own colour —
+the five stage kinds, the pieces a decision walks, the alias a candidate names — and the colours come
+from schemes: `matrix` by default, `--scheme ember` or `glacier`, or `--scheme ./mine.json` laid over
+the default, with a name nobody knows refused at startup. The rain is a real field
+(`scripts/tui-rain.mjs`, seeded and stepped by frame) drawn under the interface — a row's own
+background is never a window onto it — and it starts off: `--rain` or `a` brings it, `c` drops the
+colour entirely, and `NO_COLOR`
 does the same on start. Every unit of the interface is pure and tested; only the driver needs a
 terminal. In a session, `/matrix` mounts that same interface as a panel (`/matrix
 fusions|aliases|personas` opens on a tab), so the interface opens inside a full-screen host without
