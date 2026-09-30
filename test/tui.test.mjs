@@ -549,6 +549,11 @@ test("every primitive wears its own colour, and the schemes are swappable", () =
   assert.equal(custom.kinds.single, palette.kinds.single);
   // A name nobody knows is refused with the names it could have chosen, and NO_COLOR drops the map.
   assert.throws(() => paletteFor({ color: true, scheme: "nope" }), /unknown scheme "nope"/);
+  // An inherited property name is a name nobody knows, not a scheme — `SCHEMES["toString"]` is truthy.
+  assert.throws(() => paletteFor({ color: true, scheme: "toString" }), /unknown scheme "toString"/);
+  assert.throws(() => paletteFor({ color: true, scheme: "constructor" }), /unknown scheme "constructor"/);
+  // A malformed value is refused rather than painted as a malformed escape.
+  assert.throws(() => paletteFor({ color: true, scheme: { parallel: "red" } }), /scheme entry "parallel"/);
   assert.deepEqual(paletteFor({ color: false }).kinds, {});
 });
 
@@ -556,10 +561,24 @@ test("a scheme is a name or a file, and a name nobody knows is refused at startu
   assert.equal(resolveScheme(undefined), "matrix");
   assert.equal(resolveScheme("ember"), "ember");
   assert.throws(() => resolveScheme("nope"), /unknown scheme "nope"/);
+  assert.throws(() => resolveScheme("constructor"), /unknown scheme "constructor"/, "an inherited property name is not a scheme");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tui-scheme-"));
   const file = path.join(dir, "mine.json");
   fs.writeFileSync(file, JSON.stringify({ parallel: [255, 0, 0] }));
   assert.deepEqual(resolveScheme(file), { parallel: [255, 0, 0] });
+  // A file that is not a map of known primitives to [r, g, b] numbers is refused, never silently
+  // defaulted: `null` would spread to nothing and hand back the whole default scheme.
+  for (const [name, contents] of [
+    ["null.json", "null"],
+    ["number.json", "5"],
+    ["string-value.json", JSON.stringify({ parallel: "red" })],
+    ["unknown-key.json", JSON.stringify({ prallell: [1, 2, 3] })],
+    ["short-triplet.json", JSON.stringify({ parallel: [255, 0] })],
+  ]) {
+    const bad = path.join(dir, name);
+    fs.writeFileSync(bad, contents);
+    assert.throws(() => resolveScheme(bad), /is not a scheme map/, `${name} is refused`);
+  }
 });
 
 test("the tree paints every primitive in its scheme's colour", () => {

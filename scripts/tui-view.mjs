@@ -75,8 +75,14 @@ export const SCHEMES = {
 export function paletteFor({ color = true, scheme = "matrix" } = {}) {
   const fg = (r, g, b) => `\x1b[38;2;${r};${g};${b}m`;
   const bg = (r, g, b) => `\x1b[48;2;${r};${g};${b}m`;
-  const named = typeof scheme === "string" ? SCHEMES[scheme] : { ...SCHEMES.matrix, ...scheme };
+  const named =
+    typeof scheme === "string" ? (Object.hasOwn(SCHEMES, scheme) ? SCHEMES[scheme] : undefined) : { ...SCHEMES.matrix, ...scheme };
   if (!named) throw new Error(`unknown scheme "${scheme}" — known schemes: ${Object.keys(SCHEMES).join(", ")}`);
+  // Inherited property names and malformed values are refused here too: `SCHEMES["toString"]` is
+  // truthy, and `"red"` would destructure into characters and paint a malformed escape.
+  const triplet = (value) => Array.isArray(value) && value.length === 3 && value.every((n) => Number.isFinite(n));
+  const bad = Object.entries(named).find(([, value]) => !triplet(value));
+  if (bad) throw new Error(`scheme entry "${bad[0]}" must be [r, g, b] numbers`);
   const kinds = color ? Object.fromEntries(Object.entries(named).map(([name, [r, g, b]]) => [name, fg(r, g, b)])) : {};
   if (!color) {
     return {

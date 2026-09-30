@@ -2155,8 +2155,21 @@ export async function commitProposal(state, { dbPath, cwd = process.cwd() } = {}
  */
 export function resolveScheme(arg) {
   const name = String(arg ?? "matrix");
-  if (SCHEMES[name]) return name;
-  if (fs.existsSync(name)) return { ...JSON.parse(fs.readFileSync(name, "utf8")) };
+  if (Object.hasOwn(SCHEMES, name)) return name;
+  if (fs.existsSync(name)) {
+    // A file is only a scheme if it is a map of known primitives to [r, g, b] numbers — anything
+    // else would spread to nothing and silently hand back the default nobody chose.
+    const parsed = JSON.parse(fs.readFileSync(name, "utf8"));
+    const entries = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? Object.entries(parsed) : [];
+    const triplet = (value) => Array.isArray(value) && value.length === 3 && value.every((n) => Number.isFinite(n));
+    const bad = entries.find(([key, value]) => !Object.hasOwn(SCHEMES.matrix, key) || !triplet(value));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || bad) {
+      throw new Error(
+        `scheme file "${name}" is not a scheme map — every key must be a known primitive (${Object.keys(SCHEMES.matrix).join(", ")}) and every value [r, g, b] numbers${bad ? ` (bad entry "${bad[0]}")` : ""}`,
+      );
+    }
+    return { ...parsed };
+  }
   throw new Error(`unknown scheme "${name}" — known schemes: ${Object.keys(SCHEMES).join(", ")}, or a path to a JSON scheme file`);
 }
 
