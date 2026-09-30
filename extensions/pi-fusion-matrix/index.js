@@ -14,9 +14,11 @@ import { LABEL_OUTCOMES, isOutcome } from "./labels.js";
 import path from "node:path";
 import process from "node:process";
 import { loadMatrixConfig, validateConfig, harnessName, executorOf, executorThinking, HARNESS_THINKING } from "./config.js";
+import { dispatchPlan } from "./dispatch.js";
 import { loadPi, loadTypebox, makeCallModel, createFusionStream, workItemDetail } from "./run.js";
 import { createDecide } from "./decide.js";
 import { runDoctor, formatFindings, repairSnippet, EXIT } from "./doctor.js";
+import { MatrixPanel, TAB_NAMES } from "../../scripts/tui-panel.mjs";
 
 export default async function (pi) {
   const { config, layers, sources } = loadMatrixConfig({ cwd: process.cwd() });
@@ -180,20 +182,32 @@ export default async function (pi) {
   });
 
   pi.registerCommand("matrix", {
-    description: "Run a named fusion: /matrix <id> <prompt>",
+    description: `Launch the interface with /matrix, or run a named fusion: /matrix <id> <prompt> (${fusionIds.join(", ")})`,
     handler: async (args, ctx) => {
-      const text = String(args ?? "").trim();
-      if (!text) {
-        ctx.ui.notify(`usage: /matrix <${fusionIds.join("|")}> <prompt>`, "error");
+      const plan = dispatchPlan(args, { fusions: config.fusions, tabs: TAB_NAMES, defaultFusion: config.defaultFusion });
+      // The bare spelling opens the interface, and so does one that names a tab. A mounted component,
+      // never a subprocess: the standalone driver takes the terminal (alternate screen, hidden cursor,
+      // raw stdin) and a full-screen program run under a full-screen host is what garbles the host.
+      // With no host UI there is nothing to mount, and the refusal says so by name.
+      if (plan.kind === "interface") {
+        if (!ctx.hasUI) {
+          ctx.ui.notify("the interface needs the interactive TUI", "error");
+          return;
+        }
+        await ctx.ui.custom(
+          (tui, _theme, keybindings, done) => new MatrixPanel({ tui, keybindings, done, ctx, cwd: ctx.cwd, tab: plan.tab }),
+          { overlay: true },
+        );
         return;
       }
-      const [first, ...rest] = text.split(/\s+/);
-      const fusion = config.fusions[first] ? first : (config.defaultFusion ?? fusionIds[0]);
-      const prompt = config.fusions[first] ? rest.join(" ") : text;
-      if (!prompt) {
+      if (plan.kind === "usage") {
         ctx.ui.notify("usage: /matrix <id> <prompt>", "error");
         return;
       }
+      const { fusion, prompt, notice } = plan;
+      // The free-text spelling is deliberate — `/matrix fix my bug` is a prompt for the default rung —
+      // but a silent fallback is not: a retired or mistyped id is named before the run is billed.
+      if (notice) ctx.ui.notify(notice);
 
       ctx.ui.setStatus("matrix", `🧠 ${fusion}…`);
 

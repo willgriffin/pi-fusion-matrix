@@ -14,19 +14,76 @@
  * statistic, so each tab's columns carry a number from the store.
  */
 
-/** The closed tab list, in display order. */
-export const TABS = ["aliases", "fusions", "routes"];
+import { promptPath } from "../extensions/pi-fusion-matrix/config.js";
+
+/** The closed tab list, in display order — fusions first, where the reader starts. The routes tab
+ * folded into fusions: a fusion's rows are its seats' routes, with what the store saw beside them. */
+export const TABS = ["fusions", "aliases", "personas"];
 
 const BOX = { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│", tee: "├", teeR: "┤" };
+
+/**
+ * Colour schemes: what every primitive the tree shows wears, by the primitive's own name — the five
+ * stage kinds, the pieces a decision node walks (`decision`, `choice`, `gate`), and the `alias` a
+ * candidate row names. A scheme is a plain name → [r, g, b] map over exactly those keys; the driver
+ * takes one by name (`--scheme ember`) or as a JSON file laid over the default, and a key no scheme
+ * names falls back to the interface's own ink. Under `NO_COLOR` the map is empty and that fallback
+ * does the honest thing.
+ */
+export const SCHEMES = {
+  matrix: {
+    parallel: [120, 200, 255],
+    single: [255, 210, 120],
+    decide: [255, 130, 190],
+    score: [190, 140, 255],
+    render: [120, 255, 220],
+    decision: [255, 160, 100],
+    choice: [230, 220, 120],
+    gate: [140, 180, 255],
+    alias: [255, 120, 120],
+  },
+  ember: {
+    parallel: [255, 180, 120],
+    single: [255, 120, 90],
+    decide: [255, 100, 150],
+    score: [255, 200, 140],
+    render: [255, 150, 60],
+    decision: [240, 110, 70],
+    choice: [255, 225, 170],
+    gate: [220, 130, 90],
+    alias: [255, 80, 80],
+  },
+  glacier: {
+    parallel: [120, 220, 255],
+    single: [170, 195, 255],
+    decide: [130, 155, 255],
+    score: [200, 230, 255],
+    render: [100, 255, 245],
+    decision: [90, 175, 255],
+    choice: [185, 215, 255],
+    gate: [150, 125, 255],
+    alias: [255, 145, 165],
+  },
+};
 
 /**
  * The palette: the rain's three levels, the interface's own ink, and the selection. `NO_COLOR` (or
  * `--no-color`) drops every escape but keeps the selection readable with reverse video — the
  * interface is usable without colour, which is the only honest way to offer a colour-heavy one.
+ * `scheme` names one of the SCHEMES or carries a custom name → [r, g, b] map merged over the default.
  */
-export function paletteFor({ color = true } = {}) {
+export function paletteFor({ color = true, scheme = "matrix" } = {}) {
   const fg = (r, g, b) => `\x1b[38;2;${r};${g};${b}m`;
   const bg = (r, g, b) => `\x1b[48;2;${r};${g};${b}m`;
+  const named =
+    typeof scheme === "string" ? (Object.hasOwn(SCHEMES, scheme) ? SCHEMES[scheme] : undefined) : { ...SCHEMES.matrix, ...scheme };
+  if (!named) throw new Error(`unknown scheme "${scheme}" — known schemes: ${Object.keys(SCHEMES).join(", ")}`);
+  // Inherited property names and malformed values are refused here too: `SCHEMES["toString"]` is
+  // truthy, and `"red"` would destructure into characters and paint a malformed escape.
+  const triplet = (value) => Array.isArray(value) && value.length === 3 && value.every((n) => Number.isFinite(n));
+  const bad = Object.entries(named).find(([, value]) => !triplet(value));
+  if (bad) throw new Error(`scheme entry "${bad[0]}" must be [r, g, b] numbers`);
+  const kinds = color ? Object.fromEntries(Object.entries(named).map(([name, [r, g, b]]) => [name, fg(r, g, b)])) : {};
   if (!color) {
     return {
       head: "",
@@ -37,19 +94,21 @@ export function paletteFor({ color = true } = {}) {
       box: "",
       title: "",
       accent: "",
+      kinds,
       selected: "\x1b[7m",
       reset: "\x1b[0m",
     };
   }
   return {
-    head: fg(205, 255, 205),
-    body: fg(0, 255, 120),
-    tail: fg(0, 120, 55),
+    head: fg(140, 235, 150),
+    body: fg(0, 150, 70),
+    tail: fg(0, 70, 32),
     ink: fg(180, 255, 190),
     dim: fg(110, 165, 115),
     box: fg(0, 190, 80),
     title: fg(0, 255, 140),
     accent: fg(255, 245, 150),
+    kinds,
     selected: bg(0, 190, 80) + fg(0, 20, 5),
     reset: "\x1b[0m",
   };
@@ -178,16 +237,34 @@ export function paintTable(grid, { columns, rows, row, col, width, height, curso
   }
   for (let i = first; i < rows.length && i - first < bodyRows; i += 1) {
     const selected = i === cursor;
-    const style = selected ? palette.selected : palette.ink;
-    const line = columns
-      .map((column, c) => pad(column.format ? column.format(rows[i]) : (rows[i][column.key] ?? ""), widths[c], column.align))
-      .join(" ".repeat(2));
+    const entry = rows[i];
+    const segments = columns.map((column, c) =>
+      pad(column.format ? column.format(entry) : (entry[column.key] ?? ""), widths[c], column.align),
+    );
     const y = row + 1 + (i - first);
-    put(grid, y, col, truncate(line, width), style);
+    // Painted column by column, because the identity column wears its row's primitive colour from
+    // the scheme while the numbers keep the interface's ink — and a selected row keeps the selection
+    // everywhere, so the cursor is still the loudest thing on screen.
+    let x = col;
+    for (let c = 0; c < segments.length; c += 1) {
+      const base = selected ? palette.selected : palette.ink;
+      if (c > 0) {
+        // The gap is painted like the row's own ink: an unstyled blank inside a data row would be a
+        // window onto the rain, and a row's background is not a window.
+        const room = Math.max(0, width - (x - col));
+        put(grid, y, x, " ".repeat(Math.min(2, room)), base);
+        x += 2;
+      }
+      const text = truncate(segments[c], width - (x - col));
+      if (!text) break;
+      const style = selected ? palette.selected : c === 0 ? (palette.kinds[entry.tint] ?? palette.ink) : base;
+      put(grid, y, x, text, style);
+      x += text.length;
+    }
     if (selected) {
       // The selection paints to the panel's edge, not just under the text: a highlighted row that
       // stops mid-width reads as a text style rather than as the cursor.
-      const used = Math.min(line.length, width);
+      const used = Math.min(segments.join("  ").length, width);
       fillRow(grid, y, col + used, width - used, " ", palette.selected);
     }
     at[i] = y;
@@ -249,70 +326,133 @@ const sumStats = (rows) => {
 };
 
 /**
+ * What one store aggregate becomes on a row: the counters, the two money bases kept apart, and the
+ * refusal tally. Shared by alias and route rows so both answer with the same fields — the parent is
+ * just the aggregate over exactly the store rows its children each hold one of.
+ */
+const statFields = (stats, hasStore = true) => ({
+  seats: seen(hasStore, stats.seats),
+  raised: seen(hasStore, stats.findings),
+  kept: seen(hasStore, stats.kept),
+  located: seen(hasStore, stats.located),
+  unlocated: seen(hasStore, stats.unlocated),
+  reportedUsd: stats.pricedSeats > 0 ? stats.reportedUsd : null,
+  pricedSeats: seen(hasStore, stats.pricedSeats),
+  // One basis per field: a column that added `estimated` into `list` would overstate list-basis money
+  // with no denominator for the folded part, and no reader could tell the two apart afterwards.
+  listUsd: seen(hasStore, stats.listUsd),
+  estimatedUsd: seen(hasStore, stats.estimatedUsd),
+  noRate: seen(hasStore, stats.noRate),
+  refusals: hasStore
+    ? Object.entries(stats.attempts)
+        .map(([reason, n]) => `${reason}×${n}`)
+        .join(" ")
+    : "—",
+  last: stats.lastSeatAt ? String(stats.lastSeatAt).slice(0, 16).replace("T", " ") : "—",
+});
+
+/**
  * The aliases tab: what each alias names, the routes it may walk, and what the store saw it do.
  * The money columns keep their basis in the label — reported and list are different questions and a
  * single `$` column would silently mix them.
+ *
+ * The list is flat — every expanded alias is followed by its route rows — so the cursor walks one
+ * index range and the painter still sees ordinary rows. Route rows keep config order and never join
+ * the parent sort: that order IS the data being edited (K/J moves a route within it), so a sorted
+ * child list would display a position no key could reproduce.
  */
-export function aliasRows({ config, modelStats }) {
-  const rows = [];
+export function aliasRows({ config, modelStats, expanded = {}, hasStore = true }) {
+  const groups = [];
   for (const [alias, spec] of Object.entries(config.aliases ?? {})) {
+    const providers = spec.providers ?? [];
     const stats = sumStats(
-      (spec.providers ?? []).map((ref) => statsFor(effectiveModel(spec, ref), typeof ref === "string" ? ref : (ref.id ?? "?"), modelStats)),
+      providers.map((ref) => statsFor(effectiveModel(spec, ref), typeof ref === "string" ? ref : (ref.id ?? "?"), modelStats)),
     );
-    rows.push({
-      alias,
-      model: spec.model,
-      routes: routeNames(spec).length,
-      routeDetail: routeDetail(spec),
-      seats: stats.seats,
-      raised: stats.findings,
-      kept: stats.kept,
-      located: stats.located,
-      unlocated: stats.unlocated,
-      reportedUsd: stats.pricedSeats > 0 ? stats.reportedUsd : null,
-      pricedSeats: stats.pricedSeats,
-      // One basis per field: a column that added `estimated` into `list` would overstate list-basis money
-      // with no denominator for the folded part, and no reader could tell the two apart afterwards.
-      listUsd: stats.listUsd,
-      estimatedUsd: stats.estimatedUsd,
-      noRate: stats.noRate,
-      refusals: Object.entries(stats.attempts)
-        .map(([reason, n]) => `${reason}×${n}`)
-        .join(" "),
-      last: stats.lastSeatAt ? String(stats.lastSeatAt).slice(0, 16).replace("T", " ") : "—",
+    // An alias with no providers has nothing to show, so it never claims to be expanded.
+    const open = providers.length > 0 && Boolean(expanded[alias]);
+    const children = open
+      ? providers.map((ref, index) => {
+          const provider = typeof ref === "string" ? ref : (ref.id ?? "?");
+          const model = effectiveModel(spec, ref);
+          return {
+            kind: "route",
+            parent: alias,
+            index,
+            count: providers.length,
+            provider,
+            model,
+            alias: `  ${index === providers.length - 1 ? "└" : "├"} ${provider}`,
+            routes: `${index + 1}/${providers.length}`,
+            ...statFields(sumStats([statsFor(model, provider, modelStats)]), hasStore),
+          };
+        })
+      : [];
+    groups.push({
+      parent: {
+        kind: "alias",
+        alias,
+        model: spec.model,
+        routes: routeNames(spec).length,
+        routeDetail: routeDetail(spec),
+        ...statFields(stats, hasStore),
+        expanded: open,
+        childCount: providers.length,
+      },
+      children,
     });
   }
-  return rows.sort((a, b) => b.seats - a.seats || a.alias.localeCompare(b.alias));
+  groups.sort((a, b) => (Number(b.parent.seats) || 0) - (Number(a.parent.seats) || 0) || a.parent.alias.localeCompare(b.parent.alias));
+  return groups.flatMap(({ parent, children }) => [parent, ...children]);
 }
 
+/**
+ * A store-derived number, honestly: a rung the store saw zero times is `0`; a store that could not
+ * load at all is `—`. Missing is named — never the silent zeros the store columns exist to avoid.
+ */
+const seen = (hasStore, value) => (hasStore ? (value ?? 0) : "—");
+
 /** The fusions tab: how each rung runs, how it ended, what it cost, and what its reviews produced. */
-export function fusionRows({ config, fusionStats, seatStats }) {
+export function fusionRows({ config, fusionStats, seatStats, hasStore = true }) {
   const rows = [];
   const byFusion = new Map(fusionStats.map((row) => [row.fusion, row]));
-  for (const [fusion, spec] of Object.entries(config.fusions ?? {})) {
+  // What one rung's store numbers become on a row — shared by the declared and the undeclared, so a
+  // rung the config dropped reads exactly like one it still names, minus the name.
+  const runFields = (fusion) => {
     const stats = byFusion.get(fusion) ?? null;
-    const seats = seatStats.filter((row) => row.fusion === fusion);
-    const degraded = seats.reduce((n, row) => n + row.degraded, 0);
+    const degraded = seatStats.filter((row) => row.fusion === fusion).reduce((n, row) => n + row.degraded, 0);
+    return {
+      runs: seen(hasStore, stats?.runs),
+      failures: seen(hasStore, stats?.failures),
+      seats: seen(hasStore, stats?.seats),
+      degraded: seen(hasStore, degraded),
+      sufficient: stats ? `${stats.cascades.sufficient}/${stats.cascades.total}` : "—",
+      verify: seen(hasStore, stats?.verifyChecks),
+      malformed: seen(hasStore, stats?.malformed),
+      located: seen(hasStore, stats?.marked.located),
+      unlocated: seen(hasStore, stats?.marked.unlocated),
+      reportedUsd: stats ? stats.cost.reported : null,
+      listUsd: stats ? stats.cost.list : seen(hasStore, 0),
+      estimatedUsd: stats ? stats.cost.estimated : seen(hasStore, 0),
+      last: stats?.lastRunAt ? String(stats.lastRunAt).slice(0, 16).replace("T", " ") : "—",
+    };
+  };
+  for (const [fusion, spec] of Object.entries(config.fusions ?? {})) {
     rows.push({
       fusion,
       mode: spec.mode ?? "?",
       face: spec.proxy ? `proxy→${spec.proxy.alias}` : spec.route ? "routes" : spec.execute ? "answers" : "deliberates",
-      runs: stats?.runs ?? 0,
-      failures: stats?.failures ?? 0,
-      seats: stats?.seats ?? 0,
-      degraded,
-      sufficient: stats ? `${stats.cascades.sufficient}/${stats.cascades.total}` : "—",
-      verify: stats?.verifyChecks ?? 0,
-      malformed: stats?.malformed ?? 0,
-      located: stats?.marked.located ?? 0,
-      unlocated: stats?.marked.unlocated ?? 0,
-      reportedUsd: stats ? stats.cost.reported : null,
-      listUsd: stats ? stats.cost.list : 0,
-      estimatedUsd: stats ? stats.cost.estimated : 0,
-      last: stats?.lastRunAt ? String(stats.lastRunAt).slice(0, 16).replace("T", " ") : "—",
+      ...runFields(fusion),
     });
   }
-  return rows.sort((a, b) => b.runs - a.runs || a.fusion.localeCompare(b.fusion));
+  // A rung that *ran* is shown whether or not the config still names it — the same rule the seats
+  // under it already followed: a roster edited (or a rung renamed) leaves store rows behind, the
+  // review route's own rungs among them, and a table that silently dropped them would report a
+  // history it cannot place as no history at all. The face says so: this row is history.
+  for (const fusion of byFusion.keys()) {
+    if (config.fusions?.[fusion]) continue;
+    rows.push({ fusion, mode: "—", face: "history", unconfigured: true, ...runFields(fusion) });
+  }
+  return rows.sort((a, b) => (Number(b.runs) || 0) - (Number(a.runs) || 0) || a.fusion.localeCompare(b.fusion));
 }
 
 /** The seat names a mode actually runs, in stage order — the seats a fusion's candidates must cover. */
@@ -330,9 +470,13 @@ export function modeSeats(mode) {
  * is the ordered list the seat walks; `answered` and `refusals` come from the store, so a seat whose
  * first candidate never runs is visible as such.
  */
-export function routeRows({ config, seatStats }) {
+export function routeRows({ config, seatStats, hasStore = true }) {
   const rows = [];
-  for (const [fusion, spec] of Object.entries(config.fusions ?? {})) {
+  // The fusions, declared or not: a rung the store saw but the config dropped still has seats to
+  // report, exactly as a renamed seat under a declared rung does.
+  const fusions = [...new Set([...Object.keys(config.fusions ?? {}), ...seatStats.map((row) => row.fusion)])];
+  for (const fusion of fusions) {
+    const spec = config.fusions?.[fusion] ?? {};
     const mode = config.modes?.[spec.mode];
     const configured = [...new Set([...modeSeats(mode), ...Object.keys(spec.candidates ?? {})])];
     // A seat that *ran* is shown whether or not the config still names it: a roster edited (or a seat
@@ -367,13 +511,464 @@ export function routeRows({ config, seatStats }) {
               .join(" ")
           : "",
         refusals,
-        seats: stat?.seats ?? 0,
-        degraded: stat?.degraded ?? 0,
-        tokens: stat?.tokens ?? 0,
+        seats: seen(hasStore, stat?.seats),
+        degraded: seen(hasStore, stat?.degraded),
+        tokens: seen(hasStore, stat?.tokens),
       });
     }
   }
   return rows.sort((a, b) => a.fusion.localeCompare(b.fusion) || a.seat.localeCompare(b.seat));
+}
+
+/**
+ * The latest `lastSeatAt` a set of seat rows holds, stamped and trimmed the way `statFields` reads `last` — a
+ * parent's "when did this last sit" over however many rows its aggregates summed.
+ */
+const lastStamp = (rows) => {
+  let at = null;
+  for (const row of rows) {
+    if (row.lastSeatAt && (!at || row.lastSeatAt > at)) at = row.lastSeatAt;
+  }
+  return at ? String(at).slice(0, 16).replace("T", " ") : "—";
+};
+
+/**
+ * How the prompt column reads a persona's prompt: the loader's own rule (`promptPath` says path) names the file,
+ * and inline text reports its line count — empty text is 0 lines, the count the editor's rows use.
+ */
+const promptKindFor = (prompt, source) => {
+  if (prompt && promptPath(prompt, source)) return `file ${prompt}`;
+  return `inline · ${prompt ? prompt.split("\n").length : 0} lines`;
+};
+
+/**
+ * The personas tab: what each persona is prompted to be beside what the store saw its seats do. Under an open
+ * persona sit the fusions that place it — the same (fusion, seat) rows the routes tab draws, `e` pointing one at
+ * an alias exactly as it does there — in the route rows' own order, the tree closing at the last. Parents sort by
+ * name: this list is edited (n/e/d), not ranked by traffic.
+ *
+ * A child's first column is its tree label (as an alias's routes are) and its `promptKind` holds the walk string
+ * beside the parent's prompt; its numbers are the one matching store row's own, never the parent's totals again.
+ */
+export function personaRows({ config, seatStats = [], sources = {}, expanded = {}, hasStore = true }) {
+  const rows = [];
+  const seats = routeRows({ config, seatStats, hasStore });
+  for (const name of Object.keys(config.personas ?? {}).sort((a, b) => a.localeCompare(b))) {
+    const persona = config.personas[name] ?? {};
+    const prompt = typeof persona.prompt === "string" ? persona.prompt : "";
+    const mine = seatStats.filter((stat) => stat.persona === name);
+    const under = seats.filter((row) => row.seat === name && !row.unconfigured);
+    // Like an alias with no providers, a persona no fusion places cannot be opened, whatever the map says.
+    const open = under.length > 0 && Boolean(expanded[name]);
+    const children = open
+      ? under.map((row, index) => {
+          const slice = seatStats.filter((stat) => stat.fusion === row.fusion && stat.persona === name);
+          return {
+            kind: "seat",
+            persona: `  ${index === under.length - 1 ? "└" : "├"} ${row.fusion}`,
+            parent: name,
+            fusion: row.fusion,
+            seat: name,
+            candidates: row.candidates,
+            promptKind: row.candidates,
+            walks: (config.fusions?.[row.fusion]?.candidates?.[name] ?? []).length,
+            refusals: row.refusals,
+            temperature: "—",
+            thinking: "—",
+            output: "—",
+            runs: seen(hasStore, slice.length),
+            seats: row.seats,
+            degraded: row.degraded,
+            tokens: row.tokens,
+            last: lastStamp(slice),
+          };
+        })
+      : [];
+    rows.push(
+      {
+        kind: "persona",
+        persona: name,
+        promptKind: promptKindFor(prompt, sources.personas?.[name]),
+        temperature: persona.temperature ?? "—",
+        thinking: persona.thinking ?? "—",
+        output: persona.output ?? "—",
+        runs: seen(hasStore, mine.length),
+        seats: seen(
+          hasStore,
+          mine.reduce((n, stat) => n + stat.seats, 0),
+        ),
+        degraded: seen(
+          hasStore,
+          mine.reduce((n, stat) => n + stat.degraded, 0),
+        ),
+        tokens: seen(
+          hasStore,
+          mine.reduce((n, stat) => n + stat.tokens, 0),
+        ),
+        last: lastStamp(mine),
+        expanded: open,
+        childCount: under.length,
+      },
+      ...children,
+    );
+  }
+  return rows;
+}
+
+/** Every tree row carries every column: a row that lacked one would read as an empty cell, not a dash. */
+const treeRow = ({ hasStore = true, ...fields }) => ({
+  mode: "—",
+  face: "—",
+  runs: seen(hasStore, 0),
+  failures: seen(hasStore, 0),
+  seats: seen(hasStore, 0),
+  degraded: seen(hasStore, 0),
+  sufficient: "—",
+  verify: seen(hasStore, 0),
+  malformed: seen(hasStore, 0),
+  located: seen(hasStore, 0),
+  unlocated: seen(hasStore, 0),
+  reportedUsd: null,
+  estimatedUsd: seen(hasStore, 0),
+  listUsd: seen(hasStore, 0),
+  last: "—",
+  answered: "",
+  refusals: "",
+  ...fields,
+});
+
+/**
+ * The fusions tab as a tree: a fusion opens to the decision its route walks — its choices, its
+ * editable branches, its gate, and what it answered underneath (the store's rows, keyed by the very
+ * node paths the runner records) — then its mode's stages (a shape is shared, so its seats are read
+ * here rather than edited), then each seat's candidate chain. This is where the `routes` tab lives
+ * now: a fusion's rows are its seats' routes, with what the store saw beside them.
+ *
+ * A row's `id` keys `expanded`, and its `editPath` is where in the fusion spec an edit lands — one
+ * locator for every editor, from a choice's description to a branch's target.
+ */
+export function fusionTree({ config, fusionStats = [], seatStats = [], decideRows = [], expanded = {}, hasStore = true }) {
+  const rows = [];
+  const parents = fusionRows({ config, fusionStats, seatStats, hasStore });
+  const seatRows = routeRows({ config, seatStats, hasStore });
+  const resultAt = (fusion, path) => decideRows.find((row) => row.fusion === fusion && row.path === path) ?? null;
+  const indent = (depth, mark = "") => `${"  ".repeat(Math.max(0, depth))}${mark}`;
+
+  const branchLabel = (then, level) => {
+    if (then === undefined) return "this " + (level === "route" ? "fusion" : "chain");
+    if (typeof then === "string") return then;
+    if (then && typeof then === "object") {
+      if (typeof then.run === "string") return then.run;
+      if (typeof then.alias === "string") return then.alias;
+      if (then.decide !== undefined) return "another decision";
+    }
+    return "?";
+  };
+
+  /** One decision node's rows: itself, and — when open — its choices (with nested decisions under
+   * them), its gate, and its result. `nodePath` is the path the runner records for it. */
+  const decisionRows = ({ spec, sufficientWhen, otherwiseNode, level, nodePath, editPath, fusion, depth, id, label, mark }) => {
+    const open = Boolean(expanded[id]);
+    const result = resultAt(fusion, nodePath);
+    rows.push(
+      treeRow({
+        hasStore,
+        kind: "decision",
+        tint: "decision",
+        fusionId: fusion,
+        id,
+        depth,
+        label: indent(depth, mark) + label,
+        fusion: indent(depth, mark) + label,
+        nodePath,
+        editPath,
+        decide: spec,
+        sufficientWhen,
+        face: "decision",
+        sufficient: result ? `${result.sufficient}/${result.total}` : "—",
+        last: result?.latest ? `${result.latest.choice ?? "?"}` : "—",
+        result,
+        expanded: open,
+        childCount: 1 + Object.keys(spec?.criteria ?? {}).length + (otherwiseNode !== undefined ? 1 : 0),
+      }),
+    );
+    if (!open) return;
+    for (const [option, value] of Object.entries(spec?.criteria ?? {})) {
+      const then = value && typeof value === "object" ? value.then : undefined;
+      const choiceId = `${id}/${option}`;
+      rows.push(
+        treeRow({
+          hasStore,
+          kind: "choice",
+          tint: "choice",
+          fusionId: fusion,
+          id: choiceId,
+          depth: depth + 1,
+          label: indent(depth + 1, "├ ") + `choice ${option} → ${branchLabel(then, level)}`,
+          fusion: indent(depth + 1, "├ ") + `choice ${option} → ${branchLabel(then, level)}`,
+          option,
+          then,
+          nodePath,
+          editPath: [...editPath, "criteria", option],
+          level,
+          face: "branch",
+          last: result?.tallies?.[option] !== undefined ? `${option}×${result.tallies[option]}` : "—",
+          expanded: Boolean(expanded[choiceId]),
+          childCount: then && typeof then === "object" && then.decide !== undefined ? 1 : 0,
+        }),
+      );
+      if (then && typeof then === "object" && then.decide !== undefined && expanded[choiceId]) {
+        rows.push(
+          ...decisionRowsFor({
+            node: then,
+            level,
+            nodePath: `${nodePath}/${option}`,
+            editPath: [...editPath, "criteria", option, "then"],
+            fusion,
+            depth: depth + 2,
+            id: `${choiceId}~`,
+            label: "decision",
+            mark: "",
+          }),
+        );
+      }
+    }
+    if (otherwiseNode !== undefined) {
+      rows.push(
+        treeRow({
+          hasStore,
+          kind: "choice",
+          tint: "choice",
+          fusionId: fusion,
+          id: `${id}/~`,
+          depth: depth + 1,
+          label: indent(depth + 1, "├ ") + `otherwise → ${branchLabel(otherwiseNode, level)}`,
+          fusion: indent(depth + 1, "├ ") + `otherwise → ${branchLabel(otherwiseNode, level)}`,
+          option: "~",
+          then: otherwiseNode,
+          nodePath,
+          editPath: [...editPath, "otherwise"],
+          level,
+          face: "branch",
+        }),
+      );
+    }
+    const gate = sufficientWhen ?? (level === "route" ? { minConfidence: 0.5 } : undefined);
+    rows.push(
+      treeRow({
+        hasStore,
+        kind: "gate",
+        tint: "gate",
+        fusionId: fusion,
+        id: `${id}/gate`,
+        depth: depth + 1,
+        label:
+          indent(depth + 1, "├ ") +
+          `gate: ${
+            gate
+              ? Object.entries(gate)
+                  .map(([k, v]) => `${k} ${Array.isArray(v) ? v.join("|") : v}`)
+                  .join(" ")
+              : "none — an answer always holds"
+          }`,
+        fusion: indent(depth + 1, "├ ") + "gate",
+        nodePath,
+        editPath: [...editPath, "sufficientWhen"],
+        sufficientWhen: gate,
+        criteria: spec?.criteria ?? {},
+        face: "gate",
+      }),
+    );
+    if (result) {
+      rows.push(
+        treeRow({
+          hasStore,
+          kind: "result",
+          fusionId: fusion,
+          id: `${id}/result`,
+          depth: depth + 1,
+          label:
+            indent(depth + 1, "└ ") +
+            `result: ${result.latest ? `${result.latest.choice ?? "?"}${result.latest.confidence != null ? ` conf ${result.latest.confidence}` : ""}` : "—"} · ${
+              Object.entries(result.tallies ?? {})
+                .map(([o, n]) => `${o}×${n}`)
+                .join(" ") || "no answers"
+            }`,
+          fusion: indent(depth + 1, "└ ") + "result",
+          nodePath,
+          result,
+          face: "result",
+          sufficient: `${result.sufficient}/${result.total}`,
+          last: result?.latest?.at ? String(result.latest.at).slice(0, 16).replace("T", " ") : "—",
+        }),
+      );
+    }
+  };
+  // The route node is flat at its root (its `criteria` lives on `fusion.route`) and wrapped one level
+  // down (`{decide, otherwise, sufficientWhen}`) — today's spelling, kept.
+  const decisionRowsFor = ({ node, level, nodePath, editPath, fusion, depth, id, label, mark }) => {
+    const at = rows.length;
+    decisionRows({
+      spec: node.decide ?? node,
+      sufficientWhen: node.sufficientWhen,
+      otherwiseNode: node.otherwise,
+      level,
+      nodePath,
+      editPath: node.decide === undefined ? editPath : [...editPath, "decide"],
+      fusion,
+      depth,
+      id,
+      label: `${label} — ${String(node.decide?.instructions ?? node.instructions ?? "").slice(0, 40)}`,
+      mark,
+    });
+    return rows.splice(at);
+  };
+
+  for (const parent of parents) {
+    const fusion = parent.fusion;
+    const spec = config.fusions?.[fusion] ?? {};
+    const id = `f:${fusion}`;
+    const open = Boolean(expanded[id]);
+    const mode = config.modes?.[spec.mode];
+    const seatsHere = seatRows.filter((row) => row.fusion === fusion);
+    rows.push(
+      treeRow({
+        hasStore,
+        ...parent,
+        kind: "fusion",
+        fusionId: fusion,
+        id,
+        depth: 0,
+        label: fusion,
+        fusion,
+        editPath: [],
+        expanded: open,
+        childCount: 1 + (mode?.stages ?? []).length,
+      }),
+    );
+    if (!open) continue;
+    if (spec.route) {
+      rows.push(
+        ...decisionRowsFor({
+          node: spec.route,
+          level: "route",
+          nodePath: `${fusion}.route`,
+          editPath: ["route"],
+          fusion,
+          depth: 1,
+          id: `${id}:route`,
+          label: "◆ route",
+          mark: "",
+        }),
+      );
+    }
+    (mode?.stages ?? []).forEach((stage, index) => {
+      const kind = stage.parallel ? "parallel" : stage.single ? "single" : stage.decide ? "decide" : stage.score ? "score" : "render";
+      const names = stage.parallel ?? (stage.single ? [stage.single] : []);
+      const stageId = `${id}:stage${index}`;
+      const stageOpen = Boolean(expanded[stageId]);
+      rows.push(
+        treeRow({
+          hasStore,
+          kind: "stage",
+          tint: kind,
+          fusionId: fusion,
+          id: stageId,
+          depth: 1,
+          label: indent(1) + `stage ${index + 1} · ${kind}${names.length ? ` (${names.join(", ")})` : ""}`,
+          fusion: indent(1) + `stage ${index + 1} · ${kind}`,
+          face: kind,
+          editPath: [],
+          expanded: stageOpen,
+          childCount: names.length + (stage.decide ? 1 : 0),
+        }),
+      );
+      if (!stageOpen) return;
+      if (stage.decide) {
+        rows.push(
+          ...decisionRowsFor({
+            node: { decide: stage.decide, sufficientWhen: stage.sufficientWhen },
+            level: "stage",
+            nodePath: `${fusion}.${stage.name ?? `stage${index}`}`,
+            editPath: ["mode"], // a mode is shared: its stages are read here, not edited from one fusion
+            fusion,
+            depth: 2,
+            id: `${stageId}:decide`,
+            label: "◆ decide",
+            mark: "",
+          }),
+        );
+      }
+      for (const persona of names) {
+        const seat = seatsHere.find((row) => row.seat === persona) ?? null;
+        const seatId = `${id}@${persona}`;
+        const seatOpen = Boolean(expanded[seatId]);
+        const chain = spec.candidates?.[persona] ?? [];
+        rows.push(
+          treeRow({
+            hasStore,
+            kind: "seat",
+            fusionId: fusion,
+            id: seatId,
+            depth: 2,
+            label: indent(2, "├ ") + persona,
+            fusion: indent(2, "├ ") + persona,
+            persona,
+            editPath: ["candidates", persona],
+            face: "seat",
+            answered: seat?.answered ?? (hasStore ? "" : "—"),
+            refusals: seat?.refusals ?? (hasStore ? "" : "—"),
+            seats: seen(hasStore, seat?.seats),
+            degraded: seen(hasStore, seat?.degraded),
+            expanded: seatOpen,
+            childCount: chain.length,
+          }),
+        );
+        if (!seatOpen) continue;
+        chain.forEach((entry, entryIndex) => {
+          const entryId = `${seatId}#${entryIndex}`;
+          const last = entryIndex === chain.length - 1;
+          const mark = last ? "└ " : "├ ";
+          if (entry && typeof entry === "object" && entry.decide !== undefined) {
+            rows.push(
+              ...decisionRowsFor({
+                node: entry,
+                level: "chain",
+                nodePath: `${fusion}.${persona}#${entryIndex}`,
+                editPath: ["candidates", persona, entryIndex, "decide"],
+                fusion,
+                depth: 3,
+                id: entryId,
+                label: `◆ decision`,
+                mark,
+              }),
+            );
+            return;
+          }
+          const aliasName = typeof entry === "string" ? entry : (entry?.alias ?? "?");
+          rows.push(
+            treeRow({
+              hasStore,
+              kind: "candidate",
+              tint: "alias",
+              fusionId: fusion,
+              id: entryId,
+              depth: 3,
+              label: indent(3, mark) + aliasName,
+              fusion: indent(3, mark) + aliasName,
+              persona,
+              entryIndex,
+              editPath: ["candidates", persona, entryIndex],
+              face: "alias",
+              answered: seat?.answered ?? "",
+              refusals: seat?.refusals ?? "",
+            }),
+          );
+        });
+      }
+    });
+  }
+  return rows;
 }
 
 /** The columns each tab shows. Every one carries a number the store answered. */
@@ -395,7 +990,7 @@ export function columnsFor(tab) {
     ];
   if (tab === "fusions")
     return [
-      { key: "fusion", label: "fusion", min: 10, max: 16 },
+      { key: "fusion", label: "fusion", min: 10, max: 28 },
       { key: "mode", label: "mode", min: 10, max: 18 },
       { key: "face", label: "face", min: 9, max: 16 },
       { key: "runs", label: "runs", align: "right", min: 4 },
@@ -410,7 +1005,21 @@ export function columnsFor(tab) {
       { key: "reportedUsd", label: "$report", align: "right", min: 8, format: (row) => money(row.reportedUsd) },
       { key: "estimatedUsd", label: "$est", align: "right", min: 7, format: (row) => (row.estimatedUsd ? money(row.estimatedUsd) : "—") },
       { key: "listUsd", label: "$list", align: "right", min: 8, format: (row) => (row.listUsd ? money(row.listUsd) : "—") },
+      { key: "answered", label: "answered (store)", min: 10, max: 22 },
+      { key: "refusals", label: "refused", min: 8, max: 22 },
       { key: "last", label: "last run", min: 10, max: 16 },
+    ];
+  if (tab === "personas")
+    return [
+      { key: "persona", label: "persona", min: 10, max: 20 },
+      { key: "promptKind", label: "prompt", min: 12, max: 34 },
+      { key: "temperature", label: "temperature", align: "right", min: 5 },
+      { key: "thinking", label: "thinking", min: 4 },
+      { key: "output", label: "output", min: 4 },
+      { key: "runs", label: "runs", align: "right", min: 4 },
+      { key: "seats", label: "seats", align: "right", min: 5 },
+      { key: "degraded", label: "degraded", align: "right", min: 4 },
+      { key: "tokens", label: "tokens", align: "right", min: 6, format: (row) => (row.tokens ? compact(row.tokens) : "—") },
     ];
   return [
     { key: "fusion", label: "fusion", min: 10, max: 16 },

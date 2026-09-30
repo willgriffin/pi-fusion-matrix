@@ -49,6 +49,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { nodeParent } from "../extensions/pi-fusion-matrix/config.js";
 
 import { DEFAULT_ROOTS, FUSION_API, extractSession, findSessions, isFinding, parseLines, pathClaim } from "./session-report.mjs";
 
@@ -63,7 +64,6 @@ export const DEFAULT_DB = path.join(os.homedir(), ".omp", "agent", "matrix.db");
 export const DEFAULT_CATALOGUE = path.join(os.homedir(), ".omp", "agent", "models.db");
 
 /* ------------------------------------------------------------------ schema */
-
 const TABLES = {
   meta: `CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
   store_file: `CREATE TABLE store_file (
@@ -654,7 +654,10 @@ export function rowsForSession(session) {
       cascades: cascades.map((c, idx) => ({
         idx,
         seat: str(c?.seat),
-        kind: str(c?.kind),
+        // A recorded node PATH rides the `kind` column — no schema migration for a derived cache that
+        // is rebuilt from records. A record that predates node paths keeps its old `kind` word, which
+        // `decideResults` recognises by shape (a path always carries `.`, `#` or `/`; "decision" does not).
+        kind: str(c?.path) ?? str(c?.kind),
         sufficient: c?.sufficient ? 1 : 0,
         advanced_to: str(c?.advancedTo),
         choice: str(c?.answer?.choice),
@@ -755,15 +758,60 @@ export function rowsForSession(session) {
 
 /* ------------------------------------------------------------------ sqlite */
 
-let cachedSqlite;
-export async function loadSqlite() {
-  if (cachedSqlite === undefined) {
+/**
+ * Bun's `Database` wearing the `DatabaseSync` surface the store speaks: the same constructor shape
+ * (`readOnly` mapped to the option Bun spells lowercase), `prepare` returning `all`/`get`/`run`, and
+ * `exec` as a multi-statement `run`. The interface runs inside the harness as well as under node, and
+ * the store should not have to know which runtime it is in.
+ */
+export function adaptDatabase(sqlite) {
+  return {
+    DatabaseSync: class DatabaseSync {
+      #db;
+      constructor(filename, options = {}) {
+        // No options means *no second argument*: Bun reads an empty object as open flags of zero and
+        // refuses to open at all (`flags must include SQLITE_OPEN_READONLY or SQLITE_OPEN_READWRITE`).
+        this.#db = new sqlite.Database(filename, options.readOnly ? { readonly: true } : undefined);
+      }
+      prepare(sql) {
+        const stmt = this.#db.prepare(sql);
+        return {
+          all: (...args) => stmt.all(...args),
+          get: (...args) => stmt.get(...args),
+          run: (...args) => stmt.run(...args),
+        };
+      }
+      exec(sql) {
+        this.#db.run(sql);
+      }
+      close() {
+        this.#db.close();
+      }
+    },
+  };
+}
+
+/**
+ * The store's sqlite driver: the runtime's own when it has one, Bun's `Database` worn through the
+ * adapter when it does not. A driver is only a driver if it speaks `DatabaseSync`; a runtime with
+ * neither gets `null`, which the caller names.
+ */
+export async function resolveSqlite(importer = (name) => import(name)) {
+  for (const name of ["node:sqlite", "bun:sqlite"]) {
     try {
-      cachedSqlite = await import("node:sqlite");
+      const sqlite = await importer(name);
+      if (sqlite?.DatabaseSync) return sqlite;
+      if (sqlite?.Database) return adaptDatabase(sqlite);
     } catch {
-      cachedSqlite = null;
+      // This runtime does not ship that driver; the next name gets its chance.
     }
   }
+  return null;
+}
+
+let cachedSqlite;
+export async function loadSqlite() {
+  if (cachedSqlite === undefined) cachedSqlite = await resolveSqlite();
   return cachedSqlite;
 }
 
@@ -774,7 +822,7 @@ export async function loadSqlite() {
  * without leaving the file.
  */
 export function openStore(dbPath, { sqlite = cachedSqlite, rebuild = false } = {}) {
-  if (!sqlite) throw new Error("openStore needs node:sqlite — call loadSqlite() first, or pass { sqlite }");
+  if (!sqlite) throw new Error("openStore needs a sqlite driver — call loadSqlite() first, or pass { sqlite }");
   const db = new sqlite.DatabaseSync(dbPath);
   let existing = null;
   try {
@@ -1434,6 +1482,108 @@ export function byProxyAlias(db) {
  */
 const routeKey = (alias, provider, model) =>
   str(alias) ?? (str(provider) && str(model) ? `${provider}/${model}` : (str(provider) ?? "unknown"));
+
+/** JSON that a half-written record cannot break: a row that will not parse reads as absent. */
+const parseJson = (text) => {
+  try {
+    return JSON.parse(text ?? "null");
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * What each decision node answered, one row per usage context — the same node reached under a
+ * different parent is a different usage and keeps its own row, which is what "the stats for the
+ * context it was used" means. Tracking keeps `parent` on the record; the path derivation is only the
+ * fallback for records that predate it. Tallies count the option each answer named and `latest` is
+ * the newest run's answer at that path. A record from before node paths keeps loading and keeps
+ * counting toward its run; it names no node, so it gets no row rather than a wrong one.
+ */
+export function decideResults(db) {
+  const rows = new Map();
+  const pathLike = (value) => typeof value === "string" && /[.#/]/.test(value);
+  const entry = (fusion, path, recordedParent) => {
+    const key = `${fusion}\u0000${path}`;
+    let row = rows.get(key);
+    if (!row) {
+      row = {
+        fusion,
+        path,
+        parent: nodeParent(path),
+        recorded: false,
+        total: 0,
+        sufficient: 0,
+        tallies: Object.create(null),
+        latest: null,
+      };
+      rows.set(key, row);
+    }
+    if (recordedParent && !row.recorded) {
+      row.parent = recordedParent;
+      row.recorded = true;
+    }
+    return row;
+  };
+  const record = (row, { at, answer, option, sufficient }) => {
+    row.total += 1;
+    if (sufficient) row.sufficient += 1;
+    if (typeof option === "string") row.tallies[option] = (row.tallies[option] ?? 0) + 1;
+    if (at && (!row.latest || String(at) > row.latest.at)) {
+      row.latest = {
+        at: String(at),
+        choice: answer?.choice ?? null,
+        confidence: answer?.confidence ?? null,
+        probabilities: answer?.probabilities ?? null,
+      };
+    }
+  };
+  // Seat cascades: the node path rides the `kind` column, and the recorded parent rides the run's
+  // own details.
+  const cascades = db
+    .prepare(`SELECT c.*, r.at AS run_at, r.fusion AS fusion, r.details_json AS details_json FROM cascade c JOIN run r ON r.id = c.run_id`)
+    .all();
+  for (const r of cascades) {
+    if (!pathLike(r.kind)) continue;
+    const parent = parseJson(r.details_json)?.cascades?.[r.idx]?.parent ?? null;
+    const answer = parseJson(r.answer_json);
+    record(entry(r.fusion ?? "(none)", r.kind, parent), {
+      at: r.run_at,
+      answer: answer ?? { choice: r.choice, confidence: r.confidence },
+      option: r.choice ?? answer?.choice ?? null,
+      sufficient: r.sufficient === 1,
+    });
+  }
+  // Route walks name every step's path and parent outright.
+  for (const r of db.prepare(`SELECT fusion, at, routing_json FROM run WHERE routing_json IS NOT NULL`).all()) {
+    const routing = parseJson(r.routing_json);
+    for (const step of routing?.walk ?? []) {
+      if (!pathLike(step?.path)) continue;
+      // A node's results bind to the fusion that owns the node — recorded on the step at walk time,
+      // where the id is exact (a fusion id may contain dots, so re-deriving it from the path is
+      // approximate at best) — not the run's final fusion: a redirected run records every hop's
+      // steps, and the tree reads each under its own route. Walks recorded before the field existed
+      // fall back to the run's fusion, which is all they ever claimed.
+      record(entry(step.fusion ?? r.fusion ?? "(none)", step.path, step.parent ?? null), {
+        at: r.at,
+        answer: step.answer ?? null,
+        option: step.option ?? null,
+        sufficient: step.branch !== "declined",
+      });
+    }
+  }
+  const out = [...rows.values()].map((r) => ({
+    fusion: r.fusion,
+    path: r.path,
+    parent: r.parent,
+    total: r.total,
+    sufficient: r.sufficient,
+    tallies: r.tallies,
+    latest: r.latest,
+  }));
+  out.sort((a, b) => (a.fusion === b.fusion ? a.path.localeCompare(b.path) : String(a.fusion).localeCompare(String(b.fusion))));
+  return { rows: out };
+}
 
 /**
  * What each fusion's seat actually ran, route by route: the answer a seat gave (alias, provider,

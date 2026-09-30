@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import {
   aggregate,
   buildReport,
+  decisionLines,
   extractSession,
   joinPlanWindows,
   money,
@@ -2521,5 +2522,61 @@ describe("seats by model", () => {
         .filter((line) => line.includes("deepseek-v4-pro"))
         .join(" // "),
     );
+  });
+});
+
+describe("decision nodes in their usage context", () => {
+  test("a nested walk renders both nodes under their parents, and the fusion it routed to", () => {
+    // Tracking keeps the parent so results read for the context they were used in: each step's path
+    // names the node it hangs under and the line indents by depth.
+    const details = {
+      routing: {
+        walk: [
+          { path: "deep.route", parent: "deep", answer: { choice: "deeper", confidence: 0.9 }, option: "deeper", branch: "then" },
+          {
+            path: "deep.route/deeper",
+            parent: "deep.route",
+            answer: { choice: "deeper", confidence: 0.2 },
+            option: "deeper",
+            branch: "declined",
+          },
+        ],
+        answer: { choice: "deeper", confidence: 0.9 },
+        declined: "confidence 0.2 below 0.95",
+        routedTo: "target2",
+      },
+      cascades: [
+        {
+          seat: "technical",
+          kind: "decision",
+          path: "chained.technical#0",
+          parent: "chained.technical",
+          branch: "then:go",
+          answer: { choice: "go" },
+          sufficient: false,
+        },
+      ],
+    };
+    const lines = decisionLines(details);
+    const text = lines.join("\n");
+    assert.match(text, /deep\.route · deeper · then/);
+    assert.match(text, /deep\.route\/deeper · deeper · declined/, "the declined step says so at its own node");
+    assert.match(text, /→ routed to target2/, "the fusion it routed to is named");
+    assert.match(text, /chained\.technical#0 · technical · then:go/, "a chain entry names its chain");
+    assert.ok(lines[1].startsWith("  ↪"), `the nested step indents under its parent: ${JSON.stringify(lines[1])}`);
+  });
+
+  test("a record from before node paths invents no node lines", () => {
+    // The walk and the paths are what a node line is made of: a record that predates them renders its
+    // own label exactly as before, plus at most the outcome line it already earned.
+    assert.deepEqual(decisionLines({ routing: { answer: { choice: "standard" }, threshold: 0.6, routedTo: "review-check" } }), [
+      "→ routed to review-check",
+    ]);
+    assert.deepEqual(decisionLines({ routing: { answer: { choice: "standard" }, threshold: 0.6, declined: "no option matched" } }), []);
+    assert.deepEqual(
+      decisionLines({ cascades: [{ seat: "judge", kind: "decision", sufficient: true, answer: { choice: "agrees" } }] }),
+      [],
+    );
+    assert.deepEqual(decisionLines(undefined), []);
   });
 });

@@ -10,7 +10,15 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadMatrixConfig, mergeConfig, validateConfig, executorOf, executorThinking } from "../extensions/pi-fusion-matrix/config.js";
+import {
+  loadMatrixConfig,
+  mergeConfig,
+  validateConfig,
+  executorOf,
+  executorThinking,
+  nodeParent,
+  optionThen,
+} from "../extensions/pi-fusion-matrix/config.js";
 
 const { config: packaged } = loadMatrixConfig({ cwd: process.cwd(), layers: ["packaged"] });
 const deep = (value) => JSON.parse(JSON.stringify(value));
@@ -25,7 +33,7 @@ test("a verify question's warning bar is a number between 0 and 1, or a named lo
   const withBar = (warnBelow) =>
     errorsFor({
       fusions: {
-        "review-quick": {
+        "review-check": {
           verify: [{ state: "{{synthesis}}", questions: { addresses_question: { type: "noul", instructions: "x", warnBelow } } }],
         },
       },
@@ -36,10 +44,10 @@ test("a verify question's warning bar is a number between 0 and 1, or a named lo
   }
 });
 
-test("the packaged review rungs declare their disposition seats", () => {
+test("the packaged review rung declares its disposition seats", () => {
   // The declaration is what makes the schema the *rung's*: these seats answer findings as data, and the mode's
   // last stage seat is one of them, because that answer is the one the run records.
-  for (const rung of ["review-quick", "review-check", "smrt-review"]) {
+  for (const rung of ["review-check"]) {
     const declared = packaged.fusions[rung].disposition?.personas ?? [];
     const stages = packaged.modes[packaged.fusions[rung].mode].stages;
     const lastSeat = stages[stages.length - 1].single;
@@ -56,66 +64,74 @@ test("every disposition rule is a named load error", () => {
   const rules = [
     [
       "an empty declaration",
-      { fusions: { "review-quick": { disposition: { personas: [] } } } },
+      { fusions: { "review-check": { disposition: { personas: [] } } } },
       /disposition needs a non-empty personas list/,
     ],
     // `mergeConfig` deep-merges and ignores `undefined`, so a rule that needs a key *gone* is expressed as a
     // fusion that never had it rather than as a patch that tries to remove one.
     [
       "no personas key",
-      { fusions: { "review-quick": { disposition: { personas: null } } } },
+      { fusions: { "review-check": { disposition: { personas: null } } } },
       /disposition needs a non-empty personas list/,
     ],
     // A *list* of names, not a name: a string would iterate its own letters. The issue's own spelling
     // (`persona`) has to fail with the key that is read rather than pass as an unknown extra key.
     [
       "a names value that is not a list",
-      { fusions: { "review-quick": { disposition: { personas: "review-synth" } } } },
+      { fusions: { "review-check": { disposition: { personas: "review-synth" } } } },
       /disposition needs a non-empty personas list/,
     ],
     [
       "the singular spelling",
-      { fusions: { quick: { disposition: { persona: "technical" } } } },
+      { fusions: { cheap: { disposition: { persona: "technical" } } } },
       /disposition needs a non-empty personas list/,
     ],
     [
       "a persona the mode does not run",
-      { fusions: { "review-quick": { disposition: { personas: ["review-skeptic", "review-synth", "judge"] } } } },
-      /disposition names "judge", which mode "review-single" does not run/,
+      // Every JSON persona the six paths ship is run by `review-committee`, so the offender is one the
+      // patch brings with it.
+      {
+        personas: { ghost: { prompt: "x", output: "json" } },
+        fusions: { "review-check": { disposition: { personas: ["review-skeptic", "review-synth", "ghost"] } } },
+      },
+      /disposition names "ghost", which mode "review-committee" does not run/,
     ],
     [
       "a persona whose answer is not JSON",
-      // `best`'s mode runs `synth`, and `synth` is the non-JSON seat the rule is about — patching the fusion under
+      // `plan`'s mode runs `synth`, and `synth` is the non-JSON seat the rule is about — patching the fusion under
       // test rather than a *different* fusion's persona, which would make the row pass on the wrong error.
-      { fusions: { best: { disposition: { personas: ["synth"] } } } },
+      { fusions: { plan: { disposition: { personas: ["synth"] } } } },
       /disposition names "synth", whose answer is not JSON/,
     ],
     [
       "a declaration that leaves out the last stage seat",
-      { fusions: { "review-quick": { disposition: { personas: ["review-skeptic"] } } } },
+      { fusions: { "review-check": { disposition: { personas: ["review-skeptic"] } } } },
       /disposition must name the mode's last stage seat "review-synth"/,
     ],
     [
       "a declaration on a mode that writes no single answer",
-      { fusions: { debate: { disposition: { personas: ["technical"] } } } },
-      /disposition needs a writing seat — mode "debate" ends in no single seat/,
+      {
+        modes: { panel: { stages: [{ parallel: ["technical"], input: "prompt" }, { render: "panel" }] } },
+        fusions: { cheap: { mode: "panel", disposition: { personas: ["technical"] } } },
+      },
+      /disposition needs a writing seat — mode "panel" ends in no single seat/,
     ],
     [
       "a review rung with no declaration",
-      { fusions: { quick: { review: true, route: { criteria: { mechanical: { description: "x", then: "review-quick" } } } } } },
+      { fusions: { cheap: { review: true, route: { criteria: { mechanical: { description: "x", then: "review-check" } } } } } },
       /review requires disposition/,
     ],
     [
       "a review route to a rung that declares none",
       {
         fusions: {
-          "smrt-review": {
-            disposition: { personas: ["review-technical", "review-skeptic", "review-systems", "review-synth"] },
-            route: { criteria: { mechanical: { description: "x", then: "quick" }, high: { description: "y" } } },
+          "review-check": {
+            review: true,
+            route: { criteria: { mechanical: { description: "x", then: "good" }, high: { description: "y" } } },
           },
         },
       },
-      /routes to "quick", which declares no disposition/,
+      /routes to "good", which declares no disposition/,
     ],
   ];
   const failed = rules.filter(([, patch, expected]) => !expected.test(errorsFor(patch).join("\n")));
@@ -126,33 +142,45 @@ test("every disposition rule is a named load error", () => {
   );
 });
 
-test("the review rungs are calibrated and answer findings as data", () => {
+test("the review rung is calibrated and answers findings as data", () => {
   // Two config facts a reader depends on: the bar a warning is raised at (measured across eight review runs —
   // clean 0.23, real reviews 0.44–0.76 — so 0.35 separates the suspicious case instead of flagging everything),
   // and the panels answering findings as *data*, which is what puts a model and its findings on one record.
-  for (const rung of ["review-quick", "review-check", "smrt-review"]) {
+  for (const rung of ["review-check"]) {
     assert.equal(packaged.fusions[rung].verify[0].questions.addresses_question.warnBelow, 0.35, `${rung} carries the calibrated bar`);
   }
   for (const persona of ["review-skeptic", "review-technical", "review-systems"]) {
     assert.equal(packaged.personas[persona]?.output, "json", `${persona} answers findings as data`);
   }
-  assert.deepEqual(packaged.modes["review-single"].stages[0].parallel, ["review-skeptic"]);
   assert.deepEqual(packaged.modes["review-committee"].stages[0].parallel, ["review-technical", "review-skeptic", "review-systems"]);
 });
 
 test("every proxy rule is a named load error", () => {
   const rules = [
-    ["an unknown alias", { fusions: { best: { proxy: { alias: "no-such-alias" } } } }, /proxy alias "no-such-alias" is not an alias/],
-    ["an empty proxy block", { fusions: { best: { proxy: {} } } }, /proxy needs an alias/],
-    ["a null proxy block", { fusions: { best: { proxy: null } } }, /proxy is not an object/],
-    ["proxy with route", { fusions: { "default-smrt": { proxy: { alias: "qwen-flash" } } } }, /proxy and route cannot both be declared/],
+    ["an unknown alias", { fusions: { plan: { proxy: { alias: "no-such-alias" } } } }, /proxy alias "no-such-alias" is not an alias/],
+    ["an empty proxy block", { fusions: { plan: { proxy: {} } } }, /proxy needs an alias/],
+    ["a null proxy block", { fusions: { plan: { proxy: null } } }, /proxy is not an object/],
+    [
+      "proxy with route",
+      {
+        fusions: { cheap: { route: { instructions: "x", criteria: { a: { description: "x", then: "good" } } }, proxy: { alias: "mimo" } } },
+      },
+      /proxy and route cannot both be declared/,
+    ],
     [
       "a thinking level declared for a seat that is not the writer",
-      { fusions: { best: { thinking: { judge: "harness" } } } },
+      { fusions: { plan: { thinking: { judge: "harness" } } } },
       /"harness" is only legal for the writing seat "synth"/,
     ],
-    ["proxy on a mode that writes nothing", { fusions: { opinions: { proxy: { alias: "kimi" } } } }, /proxy needs a writing seat/],
-    ["a non-positive alias contextWindow", { aliases: { "glm-flash": { contextWindow: 0 } } }, /contextWindow must be a positive integer/],
+    [
+      "proxy on a mode that writes nothing",
+      {
+        modes: { panel: { stages: [{ parallel: ["technical"], input: "prompt" }, { render: "panel" }] } },
+        fusions: { cheap: { mode: "panel", proxy: { alias: "mimo" } } },
+      },
+      /proxy needs a writing seat/,
+    ],
+    ["a non-positive alias contextWindow", { aliases: { "mimo-flash": { contextWindow: 0 } } }, /contextWindow must be a positive integer/],
   ];
   const failed = rules.filter(([, patch, expected]) => !expected.test(errorsFor(patch).join("\n")));
   assert.deepEqual(
@@ -166,18 +194,21 @@ test("every review-route rule is a named load error", () => {
   const rules = [
     [
       "execute: false with a proxy block",
-      { fusions: { best: { execute: false, proxy: { alias: "glm-flash" } } } },
+      { fusions: { plan: { execute: false, proxy: { alias: "glm" } } } },
       /proxy and execute: false cannot both be declared/,
     ],
-    // `best` is an ordinary work rung — it has an executor — so these exercise the rule rather than merging
+    // `plan` is an ordinary work rung — it has an executor — so these exercise the rule rather than merging
     // into a rung that already declares `execute: false`.
-    ["review without execute: false", { fusions: { best: { review: true } } }, /review requires execute: false/],
-    ["review without a route", { fusions: { best: { review: true, execute: false } } }, /review requires route/],
+    ["review without execute: false", { fusions: { plan: { review: true } } }, /review requires execute: false/],
+    ["review without a route", { fusions: { plan: { review: true, execute: false } } }, /review requires route/],
     [
       "a review route to an executor",
       {
         fusions: {
-          "smrt-review": { route: { criteria: { mechanical: { description: "x", then: "quick" }, high: { description: "y" } } } },
+          "review-check": {
+            review: true,
+            route: { criteria: { mechanical: { description: "x", then: "smart" }, high: { description: "y" } } },
+          },
         },
       },
       /declares no execute: false/,
@@ -197,44 +228,222 @@ test("every review-route rule is a named load error", () => {
 });
 
 test("an executor is the writing seat's first candidate, and `proxy.alias` re-points what answers", () => {
-  const fusion = deep(packaged.fusions.best);
+  const fusion = deep(packaged.fusions.plan);
   const writer = executorOf(packaged, fusion);
   assert.equal(writer.persona, "synth", "the last stage's single seat is the writer");
-  assert.equal(writer.alias, "glm-flash", "no declaration means the writer's own first candidate");
+  assert.equal(writer.alias, "mimo", "no declaration means the writer's own first candidate");
   assert.equal(writer.declared, null);
   // `route` and `candidate` differ exactly when the alias is overridden: the override brings its own providers.
   assert.equal(writer.route, writer.candidate);
 
-  const overridden = executorOf(packaged, { ...fusion, proxy: { alias: "kimi" } });
-  assert.equal(overridden.alias, "kimi");
-  assert.equal(overridden.declared, "kimi");
-  assert.equal(overridden.route, "kimi");
-  assert.notEqual(overridden.candidate, "kimi", "the writing seat's declaration is untouched, so its level still governs");
+  const overridden = executorOf(packaged, { ...fusion, proxy: { alias: "qwen-max" } });
+  assert.equal(overridden.alias, "qwen-max");
+  assert.equal(overridden.declared, "qwen-max");
+  assert.equal(overridden.route, "qwen-max");
+  assert.notEqual(overridden.candidate, "qwen-max", "the writing seat's declaration is untouched, so its level still governs");
 });
 
 test("a fusion that declares `execute: false` has no executor, whatever tools a turn carries", () => {
   assert.equal(executorOf(packaged, packaged.fusions["review-check"]), null);
-  assert.equal(executorOf(packaged, packaged.fusions["smrt-review"]), null);
+  assert.equal(executorOf(packaged, { ...deep(packaged.fusions.plan), execute: false }), null);
 });
 
 test("a mode that writes nothing has no executor, even with an alias declared", () => {
-  assert.equal(executorOf(packaged, { mode: "opinion" }), null);
-  assert.equal(executorOf(packaged, { mode: "opinion", proxy: { alias: "kimi" } }), null);
+  const renderable = {
+    ...deep(packaged),
+    modes: { ...packaged.modes, panel: { stages: [{ parallel: ["technical"], input: "prompt" }, { render: "panel" }] } },
+  };
+  assert.equal(executorOf(renderable, { mode: "panel" }), null);
+  assert.equal(executorOf(renderable, { mode: "panel", proxy: { alias: "mimo" } }), null);
 });
 
 test("the thinking level a proxied turn runs at is decided by declaration, then candidate, then persona", () => {
-  const fusion = deep(packaged.fusions.best);
-  assert.equal(executorThinking(packaged, fusion), "high", "the packaged `best` declares a level for its writer");
+  const fusion = deep(packaged.fusions.smart);
+  assert.equal(executorThinking(packaged, fusion), "high", "the packaged `smart` declares a level for its writer");
 
   // A fusion-level declaration wins over the persona's default.
   assert.equal(executorThinking(packaged, { ...fusion, thinking: { synth: "low" } }), "low");
-  // Nothing declared falls to the writing seat's persona level — `quick`'s writer is `technical`, which declares
-  // `medium`; `best`'s is `synth`, which declares none, and an absent level stays absent rather than defaulting.
-  assert.equal(executorThinking(packaged, { ...deep(packaged.fusions.quick), thinking: {} }), "medium");
+  // Nothing declared falls to the writing seat's persona level — `cheap`'s writer is `technical`, which declares
+  // `medium`; `smart`'s is `synth`, which declares none, and an absent level stays absent rather than defaulting.
+  assert.equal(executorThinking(packaged, { ...deep(packaged.fusions.cheap), thinking: {} }), "medium");
   assert.equal(executorThinking(packaged, { ...fusion, thinking: {} }), undefined);
   // `harness` means "run at whatever the harness sent", which is expressed by asking for no level at all: the
   // literal is not a level name and must never reach a provider as one.
   assert.equal(executorThinking(packaged, { ...fusion, thinking: { synth: "harness" } }), undefined);
   // No executor, no level to resolve.
   assert.equal(executorThinking(packaged, packaged.fusions["review-check"]), undefined);
+});
+
+test("a route nests decisions in routes in decisions, and the walk stays acyclic", () => {
+  // A branch is a fusion id, {run: <fusion>}, or a nested decision whose own options branch again.
+  const nested = {
+    fusions: {
+      genius: {
+        route: {
+          instructions: "how much work is this?",
+          criteria: {
+            cheap: {
+              description: "small",
+              then: {
+                decide: {
+                  instructions: "how much room does the answer need?",
+                  criteria: {
+                    brief: { description: "one line", then: { run: "cheap" } },
+                    full: { description: "an essay", then: "good" },
+                  },
+                },
+                otherwise: { run: "smart" },
+              },
+            },
+            dear: { description: "design work" },
+          },
+        },
+      },
+    },
+  };
+  assert.deepEqual(errorsFor(nested), [], "a nested decision is legal, and options without then stay legal");
+
+  // The same shape closing a loop is refused by name — here the cycle runs *through* an inline node.
+  const cyclical = {
+    fusions: {
+      smart: {
+        route: {
+          instructions: "how deep?",
+          criteria: {
+            deeper: {
+              description: "d",
+              then: {
+                decide: { instructions: "again?", criteria: { x: { description: "x", then: "genius" }, y: { description: "y" } } },
+              },
+            },
+            stop: { description: "s", then: "cheap" },
+          },
+        },
+      },
+      genius: {
+        route: { instructions: "back again?", criteria: { back: { description: "b", then: "smart" } } },
+      },
+    },
+  };
+  assert.match(
+    errorsFor(cyclical).join("\n"),
+    /route cycle: (smart → genius → smart|genius → smart → genius)/,
+    "the error names the cycle it found",
+  );
+
+  // A route targeting itself keeps its own name.
+  const selfish = {
+    fusions: { smart: { route: { criteria: { cheap: { description: "x", then: "smart" } } } } },
+  };
+  assert.match(errorsFor(selfish).join("\n"), /routes to this fusion/);
+
+  // A branch that is neither a fusion name nor a decision node says so.
+  const shapeless = {
+    fusions: { smart: { route: { criteria: { cheap: { description: "x", then: { alias: "mimo" } } } } } },
+  };
+  assert.match(errorsFor(shapeless).join("\n"), /must be a fusion id, \{run: <fusion>\}, or a decision node/);
+});
+
+test("a cascade's decision names where the chain continues — an alias or another decision", () => {
+  const patch = {
+    fusions: {
+      cheap: {
+        candidates: {
+          technical: [
+            {
+              decide: {
+                instructions: "is it mechanical?",
+                criteria: {
+                  yes: { description: "y", then: "mimo" },
+                  deeper: {
+                    description: "d",
+                    then: {
+                      decide: { instructions: "again?", criteria: { a: { description: "a" }, b: { description: "b", then: "glm" } } },
+                      otherwise: "mimo",
+                    },
+                  },
+                },
+              },
+            },
+            "deepseek-flash",
+          ],
+        },
+      },
+    },
+  };
+  assert.deepEqual(errorsFor(patch), [], "continuations may nest decisions and may fall through to the next entry");
+
+  // A chain branch is looked up among aliases: a bare fusion name is not a candidate.
+  const wrongLevel = {
+    fusions: {
+      cheap: {
+        candidates: {
+          technical: [
+            { decide: { instructions: "x", criteria: { a: { description: "a", then: "genius" }, b: { description: "b" } } } },
+            "deepseek-flash",
+          ],
+        },
+      },
+    },
+  };
+  assert.match(errorsFor(wrongLevel).join("\n"), /unknown alias "genius"/);
+  const wrongShape = {
+    fusions: {
+      cheap: {
+        candidates: {
+          technical: [
+            { decide: { instructions: "x", criteria: { a: { description: "a", then: { run: "smart" } }, b: { description: "b" } } } },
+            "deepseek-flash",
+          ],
+        },
+      },
+    },
+  };
+  assert.match(errorsFor(wrongShape).join("\n"), /must set exactly one of alias\/decide/);
+});
+
+test("nothing is required of a map — except that it can fire at all", () => {
+  // Options without `then`, a node without `otherwise`, implicit leaves that decline to this fusion: all legal.
+  const leafy = {
+    fusions: {
+      probe: {
+        mode: "single",
+        candidates: { technical: ["mimo"] },
+        route: { instructions: "x", criteria: { a: { description: "a" }, b: { description: "b", then: "cheap" } } },
+      },
+    },
+  };
+  assert.deepEqual(errorsFor(leafy), []);
+  // …but a route that can never fire is dead config, and says so.
+  const dead = {
+    fusions: {
+      probe: {
+        mode: "single",
+        candidates: { technical: ["mimo"] },
+        route: { instructions: "x", criteria: { a: { description: "a" }, b: { description: "b" } } },
+      },
+    },
+  };
+  assert.match(errorsFor(dead).join("\n"), /no option carries then and there is no otherwise, so the route can never fire/);
+  // An `otherwise` alone is enough to fire.
+  const rescued = {
+    fusions: {
+      probe: {
+        mode: "single",
+        candidates: { technical: ["mimo"] },
+        route: { instructions: "x", criteria: { a: { description: "a" }, b: { description: "b" } }, otherwise: "cheap" },
+      },
+    },
+  };
+  assert.deepEqual(errorsFor(rescued), []);
+});
+
+test("optionThen reads the branch an option leads to, and nodeParent derives a recorded parent", () => {
+  const spec = { criteria: { a: { description: "a", then: { run: "cheap" } }, b: { description: "b" } }, otherwise: { run: "quick" } };
+  assert.deepEqual(optionThen(spec, "a"), { run: "cheap" });
+  assert.deepEqual(optionThen(spec, "b"), { run: "quick" }, "an option without then falls to otherwise");
+  assert.equal(nodeParent("default-smrt.route"), "default-smrt", "the route root belongs to its fusion");
+  assert.equal(nodeParent("default-smrt.route/cheap"), "default-smrt.route");
+  assert.equal(nodeParent("review.skeptic#0"), "review.skeptic", "a chain entry belongs to its chain");
+  assert.equal(nodeParent("review.skeptic#0/unclear"), "review.skeptic#0");
 });

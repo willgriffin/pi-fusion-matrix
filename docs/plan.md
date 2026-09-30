@@ -53,7 +53,7 @@ README.md
 AGENTS.md
 docs/plan.md            # this spec
 prompts/                # persona prompts, referenced by path from matrix.json
-  technical.md skeptic.md systems.md judge.md synth.md synth-lean.md merge.md
+  technical.md skeptic.md systems.md judge.md synth.md merge.md review-*.md
 extensions/pi-fusion-matrix/
   index.js              # entry: provider, tool, commands
   config.js             # layered load, merge, interpolation, the Step 1 rule set
@@ -145,26 +145,41 @@ export type DecideSpec =
   | { state: string; options: { id: string; description: string }[]; question: string; backend?: string }
   | { state: string; questions: Record<string, TsQuestion>; backend?: string };
 
-/** A routing option: a description the model reads, and the fusion to run when this option wins. */
-export type RouteCriterion = string | { description?: string; then?: string };
+/**
+ * A branch of a route: a fusion to run (`"id"` or `{run: "id"}`) or a nested decision whose own
+ * options branch again — decisions in routes in decisions. `otherwise` is the branch for options that
+ * carry no `then`; neither it nor any `then` is required, and an implicit leaf declines to the fusion
+ * that owns the route: unsure means spend, at every depth. The named-fusion graph a walk can move
+ * between must be acyclic (inline nodes are trees and cannot cycle) — that, and nothing else, keeps a
+ * walk finite.
+ */
+export type RouteNode =
+  | string
+  | { run: string }
+  | { decide: DecideSpec; otherwise?: RouteNode; sufficientWhen?: SufficientWhen };
+
+/** A routing option: a description the model reads, and where the walk goes when this option wins. */
+export type RouteCriterion = string | { description?: string; then?: RouteNode };
 
 export type RouteSpec = {
   instructions: string;
-  criteria: Record<string, RouteCriterion>;   // 2..16 option ids; at least one carries `then`
+  criteria: Record<string, RouteCriterion>;   // 2..16 option ids
+  otherwise?: RouteNode;                      // the branch for options that carry no `then`
   state?: string;                             // default "{{prompt}}"
   backend?: string;
   /**
-   * Same predicate as a slot cascade, at fusion level: the winning option must carry `then`, and
-   * `sufficientWhen` (default `{ minConfidence: 0.5 }`) must hold. Otherwise the run proceeds as this
-   * fusion — unsure means spend, not gamble.
+   * Same predicate as a slot cascade, at every depth: the branch the winning option names (or the
+   * node's `otherwise`) is followed only when `sufficientWhen` (default `{ minConfidence: 0.5 }`)
+   * holds. Otherwise the run proceeds as this fusion — unsure means spend, not gamble.
    */
   sufficientWhen?: SufficientWhen;
 };
 
 /**
  * When a decision's answer is actionable enough to stop the cascade. Omitted conditions are not
- * tested; all supplied conditions must hold. A candidate whose answer is not sufficient advances to
- * the next candidate with reason `"insufficient"` — a success that escalates, not a failure.
+ * tested; all supplied conditions must hold. A candidate whose answer is not sufficient continues the
+ * chain — at the option's named continuation, or the next entry — with reason `"insufficient"`: a
+ * success that escalates, not a failure.
  */
 export type SufficientWhen = {
   choiceIs?: string | string[];   // the winning option id, or any of several
@@ -174,11 +189,17 @@ export type SufficientWhen = {
   minConfidence?: number;         // choice/score confidence at or above this counts
 };
 
-/** A slot entry is an alias id, an object pinning/reordering that alias's providers, or a decision. */
+/**
+ * A slot entry is an alias id, an object pinning/reordering that alias's providers, or a decision.
+ * A decision's `criteria` values may carry `then` — another entry, a nested decision included — and
+ * `otherwise` is the continuation for options that carry none; with neither, the chain continues to
+ * the next list entry, which is what it has always done. A named continuation runs first and the rest
+ * of the list stays behind it as the chain's failure fallbacks.
+ */
 export type SlotCandidate =
   | string
   | { alias: string; providers?: (string | ProviderRef)[]; thinking?: Persona["thinking"] }
-  | { decide: DecideSpec; sufficientWhen?: SufficientWhen };
+  | { decide: DecideSpec; otherwise?: SlotCandidate; sufficientWhen?: SufficientWhen };
 
 /**
  * A persona is a seat: what it is told, how it samples. Defined once and reused by any mode or fusion,
@@ -373,9 +394,16 @@ Validation runs on every load and throws `pi-fusion-matrix: <problem>`; never fa
 - a decision naming a `backend` absent from `backends` → error; `decide.defaultBackend` absent → error.
 - `questions` on a `kind: "semif"` backend → error, naming the option-form alternative, because the
   SemIf row schema carries one question and typed batching does not exist there.
-- `route.criteria` with fewer than two options, or with no entry carrying `then` → error, because
-  such a route can never fire.
-- a `then` naming an unknown fusion, this fusion, or a fusion that itself declares `route` → error.
+- `route.criteria` with fewer than two options, or with no entry carrying `then` and no `otherwise` →
+  error, because such a route can never fire. A map is never *required* to be total: options without
+  `then`, nodes without `otherwise`, and implicit leaves are all legal — a leaf declines to the fusion
+  that owns the route.
+- a `then` naming an unknown fusion or this fusion → error, and the graph of named fusions a walk can
+  move between must be **acyclic** — the error names the cycle (`route cycle: a → b → a`). Nesting is
+  unbounded on purpose; this is the whole of what keeps a walk finite.
+- a `then` that is not a node of its own level → error: at chain level an alias form or a nested
+  decision (a bare fusion id is not a candidate), at route level a fusion id, `{run}`, or a nested
+  decision (an alias-only object is not a branch).
 - `sufficientWhen` on a model candidate → error (`models produce no answer to test`); it applies to
   decision candidates only.
 - `sufficientWhen` with none of `choiceIs`/`noulAbove`/`scoreAbove`/`scoreBelow`/`minConfidence` →
@@ -393,75 +421,84 @@ piece of configuration registers, and a stale name must fail at use, not at star
 ### Step 2 — The packaged config and the matching `models.json`
 
 `matrix.json` in this repository is the single copy of the packaged config — the plan does not
-duplicate it. Only the vocabulary is illustrated here; read the file for the eight fusions it ships.
+duplicate it. Only the vocabulary is illustrated here; read the file for the six fusions it ships.
 
 ```jsonc
 {
   "providerId": "fusion-matrix",
-  "defaultFusion": "default-smrt",
+  "defaultFusion": "smart",
 
   "personas": {                                   // seats: told once, reused everywhere
-    "technical":  { "prompt": "prompts/technical.md", "temperature": 0.5, "thinking": "medium" },
-    "skeptic":    { "prompt": "prompts/skeptic.md", "temperature": 0.8 },
-    "systems":    { "prompt": "prompts/systems.md", "temperature": 0.6 },
-    "judge":      { "prompt": "prompts/judge.md", "temperature": 0.2, "output": "json" },
-    "synth":      { "prompt": "prompts/synth.md", "temperature": 0.5 },
-    "synth-lean": { "prompt": "prompts/synth-lean.md", "temperature": 0.5, "thinking": "medium" }
+    "technical":      { "prompt": "prompts/technical.md", "temperature": 0.5, "thinking": "medium" },
+    "skeptic":        { "prompt": "prompts/skeptic.md", "temperature": 0.8 },
+    "systems":        { "prompt": "prompts/systems.md", "temperature": 0.6 },
+    "judge":          { "prompt": "prompts/judge.md", "temperature": 0.2, "output": "json" },
+    "synth":          { "prompt": "prompts/synth.md", "temperature": 0.5 },
+    "review-synth":   { "prompt": "prompts/review-synth.md", "temperature": 0.3, "output": "json" }
   },
 
   "modes": {                                      // shapes: stage lists, no code
-    "lean": { "stages": [
-      { "parallel": ["technical", "skeptic"], "input": "prompt" },
-      { "single": "synth-lean", "input": "panel" }
+    "handoff": { "stages": [                      // the first seat works, the second takes over
+      { "single": "technical", "input": "prompt" },
+      { "single": "synth", "input": "previous", "alsoSynthesize": true }
     ] },
-    "pair-judged": { "stages": [
+    "pair": { "stages": [
       { "parallel": ["technical", "skeptic"], "input": "prompt" },
+      { "single": "merge", "input": "panel" }
+    ] },
+    "review-committee": { "stages": [             // the cascaded committee
+      { "parallel": ["review-technical", "review-skeptic", "review-systems"], "input": "prompt" },
+      { "decide": { "instructions": "Do the reviewers agree on the same material findings?",
+                    "criteria": { "…": "agrees / partial / disagrees" } },
+        "input": "panel",
+        "sufficientWhen": { "choiceIs": ["agrees"], "minConfidence": 0.85 } },
       { "single": "judge", "input": "panel" },
-      { "single": "synth", "input": "panel+judge" }
-    ] },
-    "debate": { "stages": [
-      { "parallel": ["technical", "skeptic", "systems"], "input": "prompt",
-        "rounds": 3, "roundInput": "peers" },
-      { "render": "panel" }
+      { "single": "review-synth", "input": "panel+judge" }
     ] }
   },
 
   "fusions": {                                    // a mode plus the roster that fills its seats
-    "good": { "mode": "lean", "fileAgent": false,
-      "candidates": { "technical": ["deepseek-flash"], "skeptic": ["glm-flash"],
-                      "synth-lean": ["qwen-flash"] } },
-    "best": { "mode": "pair-judged", "thinking": { "judge": "high", "synth": "high" },
-      "candidates": { "technical": ["deepseek-pro"], "skeptic": ["glm"],
-                      "judge": ["deepseek-flash"], "synth": ["glm-flash"] } }
+    "good": { "mode": "handoff", "fileAgent": false,
+      "thinking": { "technical": "low", "synth": "high" },
+      "candidates": { "technical": ["deepseek-flash"], "synth": ["mimo-flash"] } },
+    "review-check": { "mode": "review-committee", "execute": false, "fileAgent": false,
+      "disposition": { "personas": ["review-technical", "review-skeptic",
+                                    "review-systems", "review-synth"] },
+      "candidates": { "review-technical": ["mimo"], "review-skeptic": ["glm"],
+                      "review-systems": ["qwen-max"], "judge": ["mimo"],
+                      "review-synth": ["mimo"] },
+      "verify": [{ "state": "{{synthesis}}", "questions": { "…": "the three noul questions" } }] }
   }
 }
 ```
 
-Eight fusions ship, and the call count is the cost contract. `cheap` (one seat on `qwen-flash`) and
-`quick` (one seat on `deepseek-flash`) are the rungs the ladder starts on, one call each. `good` is
-the pair shape — two flash seats and a merge — at three calls. `best` is that pair extended with a
-judge and a synthesis at four calls, and it is the ceiling of the ladder. `default-smrt` is one seat
-behind a complexity `route` that sends the request to `cheap`, `quick`, `good`, or `best` (`unsure`
-falls to `quick`), is the `defaultFusion`, and costs one call plus one route decision. `opinions` is
-the panel-only grid (three calls, no generation). `debate` is three rounds against peers' opinions
-(nine calls). `review-check` is the cascaded committee plus a three-question verification (five calls
-plus one stage decision). The ladder defaults cheap — `default-smrt` budgets the cheapest rung that can
-carry the request — and `best` is its ceiling.
+Six fusions ship — a development ladder of four, one planning rung, one review rung — and the call
+count is the cost contract. `cheap` is one seat on `deepseek-flash` (one call). `good` and `smart`
+are `handoff`: the cheap model does the work and the expensive one reviews, refactors and submits,
+two calls with the takeover seat told to produce the final answer (`alsoSynthesize`) — the models are
+`mimo-flash` and `mimo` respectively. `genius` is the pair shape — `glm` and `qwen-max` in parallel,
+`mimo` merging — at three calls. `plan` is the committee (`mimo`, `glm`, `qwen-max` → judge →
+synthesis on `mimo`) at five. `review-check` is the cascaded committee plus a three-question
+verification (five calls plus one stage decision), its seats re-pointed at `mimo`, `glm` and
+`qwen-max`; it keeps its name and its verify/disposition contract because the review workflow pins
+it. The roster is five version-free aliases — `deepseek-flash`, `mimo-flash`, `mimo`, `glm`,
+`qwen-max` — and no fusion names a vendor id.
 
 Where each fusion's shape comes from:
 
 | fusion (shape) | from | which surfaces |
 |---|---|---|
-| `cheap`, `quick` (`single`) | [`disler/fusion-harness`](https://github.com/disler/fusion-harness) | `/fh-only` (one model) |
-| `good` (the pair shape: two seats and a merge, packaged as `lean`) | the same | its cheap/frontier pair commands |
-| `best` (that pair plus a judge → synthesis, packaged as `pair-judged`) | both | the pair shape above, extended with [`@quarkos/pi-fusion`](https://github.com/QuarkOS/Pi-Fusion)'s panel → judge → synthesis stages |
-| `default-smrt` (one seat behind a `route` gate) | this repository | its own routing gate; no upstream shape |
-| `opinions`, `debate` | [`disler/fusion-harness`](https://github.com/disler/fusion-harness) | `/fh-opinion` (N models answer independently, read-only, side by side, no merge) and `/fh-debate` (each round every surviving agent receives every other agent's labelled prior opinion; failed agents are dropped; no judge and no hidden merge) |
-| `review-check` (the committee, as `committee-cascaded`, and the seat assembly) | [`@quarkos/pi-fusion`](https://github.com/QuarkOS/Pi-Fusion) | its panel → judge → synthesis pipelines, and the seat algorithm of Step 6 |
+| `cheap` (`single`) | [`disler/fusion-harness`](https://github.com/disler/fusion-harness) | `/fh-only` (one model) |
+| `good`, `smart` (`handoff`: one seat works, the next takes over) | this repository | the panel → synthesis pipeline with the panel removed: one seat's answer is the next seat's `previous` |
+| `genius` (the pair shape: two seats and a merge) | [`disler/fusion-harness`](https://github.com/disler/fusion-harness) | its cheap/frontier pair commands |
+| `plan` (panel → judge → synthesis) | [`@quarkos/pi-fusion`](https://github.com/QuarkOS/Pi-Fusion) | its panel → judge → synthesis pipelines |
+| `review-check` (the committee, cascaded, and the seat assembly) | [`@quarkos/pi-fusion`](https://github.com/QuarkOS/Pi-Fusion) | its panel → judge → synthesis pipelines, and the seat algorithm of Step 6 |
 
-`pair`, `committee`, and `committee-merged` ship as vocabulary with no fusion on them; the eight
-fusions sit on `single`, `lean`, `pair-judged`, `opinion`, `debate`, and `committee-cascaded` (the
-`review-check` shape).
+The fusions sit on five modes — `single`, `handoff`, `pair`, `committee`, and `review-committee`.
+The older vocabulary (`lean`, `pair-judged`, `opinion`, `debate`, `review-single`,
+`committee-merged`, `committee-cascaded`) left with the roster simplification; the engine support
+for rounds, renders, score stages and cascades stays, and the offline contracts pin it with
+synthetic fixtures.
 
 fusion-harness's three other shapes are deliberately absent — see the boundary note under Assumptions
 (its disk-writing FUSION agent, its gate-first loop, and its plan-then-DAG collaboration).
@@ -636,9 +673,14 @@ async function runSeat(
 2. Expand the candidate list with `resolveCandidates` per entry, keeping entry order. Each entry
    contributes its own ordered provider list. The expansion is the execution plan; log it once per run
    in the banner as `<persona>: <alias>@<provider>` sequences.
-3. Walk the expansion in order, capped at `fusion.maxAdvance ?? 3` advances per seat:
+3. Walk the expansion as a queue — a chain is a walk, not a loop — capped at `fusion.maxAdvance ?? 3`
+   advances per seat:
    - decide entry → `decide(...)` per Step 4; failure records a substitution `reason: "decision"` and
-     moves to the next entry. A decision's text contribution to the judge/synthesis context is
+     continues to the next entry. A sufficient answer is the seat's output and skips the rest. An
+     insufficient one continues where the winning option's `then` names (or the entry's `otherwise`),
+     a nested decision included; with neither named, at the next list entry — the advance it has
+     always been. Every decision records the node it happened at (`path`) and the node it hangs under
+     (`parent`). A decision's text contribution to the judge/synthesis context is
      `option: probability` lines (`<id>: <p>` sorted descending), and the winner is marked.
    - Otherwise build the seat's model through the credential seam above and stream it:
      ```ts
@@ -664,7 +706,7 @@ async function runSeat(
    | text matches `/\b40[13]\b|unauthorized|invalid api key/i` | advance | `"credential"` | both |
    | text matches `/not found|unknown model|\b404\b/i` | advance | `"missing model"` | both |
    | transport failure, 5xx, or a 429 without quota semantics | retry same candidate once after 2000 ms, then advance | `"transient"` | both |
-   | a decision candidate answered, but `sufficientWhen` did not hold | advance at once, keeping the answer | `"insufficient"` | seat cascade |
+   | a decision candidate answered, but `sufficientWhen` did not hold | continue at once (the option's `then`, the entry's `otherwise`, or the next entry), keeping the answer | `"insufficient"` | seat cascade |
    | the caller stopped the run, or the seat's own deadline passed | advance at once, no retry | `"aborted"` / `"timeout"` | seat cascade |
    | any delta already streamed to the caller | do not advance; end with emitted text, `degraded: true` | — | — |
 
@@ -690,8 +732,8 @@ async function runSeat(
    that asymmetry is a deliberate change.
 
 Sampling belongs to the persona: `temperature` (default 0.7) and `thinking` (passed to pi as the
-request's `reasoning` level). `fusions.<id>.thinking` overrides one persona for one fusion, which is
-how `best` runs its judge and synthesis at `high` while its panel is held at `low`. The reference
+request's `reasoning` level). `fusions.<id>.thinking` overrides one persona for one fusion, which is how
+`smart` runs its takeover seat at `high` while its worker is held at `low`. The reference
 implementation's temperatures survive as persona defaults (`technical` 0.5, `skeptic` 0.8, `systems`
 0.6, `judge` 0.2, `synth` 0.5). The `kimi` special case stays: `temperature: 1.0` when the vendor id
 contains `kimi`, because that family rejects other values. Keep the models-reject-temperature memory
@@ -731,12 +773,12 @@ pi.registerTool({
   promptSnippet: "Run a multi-model deliberation on a design question",
   parameters: Type.Object({
     prompt: Type.String({ description: "The query or design task to analyze." }),
-    fusion: Type.Optional(Type.String({ description: 'Fusion id from matrix.json (e.g. "best"). Omit for "default".' })),
+    fusion: Type.Optional(Type.String({ description: 'Fusion id from matrix.json (e.g. "smart"). Omit for "default".' })),
   }),
   execute: async (_toolCallId, params) => { /* content: synthesis text,
     details: { fusion, models, substitutions, slotErrors, panelResponses, judgeAnalysis, usage } */ },
 });
-pi.registerCommand("matrix", { description: "Run a named fusion: /matrix <id> <prompt>", handler: async (args, ctx) => {} });
+pi.registerCommand("matrix", { description: "Launch the interface with /matrix, or run a named fusion: /matrix <id> <prompt>", handler: async (args, ctx) => {} });
 pi.registerCommand("matrix-info", { description: "List modes, fusions, seats, and provider routes", handler: async (_args, ctx) => {} });
 pi.registerCommand("matrix-doctor", { description: "Validate the config, check connectivity, report drift", handler: async (args, ctx) => {} });
 ```
@@ -753,8 +795,16 @@ type RunDetails = {
   seatErrors: { persona: string; error?: string; reason?: string }[];
   rounds?: { round: number; seats: string[]; inputs: Record<string, string> }[];
   substitutions: Substitution[];
-  cascades: Cascade[];               // answer, sufficiency, prior, next candidate
-  routing?: { answer: DecideAnswer; routedTo?: string; declined?: string; threshold: number };
+  cascades: Cascade[];               // path, parent, branch, answer, sufficiency, prior, continuation
+  routing?: {
+    walk: { path: string; parent: string; fusion: string; answer: DecideAnswer; option: string | null;   // fusion: the node's owner, exact at walk time (an id may contain dots)
+            branch: "then" | "otherwise" | "escalated" | "declined" }[];
+    answer: DecideAnswer;            // the root decision's answer
+    routedTo?: string;               // the fusion the walk ended at
+    escalated?: string;              // an option that matched with no branch: a choice to run this fusion
+    declined?: string;               // why the walk fell back to this fusion
+    threshold: number;
+  };
   verification?: { check: string; result: unknown; gate?: { exit: number; timedOut?: boolean; durationMs: number; output: string } }[];
   usage: Usage;
 };
@@ -763,25 +813,43 @@ type RunDetails = {
 `details.substitutions` and `details.seatErrors` are always present, empty arrays included: a silently
 degraded run is a wrong answer and must be visible. `seats[].model` is the vendor id that actually
 answered, so a provider-level substitution stays auditable after the fact, and `stages[].calls` is what
-makes a shape's cost contract checkable.
+makes a shape's cost contract checkable. Every recorded decision carries `path` and `parent`: tracking
+keeps the parent so results can be read for the context the node was used in — the same decision under
+a different parent is different usage, and the store keeps one row per (fusion, path) context.
+`parent` is recorded explicitly; the derivation `path` minus its last segment is only the fallback for
+records that predate it.
 
-`/matrix` parses the first whitespace-delimited token as a fusion id when it matches a key in
-`fusions`; otherwise the whole argument string is the prompt and `defaultFusion` is used. Unknown id →
-`ctx.ui.notify('unknown fusion "x"; known: cheap, quick, ...', "error")` and no run.
+`/matrix` with no arguments — or with exactly one that names a tab (`fusions`, `aliases`, `personas`) —
+opens the interface as a mounted component (`scripts/tui-panel.mjs`) and runs nothing (the `routes` tab
+folded into `fusions`: a fusion's rows are its seats' routes, with what the store saw beside them).
+Otherwise the
+first whitespace-delimited token is a fusion id when it matches a key in `fusions`, and when it does
+not, the whole argument string is the prompt and `defaultFusion` is used — with a named notice
+(`no fusion "x"; known: …`) so a retired or mistyped id is never swallowed into the run silently.
+The `matrix` **tool** path has an explicit `fusion` parameter and refuses an unknown one outright:
+`ctx.ui.notify('unknown fusion "x"; known: cheap, good, smart, genius, plan, review-check', "error")` and no run.
 A decision entry reports as before; a `gate` entry runs a command and records its exit status.
 
-**`route` runs before the first stage** (Step 3 step 1). The clause is one choice question built from
-`route.instructions` and the option ids of `route.criteria` (descriptions only — `then` is this
-extension's vocabulary and is never sent). `state` defaults to `{{prompt}}`. A `then` on the winning
-option names the fusion to run instead of this one; an option without `then`, an option id the map
-does not contain, or a `sufficientWhen` that does not hold (`{ minConfidence: 0.5 }` by default) all
-mean the run proceeds as this fusion — the same "unsure means spend" rule as a slot cascade, one level
-up. The decision and the routing are reported
-(` ├─ ↪ routed to flash (complexity=trivial, confidence 0.91)\n`) and recorded in `details.routing`,
-including when the confidence gate declines to route.
+**`route` runs before the first stage** (Step 3 step 1): a walk over a decision map, where a branch may
+be another decision at any depth — decisions in routes in decisions. Each step asks one choice
+question built from that node's `instructions` and option ids (descriptions only — `then` is this
+extension's vocabulary and is never sent); `state` defaults to `{{prompt}}`. The branch the winning
+option names (`then`, else the node's `otherwise`) is followed only when `sufficientWhen`
+(`{ minConfidence: 0.5 }` by default) holds; an option without `then`, an option id the map does not
+contain, or a gate that does not hold all mean the run proceeds as this fusion — the same "unsure
+means spend" rule as a slot cascade, applied at every depth and declining to the fusion that owns the
+route. A matched option with no branch and no `otherwise` is a *choice to run this fusion* and is
+recorded as `escalated`, not as a decline. Every step is recorded in `details.routing.walk` under the
+node it happened at (`path`), the node it hangs under (`parent`), and the fusion that owns the node
+(`fusion`, recorded at walk time — a fusion id may contain dots, so the path cannot name its owner
+exactly), and the decision and the routing
+are reported (` ├─ ↪ routed to flash (complexity=trivial, confidence 0.91)\n`), including when the
+gate declines to route.
 Routing may target a more expensive fusion — escalation on `"architectural"` is a normal use — so
-there is no cost-direction rule. The guardrails are structural: one hop (a target may not declare
-`route`), no self-route, and full reporting of the answer, its probabilities, and its confidence.
+there is no cost-direction rule. The guardrails are structural: no self-route, the graph of named
+fusions a walk can move between is acyclic (the error names the cycle), one decision call per node
+visited — the walk is as deep as the map and no deeper — and full reporting of every answer, its
+probabilities, and its confidence.
 
 **`verify` runs after synthesis** and is report-only. Two kinds, evaluated in order, with
 `vars = { prompt, panel, judge, synthesis, cwd }`:
@@ -803,8 +871,8 @@ skipped, not as a run failure.
 ### Step 4 — Decision backends (TypeSafe default, SemIf local)
 
 `decide.ts` is the client for both kinds; `decide.models` and `scripts/*` belong to the SemIf server.
-Nothing here is optional or deferred behind a flag — `review-check`'s stage cascade and `default-smrt`'s
-`route` in Step 2 both use it.
+Nothing here is optional or deferred behind a flag — `review-check`'s stage cascade and its `verify`
+questions in Step 2 both use it, as a `route` gate does whenever a config declares one.
 
 ```ts
 export type DecideAnswer =
@@ -1169,8 +1237,8 @@ turn goes to one model, and its events come back.
 **Branch selection is by invocation, never by guessing.** A fusion that declares an executor, reached
 through the provider with `context.tools` present, proxies; every other path behaves exactly as it does
 today. No classifier means nothing can be misclassified: `/matrix` and the `matrix` tool call the
-pipeline directly (`runOnce`) and never proxy; a rung whose mode writes nothing (`opinions`, `debate`)
-declares no executor and still deliberates with tools present; `--thinking`, temperature, and the
+pipeline directly (`runOnce`) and never proxy; a rung whose mode writes nothing (a mode ending in
+`render`) declares no executor and still deliberates with tools present; `--thinking`, temperature, and the
 prompt's shape never decide the branch. An empty tool list is not a tool-bearing turn — there is no
 agent loop to serve — so it deliberates too; measured 2026-09-19, that means a pinned rung proxies in
 practice, because the extension's own `matrix` tool is in the list even under `--no-tools`
@@ -1184,8 +1252,8 @@ where that changes, not a heuristic here.
 - execute face — the writing seat (a pipeline's synthesis, or the single seat) and the thinking the
   fusion declares for it.
 
-To change which model codes under a rung, re-point one seat: `best`'s `synth` at `qwen-max` makes every
-`best` execution turn run on that model while its panel stays cheap at `low`. `proxy: { alias }`
+To change which model codes under a rung, re-point one seat: `smart`'s `synth` at `qwen-max` makes every
+`smart` execution turn run on that model while its worker stays cheap at `low`. `proxy: { alias }`
 re-points *which model the writing seat acts as*, for the case where the writer is a fine merge and a
 thin coder. It is not a way to give a mode that writes nothing (`render`, a bare `decide`) an executor:
 such a fusion has no persona, so the thinking rule would have no row to read and a configured level
@@ -1285,13 +1353,20 @@ Reviews are a second kind of traffic, not a fusion of a task. A review does not 
 input is a *packet* — a diff, the acceptance criteria it was written against, and the validation evidence — so
 its rungs are configured for judging rather than doing, and the class of the change decides which rung runs.
 
+The six paths ship one review rung — `review-check`, the cascaded committee with its disposition and
+its verification. The class table is configuration *on* a rung, not a second roster: a `review: true`
+`route` fusion whose criteria name the classes and whose options carry their targets. The shipped
+roster keeps no such router (the class map left with the roster simplification); the loader's rules
+for it stay, and the offline contracts pin the shape with a synthetic router in
+`scripts/interp-check.mjs`. What a class map looks like when one is declared:
+
 | class | what it means | rung |
 |---|---|---|
-| `mechanical` | docs, comments, formatting, a config value with no behaviour change — nothing a test could catch instead | `review-quick` (one adversarial seat, then the disposition) |
+| `mechanical` | docs, comments, formatting, a config value with no behaviour change — nothing a test could catch instead | one adversarial seat, then the disposition |
 | `standard` | an ordinary behaviour change, contained within one component | `review-check` (committee, cascaded, disposition) |
-| `high` | a boundary: auth, authorization, tenancy, payments, schema or data migration, a public API contract, release tooling, anything irreversible, or a blast radius the packet cannot bound | `smrt-review`'s own mode — the deep committee, with the boundary question in its verification |
+| `high` | a boundary: auth, authorization, tenancy, payments, schema or data migration, a public API contract, release tooling, anything irreversible, or a blast radius the packet cannot bound | the router's own mode — the deep committee, with the boundary question in its verification |
 
-`smrt-review` is a `route` fusion in the shape of `default-smrt`, with two deliberate differences:
+A `review: true` router differs from an ordinary one in two deliberate ways:
 
 - **its own mode is the deep review.** A route that declines runs the fusion's own stages, so an unsure class
   escalates to the deepest review instead of quietly taking the cheap one — and a route option that matches but
@@ -1300,7 +1375,7 @@ its rungs are configured for judging rather than doing, and the class of the cha
 - **an option may carry no target on purpose.** The `high` class is that option: it means "run this fusion".
 
 **`execute: false` — a rung that is never a session model.** Pinning a reviewer is the whole point (a `task`
-agent whose model is `fusion-matrix/smrt-review`), and an execute face breaks it: a tool-bearing turn to a
+agent whose model is `fusion-matrix/review-check`), and an execute face breaks it: a tool-bearing turn to a
 fusion with an executor *proxies to its writing seat*, so the panel never runs and the review silently becomes
 one model's opinion. A rung that declares `execute: false` runs its pipeline instead, whatever tools the turn
 carries. Load errors, because each one is a silent degradation waiting to happen:
@@ -1448,7 +1523,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
 (create, remove at the end), and the pi config repo symlink from Step 1 in place.
 
 1. **Credential seam (do this first)** — with `opencode-go` connected, run
-   `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/quick --no-session`. `quick` is one seat on
+   `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/cheap --no-session`. `cheap` is one seat on
    the `deepseek-flash` alias, so the seat is `deepseek-v4.1-flash`, which pi does not catalogue; success
    is the ` technical: opencode-go/deepseek-v4.1-flash` line with no substitution after it, which proves
    the seat built a model object for an uncatalogued id and pi resolved the provider credential.
@@ -1471,16 +1546,16 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    and E1 must know before it writes the resolver.
 
 2. **Model registration** — `cd /tmp/fusion-matrix-check && pi --list-models fusion` prints all
-   eight: `cheap`, `quick`, `good`, `best`, `default-smrt`, `opinions`, `debate`, `review-check`,
+   six: `cheap`, `good`, `smart`, `genius`, `plan`, `review-check`,
    each under the `fusion-matrix` provider. Failure here means the api id, manifest, or symlink is
    wrong.
 3. **Config validation** — three separate project files, each run expected to fail at load with the
    named message: an unknown alias in a candidate list
-   (`{"fusions": {"best": {"candidates": {"judge": ["no-such-alias"]}}}}` →
-   `unknown alias "no-such-alias"; known: …`); a mode whose roster does not match its shape (`best`'s
-   own `{"modes": {"pair-judged": {"stages": [{"parallel": ["technical"], "input": "prompt"},
+   (`{"fusions": {"genius": {"candidates": {"merge": ["no-such-alias"]}}}}` →
+   `unknown alias "no-such-alias"; known: …`); a mode whose roster does not match its shape (`pair`'s
+   own `{"modes": {"pair": {"stages": [{"parallel": ["technical"], "input": "prompt"},
    {"render": "panel"}]}}}` → names the missing candidate key); and a stage reading something nobody
-   produced (`{"modes": {"lean": {"stages": [{"single": "synth-lean", "input": "panel+judge"}]}}}` →
+   produced (`{"modes": {"handoff": {"stages": [{"single": "synth", "input": "panel+judge"}]}}}` →
    `stage 0 input "panel+judge" has no preceding single stage`). Remove each file afterwards.
 4. **Provider-layer fallback (same alias, new billing route)** — in
    `/tmp/fusion-matrix-check/.pi/pi-fusion-matrix.json` set
@@ -1541,11 +1616,13 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
    satisfy (for example `noul` "the answer contains the exact phrase BANANA") and confirm the run
    still completes with one `⚠️ verify:` delta and an unchanged synthesis — verification must never
    rewrite or block; (b) point `route` at a `semif` backend and confirm the load error
-   `routing requires a backend that reports confidence; "semif" does not`; (c) run `default-smrt` on a
-   genuinely complex prompt and confirm it does *not* route away (the decision reports a non-trivial
-   option), then on `"Reply with exactly: ZQX1"` and confirm it does, with the ` routed` line and
-   `details.routing` both present; (d) set `route.sufficientWhen.minConfidence` to 1.0 and confirm the
-   run proceeds as `default-smrt` with `details.routing` recording the declined route — the gate must
+   `routing requires a backend that reports confidence; "semif" does not`; (c) with a project-layer
+   `route` on `cheap` (the six paths ship none — the walk is pinned offline in
+   `scripts/interp-check.mjs`), run it on a genuinely complex prompt and confirm it does *not* route
+   away (the decision reports a non-trivial option), then on `"Reply with exactly: ZQX1"` and confirm
+   it does, with the ` routed` line and `details.routing` both present; (d) set
+   `route.sufficientWhen.minConfidence` to 1.0 and confirm the run proceeds with `details.routing`
+   recording the declined route — the gate must
    be able to decline, and must say so. **Verified live 2026-09-18** on the router shipped then
    (`review-routed`; `default-smrt` has since replaced it): (a) the live cascade run warned twice and
    kept its synthesis; (b) is a load error, asserted by the validator; (c) `"Reply with exactly: ZQX1"`
@@ -1577,9 +1654,9 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
 13. **Per-project billing selection** — add a second provider block to `~/.pi/agent/models.json` (copy
     the built-in `opencode-go` shape as `opencode-go-work`, with that account's key) and set
     `/tmp/fusion-matrix-check/.pi/pi-fusion-matrix.json` to
-    `{"aliases": {"glm": {"providers": ["opencode-go-work", "opencode-go", "zai"]}}}`. A
-    `--model fusion-matrix/best` run must execute on `opencode-go-work` (banner and
-    `details.seats[].provider` show it) with no edit to any fusion and no credential in the project
+    `{"aliases": {"mimo": {"providers": ["opencode-go-work", "opencode-go"]}}}`. A
+    `--model fusion-matrix/smart` run must execute on `opencode-go-work` (banner and
+    `details.proxied.provider` show it) with no edit to any fusion and no credential in the project
     file. Remove the override afterwards. This is the check that per-repo billing needs no profile
     system — only a provider id, which is pi's vocabulary, not ours. The second-account half needs a
     credential this machine does not have; the mechanism it tests was exercised live 2026-09-18 with the
@@ -1591,33 +1668,34 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     package.json` must return no import or path reference (only doc/comment mentions of the reference
     directory are allowed). `scripts/` is included because a harness importing by absolute path publishes
     the developer's layout. Then move the vendored reference fork out of the pi extensions directory, run
-    `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/best --no-session`, and confirm it still works —
+    `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/cheap --no-session`, and confirm it still works —
     this is the check that the package runs with no developer checkout present. Restore the directory
     afterwards. **Verified live 2026-09-18** by disabling extension discovery outright and loading this
     package by path — `pi -ne -e <repo>/extensions/pi-fusion-matrix -p "Reply with exactly: ZQX1"` against
     the one-seat fusion shipped then (`solo`, since replaced by `cheap` and `quick`) — it answered `ZQX1`,
     so nothing outside this repository is needed.
-15. **Alias is version-free** — `grep -rn "glm-5\|qwen3\.8\|deepseek-v4\|kimi-k3"` across
+15. **Alias is version-free** — `grep -rn "glm-5\|qwen3\.8\|deepseek-v4\|mimo-v2\.6"` across
     `extensions/pi-fusion-matrix/` and `matrix.json` must match only `aliases.*.model`, fixtures, and
     comments — never `fusions`, `candidates`, or code. A `models.json` version bump (for example `deepseek-v4.1-flash` →
     `deepseek-v4-flash` on `go`) must change behavior with no edit to this repo; confirm by bumping it
-    and running `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/quick`: the run succeeds and
+    and running `pi -p "Reply with exactly: ZQX1" --model fusion-matrix/cheap`: the run succeeds and
     `details.models` shows the new vendor id behind the unchanged alias.
 
-16. **Mode shapes are cost contracts** — run each fusion in Step 2 and count the calls. `cheap` and
-    `quick` are one seat and no judge (1 call each); `good` is two seats plus a merge (3 calls), and
-    the merged text must differ from both seat texts (a merge that echoes a panel response is not a
-    merge); `best` is that pair plus a judge and a synthesis (4 calls), the judge's message carrying
-    its analysis and the synthesis answering from `panel+judge`; `default-smrt` is one seat plus its
-    route decision (1 + 1); `opinions` makes three calls, ends with labelled sections and no
-    generation, and records `render` in `details.stages`; `debate` makes nine (3 seats x 3 rounds);
+16. **Mode shapes are cost contracts** — run each fusion in Step 2 and count the calls. `cheap` is one
+    seat and no judge (1 call); `good` and `smart` are the handoff (2 calls) — the worker's draft
+    reaches the takeover seat as `previous`, and the takeover's answer is the run's answer; `genius`
+    is two seats plus a merge (3 calls), and the merged text must differ from both seat texts (a merge
+    that echoes a panel response is not a merge); `plan` is three seats, a judge and a synthesis (5
+    calls), the judge's message carrying its analysis and the synthesis answering from `panel+judge`;
     and `review-check` makes five plus one stage decision (5 + 1), where a sufficient decision skips
     the judge it gates, so both counts must appear in `details.stages`. A shape that quietly adds or
     drops a call is a bug: the call count is the feature.
-17. **Debate envelopes** — in `fusion-matrix/debate`, every round after the first carries each *other*
-    seat's previous-round output and never its own; `details.rounds[].inputs` records the envelope per
-    seat per round. Then point one seat's only provider at `nope`: that seat is labelled and dropped,
-    the remaining two continue, and if only one survives the rounds stop early rather than running alone.
+17. **Debate envelopes** — *retired as a live check with the roster simplification*: the six paths
+    ship no `rounds` mode. The contract is unchanged and is pinned offline by the synthetic debate
+    fixture in `scripts/interp-check.mjs` — every round after the first carries each *other* seat's
+    previous-round output and never its own (`details.rounds[].inputs` records the envelope per seat
+    per round), a seat whose providers are all missing is labelled and dropped, and if only one
+    survives the rounds stop early rather than running alone. The live record stands:
     **Verified live 2026-09-18**: with two of the three seats pointed at `nope`, the run printed
     ` ⚠️ skeptic unavailable …` and ` ⚠️ systems unavailable …`, kept the surviving seat, and stopped with
     ` ├─ debate: fewer than two seats survive; stopping after round 1`.
@@ -1627,7 +1705,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     issue **one** backend request for the three seats (the stub records request count), and the stage
     that follows must render sorted `persona: score (confidence)` lines from `panel+weights`. Separately,
     a persona with `thinking: "off"` must show as omitted or off in `details.seats[].thinking`, while
-    `best`'s judge and synthesis show `high` (their fusion override) and `cheap`'s `technical` seat
+    `smart`'s `synth` shows `high` (its fusion override) and `cheap`'s `technical` seat
     shows `low` against its persona default `medium` — sampling is configuration, and the run record
     must show what was actually requested.
 
@@ -1665,7 +1743,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     check having been shown to fail under a temporary mutation of the reader, then in a scratch `cwd`
     (Step 8's prerequisites):
     `node scripts/session-report.mjs --cwd <scratch> --json` on the store *before* a `/matrix` run shows
-    zero deliberation records, and after `/matrix quick "…"` in **both** pi and omp it shows one, with the
+    zero deliberation records, and after `/matrix cheap "…"` in **both** pi and omp it shows one, with the
     answer message carrying `details.fusion` — then `--verbose` names that run. A failed run records itself:
     an alias pointed at a provider nobody knows (`{"providers": ["nope"]}`) records the degraded seat, a
     named `seatErrors` entry and the substitution, which the report counts as `1 failed` — where before the
@@ -1680,7 +1758,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     byte-identical and the target's `toolcall_end` reaching the caller; the message holds the model's
     output and no ` ├─ ` line; no seat call happens; the `done` event's message — not just `result()` —
     carries `details.proxied`, because that is the copy the harness keeps; `"harness"` and an absent
-    level resolve per Step 9's table; a rung with no writing seat (`opinions`) still deliberates with
+    level resolve per Step 9's table; a rung with no writing seat (a `render`-ending mode) still deliberates with
     tools present; an unresolvable route advances to the next with the attempt recorded and no
     decoration; a level the target refuses is dropped once and the turn continues; a route that fails
     before any event advances while one that fails after `start` ends the turn; and an unreachable
@@ -1703,40 +1781,44 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     cd /tmp/fusion-matrix-check
     pi -ne -e <repo>/extensions/pi-fusion-matrix -p "Read package.json. Add a key \"proxy-check\" with \
       value \"ok\" to it. Then run node -e 'console.log(6*7)'. Tell me the package name, the key you \
-      added, and the command's output." --model fusion-matrix/quick --no-session
+      added, and the command's output." --model fusion-matrix/cheap --no-session
     ```
 
     and the same prompt through `omp` (`--no-extensions -e …/extensions/pi-fusion-matrix/index.js
     --auto-approve`), with the second half run under a pinned role instead of `--model`
-    (`modelRoles.default: fusion-matrix/quick`, applied with omp's `--config`). Success is a real loop
+    (`modelRoles.default: fusion-matrix/cheap`, applied with omp's `--config`). Success is a real loop
     across turns: `read` → `edit`/`bash` tool calls in the transcript, `package.json` on disk gaining the
     key, the command's output in the answer, no ` ├─ ` line in any message, `provider`/`model` reading
-    `fusion-matrix/quick` on every stored assistant message, and `details.proxied` naming
+    `fusion-matrix/cheap` on every stored assistant message, and `details.proxied` naming
     `deepseek-flash@opencode-go`. **Verified live 2026-09-19** on pi 0.85.1 and omp 18.2.6: both harnesses
     ran read → edit → bash → answer, the file changed on disk, and every turn's stored message carried
     `details.proxied` with `thinking: "low"`. A `"harness"` thinking override in the project layer,
-    `--thinking high`, forwarded `"high"` verbatim. Then, same binary and same config: `/matrix quick …`
-    and `--model fusion-matrix/opinions` must still deliberate with their status lines (verified live —
-    the panel printed `## technical — opencode-go/kimi-k3` and its three sections), and a target whose
+    `--thinking high`, forwarded `"high"` verbatim. Then, same binary and same config: `/matrix cheap …`
+    and `--model fusion-matrix/review-check` must still deliberate with their status lines (verified
+    live on the rungs shipped then — the panel printed `## technical — opencode-go/kimi-k3` and its
+    three sections), and a target whose
     level is refused must recover (verified live: with `deepseek-flash` re-pointed at
     `alibaba-token-plan`, which supports only `high, max`, the turn dropped the level and answered).
 
 25. **Proxy: registered metadata** — `pi --list-models fusion` (and omp's equivalent) must show the
-    executor's numbers for a proxying rung: `quick` and `default-smrt` at `1M / 384K`, `best`, `cheap`,
-    and `good` at `1M / 131.1K`, `review-check` at `1.0M / 131.1K` — not `128000`/`8192`, which the two
-    render-only rungs keep because they have no execute face. **Verified live 2026-09-19** on pi 0.85.1.
-    Then re-point `best`'s writer (`{"fusions": {"best": {"candidates": {"synth": ["muse"]}}}}` in the
-    project layer) and confirm the doctor reports the missing alias metadata rather than letting the
-    default stand unannounced — `node scripts/doctor.mjs` from that directory prints
-    `[metadata] fusion "best" executes as "muse", which declares no contextWindow and no maxTokens …` and
-    still exits 0, because it is a decision, not a fault.
+    executor's numbers for a proxying rung: `cheap` at `1M / 384K` (its writer's declaration), `good`,
+    `smart`, `genius` and `plan` at `1M / 131.1K` — not `128000`/`8192`, which `review-check` keeps
+    because it has no execute face. **Verified live 2026-09-19** on pi 0.85.1 (against the rungs
+    shipped then). Then re-point `plan`'s writer (`{"fusions": {"plan": {"candidates": {"synth":
+    ["glm"]}}}}` in the project layer) and confirm the doctor reports the missing alias metadata
+    rather than letting the default stand unannounced — `node scripts/doctor.mjs` from that directory
+    prints `[metadata] fusion "plan" executes as "glm", which declares no contextWindow and no
+    maxTokens …` and still exits 0, because it is a decision, not a fault.
 
 26. **Proxy: config validation** — three project-layer files, each expected to fail at load with the
-    named message: `{"fusions": {"best": {"proxy": {"alias": "no-such-alias"}}}}` →
-    `proxy alias "no-such-alias" is not an alias`; `{"fusions": {"default-smrt": {"proxy": {"alias":
-    "qwen-flash"}}}}` → `proxy and route cannot both be declared`; `{"fusions": {"best": {"thinking":
-    {"judge": "harness"}}}}` → `thinking "harness" is only legal for the writing seat "synth"`; and
-    `{"fusions": {"opinions": {"proxy": {"alias": "kimi"}}}}` → `proxy needs a writing seat`. **Verified
+    named message: `{"fusions": {"plan": {"proxy": {"alias": "no-such-alias"}}}}` →
+    `proxy alias "no-such-alias" is not an alias`; `{"fusions": {"cheap": {"route": {"instructions":
+    "x", "criteria": {"a": {"description": "x", "then": "good"}, "b": {"description": "y"}}}, "proxy":
+    {"alias": "mimo"}}}}` → `proxy and route cannot both be declared`; `{"fusions": {"plan":
+    {"thinking": {"judge": "harness"}}}}` → `thinking "harness" is only legal for the writing seat
+    "synth"`; and `{"modes": {"panel": {"stages": [{"parallel": ["technical"], "input": "prompt"},
+    {"render": "panel"}]}}, "fusions": {"opinions": {"mode": "panel", "proxy": {"alias": "mimo"}}}}` →
+    `proxy needs a writing seat`. **Verified
     live 2026-09-19**: the first three fail `pi -ne -e <repo>/extensions/pi-fusion-matrix` at load with
     those messages and exit non-zero, and an empty `proxy: {}` reports `proxy needs an alias`; all seven
     rules (that one, `proxy: null`, and the five above) are asserted offline in `scripts/interp-check.mjs`. Remove each file afterwards, and confirm the
@@ -1746,7 +1828,7 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     42/42, the new ones being: a seat's `durationMs` and the run's are present and finite while a failed
     call's time rides its attempt record, and `/matrix-label` writes a `matrix-label` custom message with
     the work item, the outcome and its evidence — refusing an outcome outside the vocabulary, a work item
-    with no outcome, and writing nothing in either case. Then live in a scratch `cwd`: `/matrix quick "…"`
+    with no outcome, and writing nothing in either case. Then live in a scratch `cwd`: `/matrix cheap "…"`
     followed by `/matrix-label <work-item> landed <evidence>` in **both** harnesses, after which
     `node scripts/session-report.mjs --cwd <scratch>` prints an `outcomes` section naming the work item, the
     latest outcome and the evidence, with the fusion turns and the reported cost beside them; a second
@@ -1825,17 +1907,17 @@ and `kimi-coding` from pi's credential store, `openai` from `OPENAI_API_KEY`, an
     `{"label":"mechanical"}` as unjudged, and the new one that pins an undeclared seat's `{"verdict":"banana"}` as
     unable to make the run malformed. The declared seat answering `{"summary":"…"}` stays green under that
     mutation, because a declared seat is judged either way; the two reds are the checks that state the *scope*.
-    The two committee rungs declare the four seats that answer findings — the three panels and the synthesis their
-    mode's last stage ends on — and deliberately leave the mid-panel `judge` undeclared, since its `{"label":"…"}`
-    answer is not a disposition and is what the two checks above pin. `review-quick` declares the two its
-    single-seat mode runs rather than the committee's four. Each load rule is
+    The committee rungs of that revision declared the four seats that answer findings — the three panels and the
+    synthesis their mode's last stage ends on — and deliberately left the mid-panel `judge` undeclared, since its
+    `{"label":"…"}` answer is not a disposition and is what the two checks above pin (the six-path roster ships
+    one such rung: `review-check`, declaring exactly those four). Each load rule is
     mutation-proven on a copy of the tree: disabling one reddens the rules test alone and the failure names that
     rule's own fixture — the empty list, a name the mode does not run, a name whose answer is not JSON, a list
     without the last stage seat, a mode that writes no single answer, `review: true` without a declaration, or a
     review route to a rung that declares none. Two further mutations are reported as they behave rather than as
     they were hoped to: dropping the non-array guard makes `personas: null` throw inside the validator instead of
-    failing with a named error (which is why the guard is there), and removing `review-quick`'s declaration
-    reddens three checks because the router's route target loses the declaration rule 7 requires of it. The
+    failing with a named error (which is why the guard is there), and removing the declared rung's declaration
+    reddens three checks because a review route's target loses the declaration rule 7 requires of it. The
     declaration is a *list*, not a single name: `personas` in the plural, with the singular spelling and a bare
     string both named load errors, since `"review-synth"` would otherwise iterate its own letters.
 

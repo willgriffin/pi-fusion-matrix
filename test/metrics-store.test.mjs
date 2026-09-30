@@ -32,6 +32,7 @@ import {
   byModel,
   byFusionSeat,
   byProxyAlias,
+  decideResults,
   ingest,
   loadSqlite,
   openStore,
@@ -42,6 +43,8 @@ import {
   sanitiseDetails,
   totals,
   usageOf,
+  adaptDatabase,
+  resolveSqlite,
   verifyByQuestion,
 } from "../scripts/metrics-store.mjs";
 
@@ -193,13 +196,36 @@ function writeFixtureStore() {
             {
               seat: "review-skeptic",
               kind: "decision",
+              path: "review-check.review-skeptic#0",
+              parent: "review-check.review-skeptic",
               sufficient: false,
               advancedTo: "next candidate",
               answer: { type: "choice", choice: "partial", confidence: 0.6 },
             },
             { seat: "review-synth", kind: "decision", sufficient: true, answer: { type: "choice", choice: "agrees", confidence: 0.9 } },
           ],
-          routing: { answer: { type: "choice", choice: "standard", confidence: 0.62 }, threshold: 0.6, routedTo: "review-check" },
+          routing: {
+            walk: [
+              {
+                path: "review-check.route",
+                parent: "review-check",
+                answer: { type: "choice", choice: "standard", confidence: 0.62, probabilities: { standard: 0.62, deep: 0.38 } },
+                option: "standard",
+                branch: "then",
+              },
+              {
+                path: "review-check.route/standard",
+                parent: "review-check.route",
+                answer: { type: "choice", choice: "yes", confidence: 0.8 },
+                option: "yes",
+                branch: "declined",
+              },
+            ],
+            answer: { type: "choice", choice: "standard", confidence: 0.62 },
+            threshold: 0.6,
+            routedTo: "review-check",
+            declined: "review-check.route/standard",
+          },
           verification: [
             {
               check: "how does the review read",
@@ -868,6 +894,75 @@ test("one aliased route is named the same on both halves, and a hostile name is 
   fs.rmSync(dbPath, { force: true });
 });
 
+test("the store's sqlite driver comes from the runtime that has one", async () => {
+  const fake = { DatabaseSync: class {} };
+  assert.equal(
+    await resolveSqlite(async () => {
+      throw new Error("absent");
+    }),
+    null,
+    "a runtime with no driver is named, not guessed",
+  );
+  assert.equal(await resolveSqlite(async () => ({})), null, "a module that exports no DatabaseSync is not a driver");
+  assert.equal(
+    await resolveSqlite(async (name) => (name === "node:sqlite" ? fake : Promise.reject(new Error("absent")))),
+    fake,
+    "node's own driver comes first",
+  );
+  const bunOnly = await resolveSqlite(async (name) =>
+    name === "bun:sqlite" ? { Database: class {} } : Promise.reject(new Error("absent")),
+  );
+  assert.ok(bunOnly?.DatabaseSync, "and Bun's Database is adapted rather than refused — the harness panel's case");
+});
+
+test("Bun's Database is worn as the DatabaseSync surface the store speaks", () => {
+  const calls = [];
+  class FakeDatabase {
+    constructor(filename, options) {
+      calls.push(["open", filename, options]);
+    }
+    prepare(sql) {
+      calls.push(["prepare", sql]);
+      return {
+        all: (...args) => (calls.push(["all", sql, ...args]), []),
+        get: (...args) => (calls.push(["get", sql, ...args]), undefined),
+        run: (...args) => (calls.push(["run", sql, ...args]), { changes: 1, lastInsertRowid: 2 }),
+      };
+    }
+    run(sql) {
+      calls.push(["exec", sql]);
+      return { changes: 0 };
+    }
+    close() {
+      calls.push(["close"]);
+    }
+  }
+  const { DatabaseSync } = adaptDatabase({ Database: FakeDatabase });
+  const db = new DatabaseSync("/tmp/store.db", { readOnly: true });
+  assert.deepEqual(calls[0], ["open", "/tmp/store.db", { readonly: true }], "readOnly maps onto the option Bun spells lowercase");
+  // A store's own open carries no options, and Bun refuses an empty object as open flags of zero — so
+  // the adapter must pass nothing at all. This is the case that kept the panel storeless under the
+  // harness while the read-only probe was green.
+  const writable = new DatabaseSync("/tmp/store.db");
+  assert.deepEqual(calls[1], ["open", "/tmp/store.db", undefined], "no options means no second argument");
+  writable.close();
+  db.prepare("SELECT 1").get();
+  db.exec("BEGIN");
+  db.close();
+  assert.ok(
+    calls.some((call) => call[0] === "get"),
+    "prepare answers get",
+  );
+  assert.ok(
+    calls.some((call) => call[0] === "exec" && call[1] === "BEGIN"),
+    "exec is the multi-statement run",
+  );
+  assert.ok(
+    calls.some((call) => call[0] === "close"),
+    "and the database closes",
+  );
+});
+
 test("a record's clock is a string or absent, whatever the harness wrote", () => {
   const entries = [
     { type: "session", id: "s", cwd: "/tmp/x", timestamp: "2026-09-20T00:00:00.000Z" },
@@ -930,4 +1025,109 @@ test("the CLI accounts for the store it built, and refuses a flag it does not ta
   const bad = runCli(["scripts/ingest-metrics.mjs", "--nope"]);
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /unknown flag --nope/);
+});
+
+test("decideResults: one row per usage context, with the parent it was used under", { skip: noSqlite }, async () => {
+  // The fixture carries both eras: one cascade with a recorded node path and parent, one from before
+  // node paths existed (its `kind` is a word, not a node) — and a routing walk whose steps name their
+  // own paths and parents. The point of the parent: the same node under a different parent is a
+  // different usage, so rows are per context and never pooled.
+  const { db } = await openFixture();
+  const { rows } = decideResults(db);
+  const at = (p) => rows.find((r) => r.path === p);
+
+  const root = at("review-check.route");
+  assert.equal(root.parent, "review-check", "the route root belongs to its fusion");
+  assert.equal(root.total, 1);
+  assert.equal(root.sufficient, 1, "a branch taken is a gate that held");
+  assert.deepEqual({ ...root.tallies }, { standard: 1 });
+  assert.equal(root.latest.choice, "standard");
+  assert.deepEqual(root.latest.probabilities, { standard: 0.62, deep: 0.38 }, "the answer keeps its probabilities");
+
+  const nested = at("review-check.route/standard");
+  assert.equal(nested.parent, "review-check.route", "a nested node belongs to the node it hangs under");
+  assert.equal(nested.sufficient, 0, "a declined walk counts as a gate that did not hold");
+
+  const chain = at("review-check.review-skeptic#0");
+  assert.equal(chain.parent, "review-check.review-skeptic", "a chain entry belongs to its chain");
+  assert.equal(chain.total, 1);
+  assert.equal(chain.sufficient, 0);
+  assert.ok(chain.latest.at.length > 0, "the newest answer is named by its run's clock");
+
+  // A record from before node paths keeps loading and keeps counting toward its run — it names no
+  // node, so it claims no row rather than a wrong one.
+  assert.equal(at("decision"), undefined, "a kind word is not a node");
+  assert.notEqual(root.parent, chain.parent, "distinct contexts stay distinct rows");
+});
+
+test("decideResults: a redirected walk binds each hop to the fusion that owns its node", { skip: noSqlite }, async () => {
+  // A routed run executes as its final fusion, but its walk's steps belong to the routes that made
+  // them: the tree binds a node's results by the fusion that owns the node, so a hop recorded under
+  // the run's final fusion would never join its own route row.
+  const { db } = await openFixture();
+  db.prepare(`INSERT INTO run (id, session_id, seq, at, kind, carrier, fusion, routing_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    999,
+    db.prepare(`SELECT id FROM session LIMIT 1`).get().id,
+    9,
+    1700000000000,
+    "deliberation",
+    "toolResult",
+    "hopC",
+    JSON.stringify({
+      walk: [
+        {
+          path: "hopA.route",
+          parent: "hopA",
+          fusion: "hopA",
+          answer: { choice: "forward", confidence: 0.9 },
+          option: "forward",
+          branch: "then",
+        },
+        {
+          path: "hopB.route",
+          parent: "hopB",
+          fusion: "hopB",
+          answer: { choice: "onward", confidence: 0.8 },
+          option: "onward",
+          branch: "then",
+        },
+      ],
+    }),
+  );
+  const { rows } = decideResults(db);
+  const hopA = rows.find((row) => row.path === "hopA.route");
+  const hopB = rows.find((row) => row.path === "hopB.route");
+  assert.equal(hopA.fusion, "hopA", "the entry hop binds to the fusion that owns its route");
+  assert.equal(hopB.fusion, "hopB", "and so does every later hop");
+  assert.equal(hopA.total, 1);
+  assert.equal(hopA.sufficient, 1);
+
+  // A dotted fusion id is legal (only `:` and `/` are refused), and its owner rides the step —
+  // re-deriving the owner from the path would key this row to a phantom `hop`.
+  db.prepare(`INSERT INTO run (id, session_id, seq, at, kind, carrier, fusion, routing_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    1000,
+    db.prepare(`SELECT id FROM session LIMIT 1`).get().id,
+    10,
+    1700000000001,
+    "deliberation",
+    "toolResult",
+    "finale",
+    JSON.stringify({
+      walk: [
+        {
+          path: "hop.v2.route",
+          parent: "hop.v2",
+          fusion: "hop.v2",
+          answer: { choice: "go", confidence: 0.9 },
+          option: "go",
+          branch: "then",
+        },
+      ],
+    }),
+  );
+  const again = decideResults(db);
+  const dotted = again.rows.find((row) => row.path === "hop.v2.route");
+  assert.equal(dotted.fusion, "hop.v2", "a dotted id binds whole — the step records its owner");
+  assert.equal(again.rows.find((row) => row.path === "hop.v2.route").total, 1);
+  db.close();
 });

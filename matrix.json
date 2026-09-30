@@ -1,7 +1,7 @@
 {
   "providerId": "fusion-matrix",
   "providerName": "Fusion Matrix",
-  "defaultFusion": "default-smrt",
+  "defaultFusion": "smart",
   "aliases": {
     "glm": {
       "model": "glm-5.3",
@@ -10,24 +10,10 @@
         "zai"
       ]
     },
-    "glm-flash": {
-      "model": "glm-5.3-flash",
-      "contextWindow": 1000000,
-      "maxTokens": 131072,
+    "qwen-max": {
+      "model": "qwen3.8-max",
       "providers": [
         "opencode-go"
-      ]
-    },
-    "kimi": {
-      "model": "kimi-k3",
-      "contextWindow": 1048576,
-      "maxTokens": 131072,
-      "providers": [
-        "opencode-go",
-        {
-          "id": "kimi-coding",
-          "modelOverride": "k3"
-        }
       ]
     },
     "deepseek-flash": {
@@ -38,51 +24,20 @@
         "opencode-go"
       ]
     },
-    "deepseek-pro": {
-      "model": "deepseek-v4-pro",
-      "providers": [
-        "opencode-go"
-      ]
-    },
-    "muse": {
-      "model": "muse-spark-1.3-contributor",
-      "providers": [
-        "opencode-go"
-      ]
-    },
-    "qwen-max": {
-      "model": "qwen3.8-max",
-      "providers": [
-        "opencode-go"
-      ]
-    },
-    "qwen-flash": {
-      "model": "qwen3.8-flash",
+    "mimo-flash": {
+      "model": "mimo-v2.6-flash",
       "contextWindow": 1000000,
       "maxTokens": 131072,
       "providers": [
         "opencode-go"
       ]
     },
-    "grok": {
-      "model": "grok-4.6",
+    "mimo": {
+      "model": "mimo-v2.6-pro",
+      "contextWindow": 1000000,
+      "maxTokens": 131072,
       "providers": [
         "opencode-go"
-      ],
-      "reasoning": true
-    },
-    "luna": {
-      "model": "gpt-5.6-luna",
-      "providers": [
-        "opencode-go",
-        "openai"
-      ],
-      "reasoning": true
-    },
-    "gpt": {
-      "model": "gpt-5.6-sol",
-      "providers": [
-        "openai"
       ]
     }
   },
@@ -114,11 +69,6 @@
       "temperature": 0.3,
       "output": "json"
     },
-    "synth-lean": {
-      "prompt": "prompts/synth-lean.md",
-      "temperature": 0.5,
-      "thinking": "medium"
-    },
     "merge": {
       "prompt": "prompts/merge.md",
       "temperature": 0.4
@@ -149,6 +99,19 @@
         }
       ]
     },
+    "handoff": {
+      "stages": [
+        {
+          "single": "technical",
+          "input": "prompt"
+        },
+        {
+          "single": "synth",
+          "input": "previous",
+          "alsoSynthesize": true
+        }
+      ]
+    },
     "pair": {
       "stages": [
         {
@@ -160,40 +123,6 @@
         },
         {
           "single": "merge",
-          "input": "panel"
-        }
-      ]
-    },
-    "pair-judged": {
-      "stages": [
-        {
-          "parallel": [
-            "technical",
-            "skeptic"
-          ],
-          "input": "prompt"
-        },
-        {
-          "single": "judge",
-          "input": "panel"
-        },
-        {
-          "single": "synth",
-          "input": "panel+judge"
-        }
-      ]
-    },
-    "lean": {
-      "stages": [
-        {
-          "parallel": [
-            "technical",
-            "skeptic"
-          ],
-          "input": "prompt"
-        },
-        {
-          "single": "synth-lean",
           "input": "panel"
         }
       ]
@@ -215,106 +144,6 @@
         {
           "single": "synth",
           "input": "panel+judge"
-        }
-      ]
-    },
-    "committee-merged": {
-      "stages": [
-        {
-          "parallel": [
-            "technical",
-            "skeptic",
-            "systems"
-          ],
-          "input": "prompt"
-        },
-        {
-          "single": "judge",
-          "input": "panel",
-          "alsoSynthesize": true
-        }
-      ]
-    },
-    "opinion": {
-      "stages": [
-        {
-          "parallel": [
-            "technical",
-            "skeptic",
-            "systems"
-          ],
-          "input": "prompt"
-        },
-        {
-          "render": "panel"
-        }
-      ]
-    },
-    "debate": {
-      "stages": [
-        {
-          "parallel": [
-            "technical",
-            "skeptic",
-            "systems"
-          ],
-          "input": "prompt",
-          "rounds": 3,
-          "roundInput": "peers"
-        },
-        {
-          "render": "panel"
-        }
-      ]
-    },
-    "committee-cascaded": {
-      "stages": [
-        {
-          "parallel": [
-            "technical",
-            "skeptic",
-            "systems"
-          ],
-          "input": "prompt"
-        },
-        {
-          "decide": {
-            "instructions": "Do the experts agree on a single core recommendation?",
-            "criteria": {
-              "agrees": "They converge on the same recommendation.",
-              "partial": "They overlap but differ on a substantive point.",
-              "disagrees": "They recommend different things."
-            }
-          },
-          "input": "panel",
-          "sufficientWhen": {
-            "choiceIs": [
-              "agrees"
-            ],
-            "minConfidence": 0.85
-          }
-        },
-        {
-          "single": "judge",
-          "input": "panel"
-        },
-        {
-          "single": "synth",
-          "input": "panel+judge"
-        }
-      ]
-    },
-    "review-single": {
-      "stages": [
-        {
-          "parallel": [
-            "review-skeptic"
-          ],
-          "input": "prompt"
-        },
-        {
-          "single": "review-synth",
-          "input": "panel"
         }
       ]
     },
@@ -358,20 +187,7 @@
   },
   "fusions": {
     "cheap": {
-      "name": "Cheap · one flash seat",
-      "mode": "single",
-      "thinking": {
-        "technical": "low"
-      },
-      "candidates": {
-        "technical": [
-          "qwen-flash"
-        ]
-      },
-      "fileAgent": false
-    },
-    "quick": {
-      "name": "Quick · deepseek flash",
+      "name": "Cheap · deepseek flash",
       "mode": "single",
       "thinking": {
         "technical": "low"
@@ -384,118 +200,73 @@
       "fileAgent": false
     },
     "good": {
-      "name": "Good · two flash seats + merge",
-      "mode": "lean",
+      "name": "Good · flash works, MiMo-flash takes over",
+      "mode": "handoff",
       "thinking": {
         "technical": "low",
-        "skeptic": "low",
-        "synth-lean": "low"
-      },
-      "candidates": {
-        "technical": [
-          "deepseek-flash"
-        ],
-        "skeptic": [
-          "glm-flash"
-        ],
-        "synth-lean": [
-          "qwen-flash"
-        ]
-      },
-      "fileAgent": false
-    },
-    "best": {
-      "name": "Best · judged pair",
-      "mode": "pair-judged",
-      "thinking": {
-        "technical": "low",
-        "skeptic": "low",
-        "judge": "high",
         "synth": "high"
       },
       "candidates": {
         "technical": [
-          "deepseek-pro"
-        ],
-        "skeptic": [
-          "glm"
-        ],
-        "judge": [
           "deepseek-flash"
         ],
         "synth": [
-          "glm-flash"
+          "mimo-flash"
         ]
       },
       "fileAgent": false
     },
-    "default-smrt": {
-      "name": "Default · routed",
-      "mode": "single",
+    "smart": {
+      "name": "Smart · flash works, mimo takes over",
+      "mode": "handoff",
       "thinking": {
-        "technical": "low"
-      },
-      "route": {
-        "instructions": "How much work does this request need? Judge the work itself, not how it was phrased, and prefer the cheapest rung that can carry it.",
-        "criteria": {
-          "cheap": {
-            "description": "A lookup, a definition, or a one-line factual answer — no judgement needed.",
-            "then": "cheap"
-          },
-          "quick": {
-            "description": "An ordinary question or a small change that needs one careful pass.",
-            "then": "quick"
-          },
-          "good": {
-            "description": "Two or three things interact, or the answer is better with a second opinion.",
-            "then": "good"
-          },
-          "best": {
-            "description": "Expensive to get wrong: design tradeoffs, correctness-critical work, or several interacting decisions.",
-            "then": "best"
-          },
-          "unsure": {
-            "description": "Ambiguous, or missing the context you would need to judge.",
-            "then": "quick"
-          }
-        },
-        "sufficientWhen": {
-          "minConfidence": 0.4
-        }
+        "technical": "low",
+        "synth": "high"
       },
       "candidates": {
         "technical": [
           "deepseek-flash"
+        ],
+        "synth": [
+          "mimo"
         ]
       },
       "fileAgent": false
     },
-    "opinions": {
-      "mode": "opinion",
+    "genius": {
+      "name": "Genius · glm + qwen-max → mimo synthesis",
+      "mode": "pair",
       "candidates": {
         "technical": [
-          "kimi"
+          "glm"
         ],
         "skeptic": [
-          "deepseek-pro"
+          "qwen-max"
         ],
-        "systems": [
-          "glm"
+        "merge": [
+          "mimo"
         ]
       },
       "fileAgent": false
     },
-    "debate": {
-      "mode": "debate",
+    "plan": {
+      "name": "Plan · mimo + glm + qwen-max → mimo synthesis",
+      "mode": "committee",
       "candidates": {
         "technical": [
-          "kimi"
+          "mimo"
         ],
         "skeptic": [
-          "deepseek-pro"
+          "glm"
         ],
         "systems": [
-          "glm"
+          "qwen-max"
+        ],
+        "judge": [
+          "mimo"
+        ],
+        "synth": [
+          "mimo"
         ]
       },
       "fileAgent": false
@@ -512,21 +283,19 @@
       },
       "candidates": {
         "review-technical": [
-          "kimi",
-          "qwen-max"
+          "mimo"
         ],
         "review-skeptic": [
-          "muse"
-        ],
-        "review-systems": [
           "glm"
         ],
+        "review-systems": [
+          "qwen-max"
+        ],
         "judge": [
-          "deepseek-pro"
+          "mimo"
         ],
         "review-synth": [
-          "kimi",
-          "qwen-max"
+          "mimo"
         ]
       },
       "fileAgent": false,
@@ -564,138 +333,6 @@
         }
       ],
       "execute": false
-    },
-    "review-quick": {
-      "mode": "review-single",
-      "disposition": {
-        "personas": [
-          "review-skeptic",
-          "review-synth"
-        ]
-      },
-      "name": "Review · quick (one skeptic)",
-      "execute": false,
-      "thinking": {
-        "review-skeptic": "low",
-        "review-synth": "low"
-      },
-      "candidates": {
-        "review-skeptic": [
-          "muse"
-        ],
-        "review-synth": [
-          "deepseek-pro"
-        ]
-      },
-      "fileAgent": false,
-      "verify": [
-        {
-          "state": "{{synthesis}}",
-          "questions": {
-            "addresses_question": {
-              "type": "noul",
-              "instructions": "The review states whether the diff meets the acceptance criteria it was written against, rather than describing the diff.",
-              "criteria": {
-                "true": "Judges the change against its criteria",
-                "false": "Describes the diff or answers a different question"
-              },
-              "warnBelow": 0.35
-            }
-          }
-        }
-      ]
-    },
-    "smrt-review": {
-      "mode": "review-committee",
-      "disposition": {
-        "personas": [
-          "review-technical",
-          "review-skeptic",
-          "review-systems",
-          "review-synth"
-        ]
-      },
-      "name": "Review · routed by blast radius",
-      "review": true,
-      "execute": false,
-      "thinking": {
-        "review-technical": "medium",
-        "review-skeptic": "medium",
-        "review-systems": "medium",
-        "judge": "high",
-        "review-synth": "high"
-      },
-      "candidates": {
-        "review-technical": [
-          "qwen-max",
-          "kimi"
-        ],
-        "review-skeptic": [
-          "muse",
-          "deepseek-pro"
-        ],
-        "review-systems": [
-          "deepseek-pro"
-        ],
-        "judge": [
-          "kimi"
-        ],
-        "review-synth": [
-          "qwen-max"
-        ]
-      },
-      "fileAgent": false,
-      "verify": [
-        {
-          "state": "{{synthesis}}",
-          "questions": {
-            "addresses_question": {
-              "type": "noul",
-              "instructions": "The review states whether the diff meets the acceptance criteria it was written against, rather than describing the diff.",
-              "criteria": {
-                "true": "Judges the change against its criteria",
-                "false": "Describes the diff or answers a different question"
-              },
-              "warnBelow": 0.35
-            },
-            "grounded_in_panel": {
-              "type": "noul",
-              "instructions": "Every finding traces to something in the packet or the panel, not to a guess about code nobody read.",
-              "criteria": {
-                "true": "All findings traceable",
-                "false": "Contains findings with no support in the packet"
-              }
-            },
-            "boundary_handled": {
-              "type": "noul",
-              "instructions": "The review considered irreversible or boundary-crossing effects — authentication, authorization, tenancy, data, release — rather than only local behaviour.",
-              "criteria": {
-                "true": "Boundaries considered",
-                "false": "Only local behaviour considered"
-              }
-            }
-          }
-        }
-      ],
-      "route": {
-        "instructions": "How much review does this change need? Judge the blast radius of the diff — what it can affect if it is wrong — not how many lines it moves, and prefer the cheapest review that can carry it. Answer `high` when you are unsure.",
-        "criteria": {
-          "mechanical": {
-            "description": "Docs, comments, formatting, or a configuration value, with no behaviour change — and nothing a test or a script could catch instead.",
-            "then": "review-quick"
-          },
-          "standard": {
-            "description": "An ordinary behaviour change: code that runs, tests, or user-visible output, contained within one component.",
-            "then": "review-check"
-          },
-          "high": {
-            "description": "A boundary: authentication, authorization, tenancy, payments, a schema or data migration, a public API contract, release or lifecycle tooling, anything irreversible, or any change whose blast radius you cannot bound from the packet."
-          }
-        },
-        "sufficientWhen": {
-          "minConfidence": 0.6
-        }
-      }
     }
   },
   "decide": {

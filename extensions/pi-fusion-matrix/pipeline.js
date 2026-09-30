@@ -253,6 +253,16 @@ export function isSufficient(answer, sufficientWhen) {
   return true;
 }
 
+/** What a named chain continuation runs: its alias, or a nested decision. */
+function describeContinuation(node) {
+  if (typeof node === "string") return node;
+  if (node && typeof node === "object") {
+    if (typeof node.alias === "string") return node.alias;
+    if (node.decide !== undefined) return "a nested decision";
+  }
+  return "the next candidate";
+}
+
 function describeAnswer(answer, sufficientWhen) {
   const bits = [];
   if (answer?.choice !== undefined) bits.push(answer.choice);
@@ -392,7 +402,15 @@ async function runSeatInner({
     return "—";
   };
 
-  for (const [candidateIndex, candidate] of (candidates ?? []).entries()) {
+  // The candidate list is a walk, not a loop: a decision may name where the chain continues (`then`,
+  // or the entry's own `otherwise`), and its default continuation is the next entry — today's advance.
+  // A named continuation runs first, and the rest of the list stays behind it as the failure fallbacks
+  // a chain has always been. Every decision records the node it happened at (`path`) and the node it
+  // hangs under (`parent`), so results read per usage context.
+  const chain = `${fusion?.id ?? "fusion"}.${personaName}`;
+  const queue = [...(candidates ?? []).entries()].map(([index, entry]) => ({ entry, index, path: `${chain}#${index}`, parent: chain }));
+  while (queue.length > 0) {
+    const { entry: candidate, index: candidateIndex, path, parent } = queue.shift();
     if (typeof candidate === "object" && candidate !== null && candidate.decide !== undefined) {
       let result;
       try {
@@ -407,12 +425,25 @@ async function runSeatInner({
       }
       const answer = Object.values(result.answers ?? {})[0] ?? null;
       const sufficient = isSufficient(answer, candidate.sufficientWhen);
+      const option = answer?.choice;
+      const optionValue = candidate.decide?.criteria?.[option];
+      const named = optionValue && typeof optionValue === "object" ? optionValue.then : undefined;
+      const continuation = named ?? candidate.otherwise;
       cascades.push({
         seat: personaName,
         kind: "decision",
+        path,
+        parent,
+        branch: sufficient ? undefined : named !== undefined ? `then:${option}` : continuation !== undefined ? "otherwise" : "next",
         answer,
         sufficient,
-        advancedTo: sufficient ? undefined : "next candidate",
+        advancedTo: sufficient
+          ? undefined
+          : named !== undefined
+            ? describeContinuation(named)
+            : continuation !== undefined
+              ? describeContinuation(continuation)
+              : "next candidate",
         prior: sufficient ? undefined : priorLine(answer),
       });
       if (sufficient) {
@@ -429,10 +460,15 @@ async function runSeatInner({
           calls: 1,
         };
       }
-      emit.delta(` ├─  ${personaName} decision insufficient (${describeAnswer(answer, candidate.sufficientWhen)}) → next candidate\n`);
+      emit.delta(
+        ` ├─  ${personaName} decision insufficient (${describeAnswer(answer, candidate.sufficientWhen)}) → ${named !== undefined ? describeContinuation(named) : continuation !== undefined ? describeContinuation(continuation) : "next candidate"}\n`,
+      );
       prior = priorLine(answer);
       advances += 1;
       if (advances >= maxAdvance) break;
+      if (continuation !== undefined) {
+        queue.unshift({ entry: continuation, index: candidateIndex, path: `${path}/${named !== undefined ? option : "~"}`, parent: path });
+      }
       continue;
     }
 
@@ -951,6 +987,9 @@ export async function runPipeline({ config, sources, fusion, prompt, registry, c
       cascadeRecords.push({
         seat: "stage",
         kind: "decision",
+        path: `${fusion?.id ?? "fusion"}.${stage.name ?? `stage${index}`}`,
+        parent: `${fusion?.id ?? "fusion"}`,
+        branch: sufficient ? undefined : "next",
         answer,
         sufficient,
         advancedTo: sufficient ? undefined : "next stage",

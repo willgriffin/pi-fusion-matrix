@@ -8,13 +8,13 @@ stack — for multi-model deliberation. One codebase, both harnesses. It owns re
 execution: which model chain answers each seat, whether a cheap decision can answer instead of a model
 call, which shape a run takes, which fusion a request should even use in the first place, and whether a
 coding turn deliberates at all or goes to one model. It
-registers one model per fusion (`fusion-matrix/best`, `fusion-matrix/cheap`, …), runs each seat
+registers one model per fusion (`fusion-matrix/genius`, `fusion-matrix/cheap`, …), runs each seat
 through the harness's own provider runtime and credential store, and returns a normal
 assistant-message stream. Providers, endpoints, credentials, transport, and accounting stay the
 harness's.
 
-Status: implemented and verified on both harnesses — eight fusions register and run on pi
-0.84.2/0.85.1 and on omp 18.2.6, from one codebase, and a pinned rung answers agent turns with the
+Status: implemented and verified on both harnesses — the fusions register and run on pi
+0.84.2/0.85.1 and on omp 18.2.6 (eight at those revisions; six ship today), from one codebase, and a pinned rung answers agent turns with the
 harness's own tools. The twenty-five verification items in
 [`docs/plan.md`](docs/plan.md) carry their evidence inline, and the repository's own offline contracts
 (`scripts/interp-check.mjs`, `scripts/doctor.mjs`, both probes) pass with no keys and no network.
@@ -58,7 +58,7 @@ omp --extension "$PWD/extensions/pi-fusion-matrix/index.js" -p "…" --model fus
 ```
 
 Both were verified end to end: the same commit answers `ZQX1` through the one-seat fusion shipped then
-(`solo`; `cheap` and `quick` are those rungs now), streams a panel, runs the file agent (writing a
+(`solo`; `cheap` is that rung now), streams a panel, runs the file agent (writing a
 file through the harness's own tool call), and reports the same substitutions on pi 0.84.2/0.85.1 and
 omp 18.2.6.
 
@@ -98,10 +98,10 @@ Requirements before the first run:
 
 ```bash
 pi -p "In two sentences: when is optimistic locking the wrong default?" \
-   --model fusion-matrix/best --no-session
+   --model fusion-matrix/genius --no-session
 ```
 
-`best` is the ladder's ceiling — two seats, a judge, and a synthesis. A recorded five-seat committee
+`genius` is the ladder's ceiling — two seats (`glm`, `qwen-max`) and a `mimo` merge. A recorded five-seat committee
 run (the fusion was then named `deep`; `review-check` ships the same five seats today) shows the
 stream's anatomy:
 
@@ -133,16 +133,16 @@ A fusion is reachable three ways:
 |---|---|
 | model id | `--model fusion-matrix/<id>` or `/model` — one registered model per fusion |
 | tool | the `matrix` tool (fusion + prompt), for an agent that should deliberate mid-task |
-| command | `/matrix <id> <prompt>`, with `/matrix` alone using `defaultFusion` |
+| command | `/matrix <id> <prompt>`, with a no-id `/matrix <prompt>` using `defaultFusion`; bare `/matrix` opens the interface |
 
-`pi --list-models fusion` lists all eight, and `/matrix-info` prints the resolvable aliases with
+`pi --list-models fusion` lists all six (`cheap`, `good`, `smart`, `genius`, `plan`, `review-check`), and `/matrix-info` prints the resolvable aliases with
 their routes, the modes, the fusions with their rosters and their execute faces, and the config layers
 loaded.
 
 ### A fusion as your session's model
 
 Every fusion is also a model id, so one can be pinned as the session's model
-(`modelRoles.default: fusion-matrix/quick`) — and then it gets *agent* turns: tools, the harness's own
+(`modelRoles.default: fusion-matrix/smart`) — and then it gets *agent* turns: tools, the harness's own
 system prompt, and a conversation that grows. Those go to one model, not through the panel:
 
 ```
@@ -152,7 +152,7 @@ turn arrives (messages + tools + system prompt)
 ```
 
 The branch is decided by invocation, never guessed: a tool-bearing turn on a fusion that declares an
-executor proxies; `matrix`, `/matrix`, a rung whose mode writes nothing (`opinions`, `debate`), and any
+executor proxies; `matrix`, `/matrix`, a rung whose mode writes nothing (a mode ending in `render`), and any
 turn that arrives with no tools run the pipeline exactly as before. (With this extension loaded, the
 tool list is never empty — the `matrix` tool is in it — so a pinned rung proxies in practice; the
 tool-less turns are the harness's side-channel calls, a title or a compaction, and those keep the
@@ -168,13 +168,12 @@ re-pointing that one seat re-points what codes under the rung:
 
 | rung | deliberate face | execute face |
 |---|---|---|
-| `cheap` | one `qwen-flash` seat @low | `qwen-flash` @low |
-| `quick` | one `deepseek-flash` seat @low | `deepseek-flash` @low |
-| `good` | two flash seats + a `qwen-flash` merge | `qwen-flash` @low |
-| `best` | `deepseek-pro` + `glm`, judge @high, synthesis @high | `glm-flash` @high |
-| `default-smrt` | one `deepseek-flash` seat, routed by a decision | `deepseek-flash` @low |
-| `review-check` | five-seat committee, cascaded | `kimi` @harness |
-| `opinions`, `debate` | three seats, rendered | — every turn deliberates |
+| `cheap` | one `deepseek-flash` seat @low | `deepseek-flash` @low |
+| `good` | `deepseek-flash` works @low, `mimo-flash` takes over @high | `mimo-flash` @high |
+| `smart` | `deepseek-flash` works @low, `mimo` takes over @high | `mimo` @high |
+| `genius` | `glm` + `qwen-max`, `mimo` merges | `mimo` |
+| `plan` | `mimo` + `glm` + `qwen-max` → judge → synthesis | `mimo` |
+| `review-check` | five-seat committee, cascaded | — declared never a session model |
 
 `proxy: { "alias": "gpt" }` re-points which model the writing seat acts as, for when the writer is a
 fine merge and a thin coder — it is not a way to give a `render`-ended mode an execute face, and the
@@ -198,7 +197,7 @@ compose (`decide`, `route`, `verify`, `fileAgent`, and the `score` stage kind).
 
 | where | decides | written with |
 |---|---|---|
-| before the run | which **fusion** this request deserves — `cheap`, `quick`, `good`, or `best` | `route` |
+| before the run | which **fusion** this request deserves — any rung in `fusions` | `route` |
 | inside a run, per seat | which **model and which account** answers it, in what fallback order | `aliases.*.providers`, a slot's `candidates` |
 | inside a seat | whether a **decision** answers it outright, or escalates to a model call | a `decide` candidate + `sufficientWhen` |
 
@@ -288,32 +287,25 @@ a shape that quietly adds or drops a call is a bug:
 |---|---|---|
 | `single` | `single` | 1 |
 | `pair` | `parallel` → `single` | 3 |
-| `pair-judged` | `parallel` → `single` → `single` | 4 |
-| `lean` | `parallel` → `single` (synthesizer absorbs the judge) | 3 |
+| `handoff` | `single` → `single` `alsoSynthesize` | 2 — the first seat works, the second takes the draft over |
 | `committee` | `parallel` → `single` → `single` | 5 |
-| `committee-merged` | `parallel` → `single` `alsoSynthesize` | 4 |
-| `opinion` | `parallel` → `render` | 3, no generation |
-| `debate` | `parallel` `rounds: 3` → `render` | 9 |
-| `committee-cascaded` | `parallel` → `decide` → `single` → `single` | 5 + 1 decision call |
+| `review-committee` | `parallel` → `decide` → `single` → `single` | 5 + 1 decision call |
 
-`pair`, `committee`, and `committee-merged` ship as vocabulary with no fusion on them. The eight
-fusions sit on `single` (`cheap`, `quick`, and `default-smrt`, which adds one route decision),
-`lean` (`good`), `pair-judged` (`best`), `opinion` (`opinions`), `debate` (`debate`), and
-`committee-cascaded` (`review-check`).
+The engine also carries `rounds`, `render`, `score`, and cascades as vocabulary, pinned by the offline
+contracts with synthetic fixtures. The six fusions sit on `single` (`cheap`), `handoff` (`good`,
+`smart`), `pair` (`genius`), `committee` (`plan`), and `review-committee` (`review-check`).
 
 ### `fusion` — a mode bound to a roster, and the model pi registers
 
 ```json
 {
   "fusions": {
-    "best": {
-      "mode": "pair-judged",
-      "thinking": { "judge": "high", "synth": "high" },
+    "genius": {
+      "mode": "pair",
       "candidates": {
-        "technical": ["deepseek-pro"],
-        "skeptic": ["glm"],
-        "judge": ["deepseek-flash"],
-        "synth": ["glm-flash"]
+        "technical": ["glm"],
+        "skeptic": ["qwen-max"],
+        "merge": ["mimo"]
       },
       "fileAgent": false
     }
@@ -321,7 +313,7 @@ fusions sit on `single` (`cheap`, `quick`, and `default-smrt`, which adds one ro
 }
 ```
 
-This is the object you actually invoke: it becomes `fusion-matrix/best`. Every persona the mode uses
+This is the object you actually invoke: it becomes `fusion-matrix/genius`. Every persona the mode uses
 must appear in the roster and nothing may appear that the mode does not use — the loader rejects the
 mismatch rather than orphaning a model silently. Optional keys: `thinking` and `prompts` (per-persona
 overrides), `fileAgent`, `maxAdvance` (how many candidates one seat may walk, default 3), `verify`, `route`, and
@@ -334,18 +326,17 @@ another one:
 ```json
 {
   "fusions": {
-    "best": {
-      "mode": "pair-judged",
-      "proxy": { "alias": "gpt" },
-      "candidates": { "technical": ["deepseek-pro"], "skeptic": ["glm"], "judge": ["deepseek-flash"], "synth": ["glm-flash"] }
+    "genius": {
+      "proxy": { "alias": "glm" },
+      "thinking": { "merge": "harness" }
     }
   }
 }
 ```
 
 `proxy` and `route` on one fusion is a load error — a proxied turn runs no pipeline, so the route could
-never fire — and `thinking: { "synth": "harness" }` is legal for the writing seat alone, since no other
-seat has a harness level to inherit.
+never fire — and `thinking: { …: "harness" }` is legal for the writing seat alone (the example's
+`merge` is `genius`'s writing seat), since no other seat has a harness level to inherit.
 
 ### `candidate` — one slot in a roster, three forms
 
@@ -383,7 +374,7 @@ Each stage declares exactly one kind, plus its `input` (the connector below).
 
 ```jsonc
 { "parallel": ["technical", "skeptic", "systems"], "input": "prompt" }          // concurrent seats
-{ "parallel": […], "rounds": 3, "roundInput": "peers" }                          // debate: each round sees every OTHER seat's last answer
+{ "parallel": […], "rounds": 3, "roundInput": "peers" }                          // rounds: each round sees every OTHER seat's last answer
 { "single": "judge", "input": "panel" }                                          // one seat
 { "single": "judge", "input": "panel", "alsoSynthesize": true }                  // …and it answers, in the same message
 { "decide": { "instructions": "…", "criteria": { … } }, "input": "panel" }       // one backend call, no generation
@@ -472,7 +463,7 @@ Tune thresholds from that data, not intuition. Thresholds live in `sufficientWhe
   "route": {
     "instructions": "How much deliberation does this request need?",
     "criteria": {
-      "trivial":       { "description": "A direct factual or mechanical question", "then": "quick" },
+      "trivial":       { "description": "A direct factual or mechanical question", "then": "cheap" },
       "architectural": "System-level tradeoffs with long-lived consequences"
     }
   }
@@ -481,14 +472,14 @@ Tune thresholds from that data, not intuition. Thresholds live in `sufficientWhe
 
 One decision before anything runs; the option that wins may name another fusion to run instead. The
 action lives with the option it applies to, options without `then` simply run this fusion, and a
-target may not route again (one hop). The gate defaults to `minConfidence` 0.5 and the effective
+branch naming another fusion is followed to *its* route before anything runs (the loader keeps the
+named graph acyclic). The gate defaults to `minConfidence` 0.5 and the effective
 threshold is recorded, because "unsure means spend, not gamble" has to be visible when it declines.
 An outage is reported as an outage — never as "no option matched".
 
-This is the escalation route: `default-smrt` sends `"Reply with exactly: ZQX1"` to `cheap`, and keeps
-an architectural prompt on its own seat — its criteria are `cheap`, `quick`, `good`, and `best`, with
-`unsure` falling to `quick`, and it is the packaged `defaultFusion`. As recorded on 2026-09-18, the
-router shipped then (`review-routed`; `default-smrt` has since replaced it) printed
+The six paths ship no `route` — the ladder is the roster itself — but the shape is configuration
+anyone can add (the review class map in `docs/plan.md` §Step 10 is the documented example). As
+recorded on 2026-09-18, the router shipped then printed
 ` ├─ ↪ routed to quick (trivial, conf 1.00)` and
 ` ├─  route declined (architectural); running review-routed`.
 
@@ -538,7 +529,7 @@ difference between a classifier's label and a review that found nothing.
 ### `fileAgent` — files out of a synthesis
 
 ```json
-{ "fusions": { "best": { "fileAgent": { "alias": "deepseek-flash" } } } }
+{ "fusions": { "genius": { "fileAgent": { "alias": "deepseek-flash" } } } }
 ```
 
 One cheap seat, after the synthesis, decides whether the answer contains files worth saving and asks
@@ -552,14 +543,15 @@ directory, refuses absolute paths and `..`, and reports what it refused.
 ## Reviewing with a fusion
 
 Reviews are their own traffic: a packet (a diff, the criteria it was written against, the validation evidence)
-goes in, and a *disposition* — a verdict and findings with severities — comes back. `smrt-review` picks the rung
-by blast radius, and each rung is a deliberating rung that can never be a session model:
+goes in, and a *disposition* — a verdict and findings with severities — comes back. The six paths ship
+one review rung, and it is a deliberating rung that can never be a session model:
 
 ```bash
-omp -p "@/tmp/packet.md" --model fusion-matrix/smrt-review --no-tools   # routed: cheap, committee, or deep
-omp -p "@/tmp/packet.md" --model fusion-matrix/review-check --no-tools  # the committee, unrouted
-omp -p "@/tmp/packet.md" --model fusion-matrix/review-quick --no-tools  # one adversarial seat, then the disposition
+omp -p "@/tmp/packet.md" --model fusion-matrix/review-check --no-tools  # the cascaded committee, then the disposition
 ```
+
+A `review: true` `route` over it can pick review rungs by class (blast radius) — that map is
+configuration, documented in `docs/plan.md` §Step 10.
 
 `--no-tools` is not required — an `execute: false` rung deliberates with tools present, which is what
 `execute: false` is for — but a review packet carries the diff as text, and leaving the tool schemas out of the
@@ -762,11 +754,16 @@ fusion or this repository:
 ```
 
 Top-level knobs: `providerId` (default `fusion-matrix`), `providerName`, `defaultFusion` for the tool
-and the bare `/matrix`.
+and a no-id `/matrix <prompt>`.
 
 ## Commands, the tool, and the doctor
 
-- `/matrix <id> <prompt>` — run a named fusion; `/matrix` alone uses `defaultFusion`.
+- `/matrix` — open the interface (the fusions / aliases / personas tabs over the metrics store) as a
+  mounted panel: the harness keeps its terminal, which is why it is a component and not
+  the standalone driver run underneath a full-screen host. `/matrix fusions|aliases|personas` opens on
+  that tab.
+- `/matrix <id> <prompt>` — run a named fusion; a `/matrix <prompt>` with no id uses `defaultFusion`,
+  named first (`no fusion "…"; known: …`) so a retired or mistyped id is never swallowed silently.
 - `/matrix-info` — resolvable aliases with their routes, modes, fusions with rosters and execute faces, backends, layers.
 - `/matrix-label <work-item> <landed|review|findings|ci-red|blocked|abandoned> [evidence]` — record what this
   session's runs were for and how they ended. Append-only, latest wins; the report joins the label to the
@@ -797,8 +794,10 @@ the same records — `~/.omp/agent/matrix.db` by default — and the interface r
 ```bash
 node scripts/ingest-metrics.mjs                 # both harnesses' stores into the index
 node scripts/ingest-metrics.mjs --rebuild       # replace it (the `rm` of the recovery rule)
-node scripts/matrix-tui.mjs                     # the roster, the rungs and the routes, with rain
-node scripts/matrix-tui.mjs --plain --no-rain   # one frame as text
+node scripts/matrix-tui.mjs                     # the roster, the rungs and the routes
+node scripts/matrix-tui.mjs --rain              # with the rain behind it (toggle: a)
+node scripts/matrix-tui.mjs --scheme ember      # the primitives' colours (matrix|ember|glacier, or a JSON file)
+node scripts/matrix-tui.mjs --plain             # one frame as text
 ```
 
 The JSONL stays authoritative and the index is rebuildable: ingesting twice is identical, `--rebuild`
@@ -810,15 +809,27 @@ the harness's catalogue), `list` (the same model's rate under another provider, 
 turn is comparable to a metered rung), or `no rate`. A total never mixes bases, and money always prints
 with the count of seats it covers.
 
-The interface joins that index to the configuration, three tabs at a time: **aliases** (what each alias
-names, its routes, and what the store saw it do), **fusions** (how each rung runs, how it ended, what
-it cost, what its reviews produced) and **routes** (per fusion and seat: the ordered candidates from
-config, which alias actually answered, and every route refused). `e` proposes a change — a seat's
-candidate alias, or an alias's route order — and the status bar shows it, the layer it would be written
-to, and whether the config still validates; `s` writes it and `esc` discards it. The rain is a real
-field (`scripts/tui-rain.mjs`, seeded and stepped by frame), drawn under the panels, and `a` turns it
-off; `c` drops the colour entirely, and `NO_COLOR` does the same on start. Every unit of the interface
-is pure and tested; only the driver needs a terminal.
+The interface joins that index to the configuration, three tabs at a time: **fusions** (how each rung
+runs, how it ended, what it cost, what its reviews produced — with its routes and personas as rows
+underneath), **aliases** (what each alias names, its routes, and what the store saw it do), and
+**personas** (the seats: their prompts, knobs, and the fusions that place them). Missing is named,
+never zeroed: a rung the store saw zero times is `0`, a store that could not load is `—`, and a rung
+the store saw but the config no longer declares is a row of its own, marked `history` — the index
+keeps the rungs the roster has forgotten, so the table never reports a history it cannot place as no
+history at all. `e` proposes a
+change — a seat's candidate alias, an alias's route order, a persona's prompt or knobs — and the
+status bar shows it, the layer it would be written to, and whether the config still validates; `s`
+writes it and `esc` discards it. Every row that names a primitive wears that primitive's own colour —
+the five stage kinds, the pieces a decision walks, the alias a candidate names — and the colours come
+from schemes: `matrix` by default, `--scheme ember` or `glacier`, or `--scheme ./mine.json` laid over
+the default, with a name nobody knows refused at startup. The rain is a real field
+(`scripts/tui-rain.mjs`, seeded and stepped by frame) drawn under the interface — a row's own
+background is never a window onto it — and it starts off: `--rain` or `a` brings it, `c` drops the
+colour entirely, and `NO_COLOR`
+does the same on start. Every unit of the interface is pure and tested; only the driver needs a
+terminal. In a session, `/matrix` mounts that same interface as a panel (`/matrix
+fusions|aliases|personas` opens on a tab), so the interface opens inside a full-screen host without
+the standalone driver ever competing with it for the terminal.
 
 ## Verifying the package itself
 
