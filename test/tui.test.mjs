@@ -579,6 +579,7 @@ test("a scheme is a name or a file, and a name nobody knows is refused at startu
     fs.writeFileSync(bad, contents);
     assert.throws(() => resolveScheme(bad), /is not a scheme map/, `${name} is refused`);
   }
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test("the tree paints every primitive in its scheme's colour", () => {
